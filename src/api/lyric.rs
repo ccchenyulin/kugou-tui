@@ -268,16 +268,18 @@ fn attach_translations(lyric: &mut Lyric, krc_text: &str) {
         return;
     };
 
-    // 按 `type` 取轨道：1 = 翻译，0 = 音译。
+    // 各轨按 `type` 编号，但含义在不同歌里不固定（Bad Apple!! 的 type=1 是罗马音、
+    // type=2 才是中文译文）。所以**不能**硬编码 type 取轨，要按「中文字符密度」动态挑——
+    // 密度最高的是译文，最低的是音译/罗马音。
     //
-    // 注意**不能**用 `language` 区分：实测同一首歌里两个轨道的 `language` 都是 0，
-    // 只有 `type` 不同（Bad Apple!! 就是这样）。按 `language` 找会两条都指向音译，
-    // 译文永远取不到——这个坑踩过一次，下面的用例锁着它。
-    let track = |kind: i64| -> Option<Vec<String>> {
-        content
-            .iter()
-            .find(|section| section.get("type").and_then(serde_json::Value::as_i64) == Some(kind))
-            .and_then(|section| section.get("lyricContent"))
+    // `language` 字段同理不能用（实测两轨 language 都是 0），但跟我们的挑法无关。
+    let mut tracks: Vec<(i64, String)> = Vec::new();
+    for section in content {
+        let Some(kind) = section.get("type").and_then(serde_json::Value::as_i64) else {
+            continue;
+        };
+        let lines = section
+            .get("lyricContent")
             .and_then(|value| value.as_array())
             .map(|items| {
                 items
@@ -285,24 +287,68 @@ fn attach_translations(lyric: &mut Lyric, krc_text: &str) {
                     .filter_map(flatten_lyric_content)
                     .collect::<Vec<_>>()
             })
-    };
+            .unwrap_or_default();
+        let joined: String = lines.join("\n");
+        if !joined.trim().is_empty() {
+            tracks.push((kind, joined));
+        }
+    }
+    if tracks.is_empty() {
+        return;
+    }
 
-    let translation = track(1);
-    let romanization = track(0);
+    let hanzi_ratio = |text: &str| -> f64 {
+        let (chars, hanzi) =
+            text.chars()
+                .filter(|ch| !ch.is_whitespace())
+                .fold((0usize, 0usize), |(c, h), ch| {
+                    (
+                        c + 1,
+                        h + if matches!(ch, '\u{4e00}'..='\u{9fff}') {
+                            1
+                        } else {
+                            0
+                        },
+                    )
+                });
+        if chars == 0 {
+            0.0
+        } else {
+            hanzi as f64 / chars as f64
+        }
+    };
+    tracks.sort_by(|a, b| {
+        hanzi_ratio(&b.1)
+            .partial_cmp(&hanzi_ratio(&a.1))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut iter = tracks.into_iter();
+    let (translation_kind, translation_text) = iter.next().unwrap();
+    let romanization = iter.next();
+
+    // 预先切好行，避免在内层循环里反复 split（也顺带解决借用/move 的麻烦）
+    let translation_lines: Vec<&str> = translation_text.lines().collect();
+    // 先把音译轨的整段文本取出来（拥有所有权），再按行切片，
+    // 否则引用的是闭包里的临时变量，编译不过
+    let romanization_text: Option<String> = match romanization {
+        Some((other_kind, other_text)) if other_kind != translation_kind => Some(other_text),
+        _ => None,
+    };
+    let romanization_lines: Vec<&str> = romanization_text
+        .as_deref()
+        .map(|text| text.lines().collect())
+        .unwrap_or_default();
 
     for (index, line) in lyric.lines.iter_mut().enumerate() {
-        if let Some(items) = translation.as_ref() {
-            if let Some(text) = items.get(index) {
-                if !text.trim().is_empty() {
-                    line.translation = Some(text.clone());
-                }
+        if let Some(text) = translation_lines.get(index) {
+            if !text.trim().is_empty() {
+                line.translation = Some((*text).to_string());
             }
         }
-        if let Some(items) = romanization.as_ref() {
-            if let Some(text) = items.get(index) {
-                if !text.trim().is_empty() {
-                    line.romanization = Some(text.clone());
-                }
+        if let Some(text) = romanization_lines.get(index) {
+            if !text.trim().is_empty() {
+                line.romanization = Some((*text).to_string());
             }
         }
     }
