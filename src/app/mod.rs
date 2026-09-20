@@ -113,6 +113,10 @@ impl App {
         };
 
         app.announce_readiness();
+        // 放在 announce_readiness 之后：这种故障比「未登录」严重，提示不能被覆盖
+        if app.audio.spawn_failed() {
+            app.state.error("音频线程启动失败，播放不可用（详见日志）");
+        }
         app.ensure_device_fingerprint();
         app.refresh_cache_usage();
         app.fetch_vip_status();
@@ -249,6 +253,13 @@ impl App {
         self.state.config.volume = self.state.volume;
         self.state.config.playback_mode = self.state.queue.mode();
         self.state.config.cache_dir = self.cache.root().to_path_buf();
+        // `--api-base` 只覆盖本次会话，不能落盘。
+        //
+        // 地址属于音源自己（见 `Config::sync_active_source` 的注释）。把临时值写进
+        // 配置文件，就会出现「选中音源是概念版 :3001、顶层却写着 :3000」——启动器
+        // 照顶层值去探活 / 拉服务就会找错端口，程序直接起不来。
+        let active = self.state.config.active_source_kind();
+        self.state.config.api_base = self.state.config.sources.profile(active).api_base.clone();
 
         match self.state.config.save() {
             Ok(()) => tlog!(

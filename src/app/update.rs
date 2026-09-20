@@ -1437,8 +1437,10 @@ impl App {
     fn apply_login(&mut self, token: String, userid: String) {
         let cookie = format!("token={token}; userid={userid}");
 
-        self.state.config.cookie = Some(cookie.clone());
-        self.api.set_cookie(Some(cookie));
+        self.state.config.cookie = Some(cookie);
+        // 必须走 `cookie_header()`：它会把 dfid 拼进去。直接用裸 cookie 会把
+        // 已有的 dfid 冲掉，本次会话取播放直链就会报「本次请求需要验证」。
+        self.api.set_cookie(self.state.config.cookie_header());
 
         let config_path = Config::path();
         match self.state.config.save() {
@@ -1479,10 +1481,12 @@ impl App {
                 .warn(format!("音源已切换，但保存配置失败：{error}"));
         }
 
-        // 用新音源的地址与身份重建 HTTP 客户端
+        // 用新音源的地址与身份重建 HTTP 客户端。
+        // cookie 必须走 `cookie_header()`（而不是 `config.cookie`）：前者会带上 dfid，
+        // 缺了它 `/song/url` 会返回 errcode 20028「本次请求需要验证」。
         match crate::api::ApiClient::new(
             &self.state.config.api_base,
-            self.state.config.cookie.clone(),
+            self.state.config.cookie_header(),
             self.state.config.proxy.as_deref(),
         ) {
             Ok(client) => {
@@ -1490,6 +1494,9 @@ impl App {
                 // 身份可能变了，会员信息要重新取
                 self.state.vip_label = None;
                 self.fetch_vip_status();
+                // dfid 是平台相关的：新音源的档案里可能还没有，不补一个的话
+                // 该音源在本会话内取链会一直失败（启动时的探测只跑一次）。
+                self.ensure_device_fingerprint();
                 // 两个平台的登录态不通用：切过去若是空的，得明确告诉用户重新扫码，
                 // 否则他会以为「切了概念版还是只能试听」——其实只是没登录。
                 if self.state.config.cookie.is_none() {

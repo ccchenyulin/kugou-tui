@@ -194,7 +194,18 @@ impl Config {
     ///
     /// 文件里存着登录 token，所以目录收成 `0700`、文件收成 `0600`——默认的
     /// `0644` 会让同机器上的其他用户直接读到你的账号凭据。
-    pub fn save(&self) -> Result<()> {
+    ///
+    /// # 为什么这里要自己 sync 一次
+    ///
+    /// 顶层 `cookie` / `dfid` 是当前会话的真相（`App` 里所有读写都走它们），
+    /// 而启动时 `switch_source()` 会**反过来**用音源档案覆盖这两个顶层字段。
+    /// 如果写盘前不先回填进档案，登录后重启就会退回未登录、dfid 也要重新探测。
+    ///
+    /// 曾经只在「按 v 切音源」这一个地方做同步，结果漏掉了登录与自动取 dfid
+    /// 两条路径。同步收进 `save()` 之后，任何一次落盘都不可能再漏。
+    pub fn save(&mut self) -> Result<()> {
+        self.sync_active_source();
+
         let path = Self::path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -378,6 +389,7 @@ fn restrict_permissions(path: &Path, mode: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::Config;
+    use crate::source::SourceKind;
 
     #[test]
     fn normalizes_api_base_and_volume() {
@@ -389,6 +401,96 @@ mod tests {
         config = config.normalized();
         assert_eq!(config.api_base, "http://127.0.0.1:3000");
         assert!((config.volume - 1.0).abs() < f32::EPSILON);
+    }
+
+    /// 端到端锁住「登录态与 dfid 必须活过一次重启」。
+    ///
+    /// 启动时 `main.rs` 会无条件 `switch_source(active)`，用**音源档案**覆盖顶层字段。
+    /// 所以只写顶层而不回填进档案，重启后登录态就没了（同理 dfid 要重新探测）。
+    ///
+    /// 这里跑真实落盘 + 真实 `load()`。为了不碰用户配置，先把 `XDG_CONFIG_HOME`
+    /// 指到临时目录，结束后恢复原值——`catch_unwind` 保证失败时也会恢复。
+    #[test]
+    fn login_survives_restart() {
+        let temp = std::env::temp_dir().join(format!("kugou-tui-cfgtest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).expect("建临时配置目录");
+
+        // SAFETY: 单测进程内临时改写并恢复；其它测试不读配置路径，无交叉影响。
+        let previous = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp) };
+
+        let outcome = std::panic::catch_unwind(|| {
+            let mut config = Config::default();
+            config.sources.active = SourceKind::KugouConcept;
+            config.switch_source(SourceKind::KugouConcept);
+            // 模拟「应用内扫码登录成功 + 自动取到 dfid」：只写顶层，不手动 sync
+            config.cookie = Some("token=abc; userid=42".to_string());
+            config.dfid = Some("df-xyz".to_string());
+            config.save().expect("保存配置");
+
+            // 模拟重启：main.rs 在 merge_cli 之前会无条件 switch_source(active)
+            let mut restarted = Config::load();
+            let active = restarted.active_source_kind();
+            restarted.switch_source(active);
+
+            assert_eq!(
+                restarted.cookie.as_deref(),
+                Some("token=abc; userid=42"),
+                "重启后登录态丢失"
+            );
+            assert_eq!(
+                restarted.dfid.as_deref(),
+                Some("df-xyz"),
+                "重启后 dfid 丢失"
+            );
+            assert!(restarted.is_logged_in());
+        });
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("XDG_CONFIG_HOME", value) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+
+        assert!(outcome.is_ok(), "登录态/设备指纹在重启后丢失");
+    }
+
+    /// 锁住 H1 的修复：顶层 cookie/dfid 必须能被回填进选中音源的档案。
+    ///
+    /// 启动时 `switch_source()` 会**反过来**用档案覆盖顶层字段，所以只写顶层而不
+    /// 同步进档案的话，登录态和 dfid 下次启动就没了。
+    #[test]
+    fn sync_active_source_writes_identity_into_profile() {
+        let mut config = Config {
+            cookie: Some("token=t; userid=1".to_string()),
+            dfid: Some("df-1".to_string()),
+            ..Config::default()
+        };
+        config.sources.active = SourceKind::KugouConcept;
+
+        config.sync_active_source();
+
+        let profile = config.sources.profile(SourceKind::KugouConcept);
+        assert_eq!(profile.cookie.as_deref(), Some("token=t; userid=1"));
+        assert_eq!(profile.device_id.as_deref(), Some("df-1"));
+        // 另一个音源不该被牵连（两个平台的登录态不通用）
+        assert!(config.sources.profile(SourceKind::Kugou).cookie.is_none());
+    }
+
+    /// 同步刻意**不**回写 api_base：地址属于音源自己，不该被运行时的临时值污染。
+    #[test]
+    fn sync_active_source_keeps_profile_address() {
+        let mut config = Config {
+            api_base: "http://127.0.0.1:9999".to_string(),
+            ..Config::default()
+        };
+        config.sources.active = SourceKind::Kugou;
+        config.sync_active_source();
+        assert_eq!(
+            config.sources.profile(SourceKind::Kugou).api_base,
+            "http://127.0.0.1:3000"
+        );
     }
 
     #[test]
