@@ -470,8 +470,6 @@ impl App {
 
     fn move_selection(&mut self, delta: isize) {
         match (self.state.tab, self.state.focus) {
-            // 可视化页没有列表，方向键与 Enter 在它上面没有意义
-            (Tab::Visualizer, _) => {}
             // 侧边栏里上下移动 = 切换标签页（侧边栏的高亮就是当前标签）
             (_, Focus::Sidebar) => self.move_sidebar(delta),
             (_, Focus::Queue) => {
@@ -488,13 +486,15 @@ impl App {
             (Tab::Ranks, Focus::Secondary) => self.state.ranks.songs.move_by(delta),
             (Tab::Cloud, Focus::Primary) => self.state.cloud.list.move_by(delta),
             (Tab::Cloud, Focus::Secondary) => self.state.cloud.songs.move_by(delta),
-            // 可视化页没有列表，方向键与 Enter 在它上面没有意义
+            // 可视化页没有列表。必须放在最后：否则会抢在 Sidebar / Queue 之前，
+            // 导致这一页连侧边栏切换标签都不响应（实测踩过）。放在最后时，焦点在
+            // 侧边栏或队列仍走上面的分支；焦点在主区则退化为切换标签页，避免
+            // 上下键完全无响应。
+            (Tab::Visualizer, _) => self.move_sidebar(delta),
         }
     }
     fn move_selection_edge(&mut self, to_first: bool) {
         match (self.state.tab, self.state.focus) {
-            // 可视化页没有列表，方向键与 Enter 在它上面没有意义
-            (Tab::Visualizer, _) => {}
             // 侧边栏：跳到第一个 / 最后一个标签
             (_, Focus::Sidebar) => {
                 let target = if to_first {
@@ -574,6 +574,17 @@ impl App {
                     self.state.cloud.songs.select_first();
                 } else {
                     self.state.cloud.songs.select_last();
+                }
+            }
+            // 同 move_selection：必须放在最后，否则会抢在 Sidebar / Queue 之前。
+            (Tab::Visualizer, _) => {
+                let target = if to_first {
+                    Tab::ALL[0]
+                } else {
+                    Tab::ALL[Tab::ALL.len() - 1]
+                };
+                if target != self.state.tab {
+                    self.switch_tab_inner(target, false);
                 }
             }
         }
