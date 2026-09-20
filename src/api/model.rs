@@ -664,6 +664,45 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// 搜索结果的解析（真实响应结构，含 FileName / OriSongName / FileHash / Duration）。
+    ///
+    /// 用真实结构而不是手写 mock，避免上游改字段名时测试还绿着。
+    #[test]
+    fn parses_search_result_payload() {
+        let data = json!({
+            "pagesize": 5,
+            "page": 1,
+            "total": 480,
+            "correctiontype": 0,
+            "lists": [
+                {
+                    "FileName": "Alstroemeria Records - Bad Apple!! (feat.nomico)",
+                    "SingerName": "Alstroemeria Records",
+                    "OriSongName": "Bad Apple!!",
+                    "FileHash": "F20A1FDBE025D06207B6BC31F0699F0A",
+                    "ExtName": "mp3",
+                    "Duration": 317,
+                    "AlbumID": 15130869,
+                    "AlbumName": "10th Anniversary Bad Apple!! feat.nomico PHASE3",
+                    "MixSongID": 130275462
+                }
+            ],
+            "sec_aggre_v2": [],
+            "istag": 0,
+            "size": 0
+        });
+
+        let songs = extract_songs(&data);
+        assert_eq!(songs.len(), 1, "应解析出 1 首，实际 {}", songs.len());
+
+        let song = &songs[0];
+        // OriSongName 是干净歌名，应优先于带歌手的 FileName
+        assert_eq!(song.name, "Bad Apple!!");
+        assert_eq!(song.hash, "F20A1FDBE025D06207B6BC31F0699F0A");
+        assert_eq!(song.duration_ms, 317_000, "Duration 是秒，应换算成毫秒");
+        assert_eq!(song.album_audio_id, 130_275_462);
+    }
+
     #[test]
     fn parses_search_result_song() {
         let raw = json!({
