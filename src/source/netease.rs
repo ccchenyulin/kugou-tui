@@ -223,3 +223,78 @@ fn attach_netease_translation(lyric: &mut Lyric, data: &Value) {
         }
     }
 }
+
+// ============================================================================
+// 扫码登录
+// ============================================================================
+//
+// NeteaseCloudMusicApi 的扫码三步：
+//   1. `/login/qr/key`            → unikey
+//   2. `/login/qr/create?key=...` → 二维码内容（这里要的是文本，见下）
+//   3. `/login/qr/check?key=...`  → 状态
+//
+// ⚠️ 与本模块其它方法一样**未经真实服务验证**。状态码语义是公开的：
+// 800 过期 / 801 等待扫码 / 802 待确认 / 803 已授权。
+
+/// 取二维码 key（unikey）。
+pub async fn login_qr_key(client: &ApiClient) -> Result<String> {
+    let root = client.get_json_uncached("/login/qr/key", &[]).await?;
+    let data = data_of(&root);
+    pick_string(data, &["unikey", "key"]).ok_or_else(|| {
+        crate::error::AppError::Other("取登录二维码 key 失败：响应里没有 unikey".to_string())
+    })
+}
+
+/// 取二维码内容。
+///
+/// 酷狗那套接口返回的就是二维码文本（由 TUI 自己渲染成方块）；网易云这个接口
+/// 默认返回**图片链接**（`qrimg`），要文本得显式带上 `qrimg=false`。
+/// 统一取文本，渲染交给 `qr_lines()`，与酷狗共用一套画法。
+pub async fn login_qr_create(client: &ApiClient, key: &str) -> Result<String> {
+    let root = client
+        .get_json_uncached(
+            "/login/qr/create",
+            &[("key", key.to_string()), ("qrimg", "false".to_string())],
+        )
+        .await?;
+    let data = data_of(&root);
+
+    pick_string(data, &["qrurl", "url", "qrCode"])
+        .or_else(|| {
+            data.get("data")
+                .and_then(|inner| pick_string(inner, &["qrurl", "url"]))
+        })
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| {
+            crate::error::AppError::Other("生成登录二维码失败：响应里没有二维码内容".to_string())
+        })
+}
+
+/// 轮询扫码状态。
+pub async fn login_qr_check(client: &ApiClient, key: &str) -> Result<crate::api::cloud::QrCheck> {
+    use crate::api::cloud::{QrCheck, QrStatus};
+
+    let root = client
+        .get_json_uncached("/login/qr/check", &[("key", key.to_string())])
+        .await?;
+    let data = data_of(&root);
+    let code = pick_i64(data, &["code"]).unwrap_or(800);
+
+    // ⚠️ 网易云的登录态由**服务端**持有（NeteaseCloudMusicApi 自己管理 cookie），
+    // 授权成功时响应里没有 token / userid 可给客户端。因此这里 token 留 None，
+    // 业务层据此把「已登录」标记为该音源的状态，而不是去写 config.cookie。
+    let status = match code {
+        800 => QrStatus::Expired,
+        801 => QrStatus::Waiting,
+        802 => QrStatus::Pending,
+        803 => QrStatus::Success,
+        // 其它一律当过期，避免出现「一直卡在等待中」的假象
+        _ => QrStatus::Expired,
+    };
+
+    Ok(QrCheck {
+        status,
+        token: None,
+        userid: None,
+    })
+}

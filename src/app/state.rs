@@ -606,6 +606,8 @@ pub struct AppState {
     pub pending_confirm: Option<ConfirmAction>,
     /// 应用内扫码登录；`None` 表示未在进行登录。
     pub login: Option<LoginState>,
+    /// 登录前的音源选择器。非空时它是模态的，会拦截所有按键。
+    pub login_picker: Option<LoginPicker>,
     /// 文本输入弹窗；`None` 表示没有弹出的输入框。
     pub prompt: Option<PromptState>,
     /// 当前封面的字符画，以及它属于哪首歌（避免切歌后继续显示上一张）。
@@ -615,6 +617,36 @@ pub struct AppState {
     /// 上次鼠标点击命中的（区域, 数据下标）。
     last_click: Option<(HitTarget, Option<usize>)>,
     last_click_at: std::time::Instant,
+}
+
+/// 登录时的音源选择器。
+///
+/// 多个音源都能登录后，「按 L 登录哪个」就成了必须回答的问题——登录态是
+/// 按音源分开存的，登录前必须选定目标，否则凭据会存错地方。
+#[derive(Debug, Clone, Default)]
+pub struct LoginPicker {
+    /// 候选音源（只列支持登录的）。
+    pub candidates: Vec<crate::source::SourceKind>,
+    pub cursor: ListState,
+}
+
+impl LoginPicker {
+    /// 当前选中的音源。
+    pub fn selected(&self) -> Option<crate::source::SourceKind> {
+        let index = self.cursor.selected().unwrap_or(0);
+        self.candidates.get(index).copied()
+    }
+
+    /// 上下移动选中。
+    pub fn move_by(&mut self, delta: isize) {
+        if self.candidates.is_empty() {
+            return;
+        }
+        let len = self.candidates.len();
+        let current = self.cursor.selected().unwrap_or(0) as isize;
+        let next = (current + delta).clamp(0, len as isize - 1) as usize;
+        self.cursor.select(Some(next));
+    }
 }
 
 /// 应用内扫码登录的状态。
@@ -756,6 +788,7 @@ impl AppState {
             sort_descending: true,
             pending_confirm: None,
             login: None,
+            login_picker: None,
             prompt: None,
             vip_label: None,
         };

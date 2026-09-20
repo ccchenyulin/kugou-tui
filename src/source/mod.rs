@@ -89,6 +89,12 @@ pub struct Capability {
     pub cover: bool,
     /// 是否支持扫码登录。
     pub login: bool,
+    /// 登录态是否由**客户端**持有（需要存进配置）。
+    ///
+    /// 酷狗是这样：token 由客户端保存，每次请求带上。
+    /// 网易云的 NeteaseCloudMusicApi 则是服务端自己管 cookie，客户端拿不到
+    /// token——这时登录成功只意味着「服务端那边登上了」，不该去写 config.cookie。
+    pub client_token: bool,
     /// 是否支持「歌单广场 / 榜单 / 歌手」这类目录浏览。
     pub catalog: bool,
     /// 是否支持云端歌单的读写（收藏、同步、增删改）。
@@ -122,15 +128,28 @@ impl SourceKind {
                 lyric: true,
                 cover: true,
                 login: true,
+                client_token: true,
                 catalog: true,
                 cloud: true,
             },
             // 第三方服务：搜索/播放/歌词/封面可用，目录与云端同步暂不支持
-            SourceKind::Netease | SourceKind::QqMusic => Capability {
+            // 网易云：NeteaseCloudMusicApi 提供完整的扫码登录与云端歌单接口
+            SourceKind::Netease => Capability {
+                stream: true,
+                lyric: true,
+                cover: true,
+                login: true,
+                client_token: false,
+                catalog: false,
+                cloud: false,
+            },
+            // QQ 音乐：服务端的登录接口未确认，先不开放
+            SourceKind::QqMusic => Capability {
                 stream: true,
                 lyric: true,
                 cover: true,
                 login: false,
+                client_token: false,
                 catalog: false,
                 cloud: false,
             },
@@ -338,6 +357,37 @@ impl SourceKind {
             Self::Kugou | Self::KugouConcept => client.fetch_lyric(song).await,
             Self::Netease => netease::fetch_lyric(client, song).await,
             Self::QqMusic => qqmusic::fetch_lyric(client, song).await,
+        }
+    }
+
+    /// 扫码登录第一步：取 key。
+    pub async fn login_qr_key(self, client: &ApiClient) -> Result<String> {
+        match self {
+            Self::Kugou | Self::KugouConcept => client.login_qr_key().await,
+            Self::Netease => netease::login_qr_key(client).await,
+            Self::QqMusic => Err(unsupported("登录")),
+        }
+    }
+
+    /// 扫码登录第二步：取二维码内容。
+    pub async fn login_qr_create(self, client: &ApiClient, key: &str) -> Result<String> {
+        match self {
+            Self::Kugou | Self::KugouConcept => client.login_qr_create(key).await,
+            Self::Netease => netease::login_qr_create(client, key).await,
+            Self::QqMusic => Err(unsupported("登录")),
+        }
+    }
+
+    /// 扫码登录第三步：轮询结果。
+    pub async fn login_qr_check(
+        self,
+        client: &ApiClient,
+        key: &str,
+    ) -> Result<crate::api::cloud::QrCheck> {
+        match self {
+            Self::Kugou | Self::KugouConcept => client.login_qr_check(key).await,
+            Self::Netease => netease::login_qr_check(client, key).await,
+            Self::QqMusic => Err(unsupported("登录")),
         }
     }
 

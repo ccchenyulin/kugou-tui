@@ -17,8 +17,8 @@ use crate::api::cloud::QrStatus;
 use crate::api::model::{Artist, Playlist, RankBoard, Song};
 use crate::app::App;
 use crate::app::state::{
-    ConfirmAction, CoverArt, EntryList, Focus, HitTarget, HitZone, LoginState, PromptAction,
-    PromptState, Tab, move_selection, select_first, select_last,
+    ConfirmAction, CoverArt, EntryList, Focus, HitTarget, HitZone, LoginPicker, LoginState,
+    PromptAction, PromptState, Tab, move_selection, select_first, select_last,
 };
 use crate::config::Config;
 use crate::source::SourceKind;
@@ -229,6 +229,36 @@ impl App {
                     self.state.should_quit = true;
                     self.state.force_quit = matches!(action, Action::ForceQuit);
                 }
+            }
+            return;
+        }
+
+        // 登录音源选择器是模态的：只放行移动、确认、取消与退出。
+        // 这里不持有 picker 的借用再去调 self 的方法（会冲突），
+        // 只在需要改选中时才短暂借用。
+        if self.state.login_picker.is_some() {
+            match action {
+                Action::MoveUp => {
+                    if let Some(picker) = self.state.login_picker.as_mut() {
+                        picker.move_by(-1);
+                    }
+                }
+                Action::MoveDown => {
+                    if let Some(picker) = self.state.login_picker.as_mut() {
+                        picker.move_by(1);
+                    }
+                }
+                Action::Submit => self.confirm_login_source(),
+                Action::Cancel => {
+                    self.state.login_picker = None;
+                    self.state.info("已取消登录");
+                }
+                Action::Quit => self.state.should_quit = true,
+                Action::ForceQuit => {
+                    self.state.should_quit = true;
+                    self.state.force_quit = true;
+                }
+                _ => {}
             }
             return;
         }
@@ -1397,6 +1427,56 @@ impl App {
     /// 流程是 `/login/qr/key` → `/login/qr/create` → 轮询 `/login/qr/check`。
     /// 二维码直接渲染在界面上，不用切终端，也不用额外依赖 `qrencode` 之类的命令行工具。
     fn start_login(&mut self) {
+        // 先决定「给哪个音源登录」：登录态按音源分开存，登错了地方等于没登。
+        self.open_login_picker();
+    }
+
+    /// 弹出音源选择器。只有一个候选时直接跳过，不多一次交互。
+    fn open_login_picker(&mut self) {
+        let candidates: Vec<SourceKind> = SourceKind::ALL
+            .iter()
+            .copied()
+            .filter(|kind| kind.capability().login)
+            .collect();
+
+        match candidates.len() {
+            0 => self.state.warn("当前没有任何音源支持登录"),
+            1 => self.begin_login_for(candidates[0]),
+            _ => {
+                let mut picker = LoginPicker {
+                    candidates,
+                    ..Default::default()
+                };
+                // 默认停在当前音源上：多数情况下用户就是想登这个
+                let current = self.state.config.active_source_kind();
+                if let Some(index) = picker.candidates.iter().position(|kind| *kind == current) {
+                    picker.cursor.select(Some(index));
+                } else {
+                    picker.cursor.select(Some(0));
+                }
+                self.state.login_picker = Some(picker);
+            }
+        }
+    }
+
+    /// 选定了音源：必要时先切过去（会重建 HTTP 客户端），再走扫码。
+    fn confirm_login_source(&mut self) {
+        let Some(picker) = self.state.login_picker.take() else {
+            return;
+        };
+        let Some(kind) = picker.selected() else {
+            return;
+        };
+        self.begin_login_for(kind);
+    }
+
+    /// 对指定音源开始扫码登录。
+    fn begin_login_for(&mut self, kind: SourceKind) {
+        // 音源不同就先切过去：登录请求要发到那个服务上，凭据也要存进它的档案。
+        if kind != self.state.config.active_source_kind() {
+            self.switch_source_to(kind);
+        }
+
         // 已登录时**不能**就此挡住。
         //
         // `logged_in` 只看 cookie 里有没有 `token=` 字段，判断不出 token 是否已经
@@ -1438,9 +1518,10 @@ impl App {
 
         let api = self.api.clone();
         let bus = self.bus.clone();
+        let active_source = self.state.config.active_source_kind();
 
         self.runtime.spawn(async move {
-            let key = match api.login_qr_key().await {
+            let key = match active_source.login_qr_key(&api).await {
                 Ok(key) => key,
                 Err(error) => {
                     bus.fail("获取登录二维码失败", error);
@@ -1448,7 +1529,7 @@ impl App {
                 }
             };
 
-            match api.login_qr_create(&key).await {
+            match active_source.login_qr_create(&api, &key).await {
                 Ok(content) => bus.emit(Loaded::LoginQr { key, content }),
                 Err(error) => bus.fail("生成登录二维码失败", error),
             }
@@ -1467,9 +1548,10 @@ impl App {
         let key = login.key.clone();
         let api = self.api.clone();
         let bus = self.bus.clone();
+        let active_source = self.state.config.active_source_kind();
 
         self.runtime.spawn(async move {
-            let check = match api.login_qr_check(&key).await {
+            let check = match active_source.login_qr_check(&api, &key).await {
                 Ok(check) => check,
                 Err(error) => {
                     bus.fail("查询扫码状态失败", error);
@@ -1487,14 +1569,26 @@ impl App {
                 QrStatus::Pending => bus.emit(Loaded::LoginStatus {
                     message: "已扫码，请在手机上确认".to_string(),
                 }),
-                QrStatus::Success => match (check.token, check.userid) {
-                    (Some(token), Some(userid)) => {
-                        bus.emit(Loaded::LoginSucceeded { token, userid })
+                QrStatus::Success => {
+                    // 登录态由服务端持有的音源（如网易云）拿不到 token，
+                    // 成功就是成功，不该报「未拿到 token」。
+                    if !active_source.capability().client_token {
+                        bus.emit(Loaded::LoginSucceeded {
+                            token: None,
+                            userid: None,
+                        })
+                    } else {
+                        match (check.token, check.userid) {
+                            (Some(token), Some(userid)) => bus.emit(Loaded::LoginSucceeded {
+                                token: Some(token),
+                                userid: Some(userid),
+                            }),
+                            _ => bus.emit(Loaded::LoginFailed {
+                                message: "扫码已授权，但未拿到 token".to_string(),
+                            }),
+                        }
                     }
-                    _ => bus.emit(Loaded::LoginFailed {
-                        message: "扫码已授权，但未拿到 token".to_string(),
-                    }),
-                },
+                }
             }
         });
     }
@@ -1507,6 +1601,20 @@ impl App {
             message,
             ..Default::default()
         });
+    }
+
+    /// 登录态由服务端持有时的收尾：没有凭据可存，只更新界面状态。
+    fn finish_server_side_login(&mut self) {
+        let kind = self.state.config.active_source_kind();
+        self.state.logged_in = true;
+        self.finish_login(
+            true,
+            format!(
+                "「{}」已在服务端完成登录（凭据由 {} 保管，未写入本地配置）",
+                kind.label(),
+                kind.service_name()
+            ),
+        );
     }
 
     /// 写入登录凭据并热更新 ApiClient 的 cookie。
@@ -1727,6 +1835,10 @@ impl App {
         // 先把当前身份存回档案，否则切走再切回来时登录态和 dfid 就丢了
         self.state.config.sync_active_source();
         self.state.config.switch_source(kind);
+        // 登录态是按音源分开的：切过去之后要按**新音源**的凭据重新判断，
+        // 否则会沿用上一个音源的 logged_in，把「未登录」误判成「已登录」，
+        // 于是登录流程被「是否覆盖已有凭据」的确认挡住，进不了扫码。
+        self.state.logged_in = self.state.config.is_logged_in();
 
         if let Err(error) = self.state.config.save() {
             self.state
@@ -2368,7 +2480,12 @@ impl App {
             }
 
             Loaded::LoginSucceeded { token, userid } => {
-                self.apply_login(token, userid);
+                match (token, userid) {
+                    (Some(token), Some(userid)) => self.apply_login(token, userid),
+                    // 登录态由服务端持有（网易云）：客户端没有凭据可存，
+                    // 只需把界面标记为已登录并说明凭据在哪。
+                    _ => self.finish_server_side_login(),
+                }
             }
 
             Loaded::LoginFailed { message } => {

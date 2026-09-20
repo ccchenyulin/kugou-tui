@@ -108,9 +108,11 @@ pub enum Loaded {
         message: String,
     },
     /// 扫码成功，带回登录令牌。
+    /// 扫码登录成功。`token` 为 `None` 表示登录态由服务端持有（如网易云），
+    /// 客户端不需要也不应该保存凭据。
     LoginSucceeded {
-        token: String,
-        userid: String,
+        token: Option<String>,
+        userid: Option<String>,
     },
     /// 登录失败。
     LoginFailed {

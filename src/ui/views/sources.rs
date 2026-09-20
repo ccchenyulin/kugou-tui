@@ -103,3 +103,57 @@ pub fn render_sources(
         );
     }
 }
+
+/// 登录音源选择器：列出支持登录的音源，让用户挑一个再进扫码。
+///
+/// 和音源管理页共用一套展示风格，但它只列**能登录**的音源，并且是模态的。
+pub fn render_login_picker(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
+    let Some(picker) = state.login_picker.as_mut() else {
+        return;
+    };
+
+    let block = panel("扫码登录 · 选择音源", true, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height == 0 || inner.width < 16 {
+        return;
+    }
+
+    let items: Vec<_> = picker
+        .candidates
+        .iter()
+        .map(|kind| {
+            let profile = state.config.sources.profile(*kind);
+            let hint = if profile.cookie.is_some() {
+                "已登录"
+            } else {
+                "未登录"
+            };
+            ratatui::widgets::ListItem::new(Line::from(vec![
+                Span::styled(kind.label().to_string(), theme.body()),
+                Span::styled(format!("（{hint}）"), theme.dim()),
+            ]))
+        })
+        .collect();
+
+    let widget = selection_list(items, theme);
+    frame.render_stateful_widget(widget, inner, &mut picker.cursor);
+
+    // 底部一行提示
+    if inner.height > picker.candidates.len() as u16 + 1 {
+        let hint_area = Rect::new(
+            inner.x,
+            inner.y + picker.candidates.len() as u16 + 1,
+            inner.width,
+            1,
+        );
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new(Line::from(Span::styled(
+                "j/k 选择 · Enter 开始扫码 · Esc 取消",
+                theme.dim(),
+            ))),
+            hint_area,
+        );
+    }
+}

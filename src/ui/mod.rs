@@ -104,6 +104,12 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     }
 
     // 登录弹窗优先级高于帮助
+    if state.login_picker.is_some() {
+        let area = crate::ui::widgets::centered_rect(frame.area(), 46, 12);
+        views::render_login_picker(frame, area, state, &theme);
+        return;
+    }
+
     if let Some(login) = state.login.as_ref() {
         views::render_login(frame, login, &theme);
     }
