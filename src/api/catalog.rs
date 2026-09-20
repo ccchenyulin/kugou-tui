@@ -36,6 +36,7 @@ use crate::api::model::{
 };
 use crate::api::{data_of, extract_list};
 use crate::error::{AppError, Result};
+use crate::logger::tlog;
 
 /// 歌单 / 榜单类接口每页的硬上限。首屏加载也用它，保证与翻页一致。
 ///
@@ -396,20 +397,38 @@ impl ApiClient {
     /// 需单独购买）时，才退而求其次要试听片段，并明确标记 [`StreamUrl::is_trial`]，
     /// 由界面告诉用户这是片段、不要误当成播完了。
     pub async fn song_stream_url(&self, song: &Song, quality: &str) -> Result<StreamUrl> {
-        let full = self.request_song_url(song, quality, false).await?;
-        if let Some(url) = self.extract_stream_url(&full) {
-            return Ok(StreamUrl {
-                url,
-                is_trial: false,
-                reason: None,
-            });
+        // 登录用户先调 `/privilege/lite` 问「这账号能听哪几档音质」——不同音质的
+        // hash 不一样（VIP 用户有 flac 的 hash，普通用户没有），用同一个 hash
+        // 试所有音质会一直碰壁。**这是「设了 flac 但没 VIP 就只能听试听片段」的
+        // 真凶**：之前直接拿原 hash 调 `/song/url`，服务端一看这个 hash 没 flac
+        // 权限就给空 url。
+        //
+        // 未登录或 `/privilege/lite` 失败时回退到「原 hash + 用户选的音质」——
+        // 不能因为这个查询挂了就完全走不通。
+        let candidates = self.privilege_candidates(song, quality).await;
+
+        let mut last_full = None;
+        for (hash, q) in &candidates {
+            let response = self
+                .request_song_url_with_hash(song, hash, q, false)
+                .await?;
+            if let Some(url) = extract_stream_url(&response) {
+                return Ok(StreamUrl {
+                    url,
+                    is_trial: false,
+                    reason: None,
+                });
+            }
+            last_full = Some(response);
         }
 
         // 完整版拿不到，先记下原因再退到试听片段
-        let reason = self.fail_reason(&full);
+        let reason = last_full.as_ref().and_then(|root| self.fail_reason(root));
 
-        let trial = self.request_song_url(song, quality, true).await?;
-        if let Some(url) = self.extract_stream_url(&trial) {
+        let trial = self
+            .request_song_url_with_hash(song, &song.hash, quality, true)
+            .await?;
+        if let Some(url) = extract_stream_url(&trial) {
             return Ok(StreamUrl {
                 url,
                 is_trial: true,
@@ -418,7 +437,7 @@ impl ApiClient {
         }
 
         // 两次都没有。优先把服务端给的原因透出去，比笼统的「可能需要 VIP」有用得多。
-        for root in [&full, &trial] {
+        for root in last_full.iter().chain(std::iter::once(&trial)) {
             // KuGouMusicApi 的 `/song/url` 把真正的失败信息放在 `data` 嵌套层里，
             // 顶层只有元数据——所以读两层。
             let data = root.get("data").unwrap_or(root);
@@ -452,6 +471,55 @@ impl ApiClient {
             "《{}》没有可用的播放地址（可能需要 VIP、已下架或版权受限）",
             song.name
         )))
+    }
+
+    /// 把 `/privilege/lite` 的响应转换成「按用户选的音质降级排序」的候选列表。
+    ///
+    /// 没拿到响应或解析不出候选时，回退到「原 hash + 用户选的音质」——
+    /// 走老路不一定能拿到，但至少不会因为这个查询失败就让整条路堵死。
+    async fn privilege_candidates(&self, song: &Song, quality: &str) -> Vec<(String, String)> {
+        let response = match self.request_privilege_lite(song).await {
+            Ok(value) => value,
+            Err(error) => {
+                tlog!(
+                    crate::logger::LEVEL_DEBUG,
+                    "/privilege/lite 失败：{}，按单 hash 兜底",
+                    error.user_hint()
+                );
+                return vec![(song.hash.clone(), quality.to_string())];
+            }
+        };
+        let candidates = parse_quality_candidates(&response, quality);
+        if candidates.is_empty() {
+            vec![(song.hash.clone(), quality.to_string())]
+        } else {
+            candidates
+                .into_iter()
+                .map(|candidate| (candidate.hash, candidate.quality))
+                .collect()
+        }
+    }
+
+    /// 问服务端「这个 hash 在登录账号下能听哪几档音质」。
+    ///
+    /// 酷狗为每档音质维护**独立的文件指纹（hash）**——VIP 用户拿到的 flac hash
+    /// 和 128 hash 是完全不同的两个串。直接拿歌单里查到的 hash 去试 320 / flac
+    /// 全是空，所以这里必须先查一次。
+    async fn request_privilege_lite(&self, song: &Song) -> Result<Value> {
+        // 响应格式见 `KuGouMusicApi/module/privilege_lite.js`：POST body 包含
+        // 一个 `resource` 数组（每首歌一个 `{type, hash, album_id}`）+ qualities 列表。
+        // 服务端对每档音质分别返回 `{hash, quality, level}`，`level == 0` 表示没权限。
+        let body = serde_json::json!({
+            "area_code": 1,
+            "resource": [{
+                "type": "audio",
+                "page_id": 0,
+                "hash": song.hash,
+                "album_id": song.album_id.parse::<u64>().unwrap_or(0),
+            }],
+            "qualities": SUPPORTED_PRIVILEGE_QUALITIES,
+        });
+        self.post_json("/privilege/lite", &body).await
     }
 
     /// 从响应里读出「为什么给不了完整版」。
@@ -495,9 +563,15 @@ impl ApiClient {
     /// 反而干扰服务端做 hash 候选匹配——MoeKoeMusic 客户端就不传。这里去掉。
     /// `ppage_id` 是「官方客户端指纹」，缺这个酷狗会按非官方客户端降级处理，
     /// VIP 歌曲直接给空 url。**这是之前 VIP 歌曲「没资源」的真凶之一**。
-    async fn request_song_url(&self, song: &Song, quality: &str, free_part: bool) -> Result<Value> {
+    async fn request_song_url_with_hash(
+        &self,
+        _song: &Song,
+        hash: &str,
+        quality: &str,
+        free_part: bool,
+    ) -> Result<Value> {
         let mut query = vec![
-            ("hash", song.hash.clone()),
+            ("hash", hash.to_string()),
             ("quality", quality.to_string()),
             ("ppage_id", PPAGE_ID.to_string()),
         ];
@@ -506,11 +580,6 @@ impl ApiClient {
         }
 
         self.get_json_uncached("/song/url", &query).await
-    }
-
-    /// 从 `/song/url` 的响应里挖出直链。
-    fn extract_stream_url(&self, root: &Value) -> Option<String> {
-        extract_stream_url(root)
     }
 }
 
@@ -524,6 +593,114 @@ impl ApiClient {
 ///
 /// 之前没传这个，所以 VIP 歌曲在 `status` 上就被识别为非官方客户端而拒绝。
 const PPAGE_ID: &str = "463467626,350369493,788954147";
+
+/// `/privilege/lite` 询问服务端「这账号能听哪几档音质」时一并查询的品质列表。
+///
+/// 来源：KuGouMusicApi 服务端 `module/privilege_lite.js` 里硬编码的同一份。
+/// 服务端会只返回**该账号有权限的**那些档位，所以列表给多了也是无害的。
+const SUPPORTED_PRIVILEGE_QUALITIES: &[&str] = &[
+    "128",
+    "320",
+    "flac",
+    "high",
+    "super",
+    "multitrack",
+    "viper_atmos",
+    "viper_clear",
+    "viper_tape",
+];
+
+/// 音质降级链：用户选的那档在最前，逐级降到 128 kbps。
+///
+/// 顺序与服务端 `QUALITY_LEVELS` 一致（见 MoeKoeMusic 的
+/// `src/components/player/songQueue/OnlineMusicQueue.js`），但去掉了一些
+/// 不常见的蝰蛇档——那些我们也调不到，先不掺进来。
+const PRIVILEGE_FALLBACK_CHAIN: &[&str] = &["128", "320", "flac", "high"];
+
+/// 一个候选音质：账号在该音质下有权限时，服务端给的 hash + 品质名。
+#[derive(Debug, Clone, PartialEq)]
+struct QualityCandidate {
+    hash: String,
+    quality: String,
+}
+
+/// 把 `/privilege/lite` 的响应整理成「按用户选的音质降级排序」的候选列表。
+///
+/// 服务端响应（参见 MoeKoeMusic 的 `getQualityOptions`）：
+/// ```text
+/// data: [
+///   {hash, quality, level, relate_goods: [{...}, ...]},
+///   ...
+/// ]
+/// ```
+/// `level == 0` 表示没权限，跳过。每首歌可能有多个 variant（自己 + relate_goods），
+/// 每个 variant 是不同的 hash（同一首歌的 128 和 flac 完全是两个文件指纹）。
+fn parse_quality_candidates(response: &Value, requested: &str) -> Vec<QualityCandidate> {
+    // 先收集每个 quality 任意一个有权限的 hash（一首歌同 quality 的不同 variant
+    // 都给同一个 hash，取第一个就行）。
+    let mut available: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    if let Some(items) = response.get("data").and_then(Value::as_array) {
+        for item in items {
+            // 自己 + relate_goods 都是同一首歌的不同 variant
+            let mut variants: Vec<&Value> = vec![item];
+            if let Some(related) = item.get("relate_goods").and_then(Value::as_array) {
+                variants.extend(related.iter());
+            }
+            for variant in variants {
+                // level == 0 = 没权限（VIP 限制）。缺失也按有权限处理——
+                // 服务端有时会省略该字段，默认开放是合理的猜测。
+                let has_level = !matches!(variant.get("level").and_then(Value::as_i64), Some(0));
+                if !has_level {
+                    continue;
+                }
+                let Some(quality) = variant.get("quality").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Some(hash) = variant.get("hash").and_then(Value::as_str) else {
+                    continue;
+                };
+                // 列表外的音质蝰蛇之类先不要，避免误判降级链
+                if !PRIVILEGE_FALLBACK_CHAIN.contains(&quality) {
+                    continue;
+                }
+                available.entry(quality).or_insert(hash);
+            }
+        }
+    }
+
+    // 按降级链顺序取每个 quality 对应的 hash
+    let chain = fallback_chain(requested);
+    chain
+        .into_iter()
+        .filter_map(|quality| {
+            available.get(quality).map(|hash| QualityCandidate {
+                hash: (*hash).to_string(),
+                quality: (*quality).to_string(),
+            })
+        })
+        .collect()
+}
+
+/// 用户选的音质 + 其下的所有档位，按优先级降序。
+///
+/// 例：requested=flac → [flac, 320, 128]（先试 flac，再 320，最后 128）。
+/// requested 不在链里时按 128 处理——和 KoeKoeMusic 的 `normalizeQuality` 一致。
+fn fallback_chain(requested: &str) -> Vec<&'static str> {
+    let normalized = if PRIVILEGE_FALLBACK_CHAIN.contains(&requested) {
+        requested
+    } else {
+        "128"
+    };
+    let index = PRIVILEGE_FALLBACK_CHAIN
+        .iter()
+        .position(|quality| *quality == normalized)
+        .unwrap_or(PRIVILEGE_FALLBACK_CHAIN.len() - 1);
+    PRIVILEGE_FALLBACK_CHAIN[..=index]
+        .iter()
+        .rev()
+        .copied()
+        .collect()
+}
 
 /// `/song/url` 的结果。
 pub struct StreamUrl {
@@ -696,5 +873,96 @@ mod tests {
             extract_stream_url(&root).as_deref(),
             Some("https://fsmobile.kugou.com/a.mp3")
         );
+    }
+
+    /// 用户选了 flac 但账号只有 320 / 128 权限——这种情况之前会拿不到 URL
+    /// （原 hash 没有 flac 权限），新逻辑应该从 `/privilege/lite` 拿到
+    /// 320 和 128 的真实 hash，按降级链返回。
+    #[test]
+    fn privilege_candidates_follow_fallback_chain() {
+        let response = json!({
+            "data": [
+                {
+                    "quality": "128",
+                    "level": 1,
+                    "hash": "h_128",
+                    "relate_goods": [
+                        {"quality": "320", "level": 1, "hash": "h_320"},
+                    ],
+                },
+                // 没权限的 flac —— 必须被过滤掉
+                {
+                    "quality": "flac",
+                    "level": 0,
+                    "hash": "h_flac_no_perm",
+                    "relate_goods": [],
+                },
+            ],
+        });
+        let candidates = parse_quality_candidates(&response, "flac");
+        assert_eq!(
+            candidates,
+            vec![
+                QualityCandidate {
+                    quality: "320".to_string(),
+                    hash: "h_320".to_string()
+                },
+                QualityCandidate {
+                    quality: "128".to_string(),
+                    hash: "h_128".to_string()
+                },
+            ],
+            "没权限的 flac 必须跳过；降级链先 320 再 128"
+        );
+    }
+
+    /// 用户选了 128 → 只返 128，不会无端把 320 也加进来（用户没选）。
+    #[test]
+    fn privilege_candidates_strict_to_requested_quality_or_below() {
+        let response = json!({
+            "data": [{
+                "quality": "128",
+                "level": 1,
+                "hash": "h_128",
+                "relate_goods": [
+                    {"quality": "320", "level": 1, "hash": "h_320"},
+                ],
+            }],
+        });
+        let candidates = parse_quality_candidates(&response, "128");
+        assert_eq!(
+            candidates,
+            vec![QualityCandidate {
+                quality: "128".to_string(),
+                hash: "h_128".to_string()
+            }],
+            "选了 128 就只返 128，不会自动升级到 320"
+        );
+    }
+
+    /// 不认识的 quality 当 128 处理——和 KoeKoeMusic 的 `normalizeQuality` 一致。
+    #[test]
+    fn privilege_candidates_normalize_unknown_quality_to_128() {
+        let response = json!({
+            "data": [{
+                "quality": "128",
+                "level": 1,
+                "hash": "h_128",
+                "relate_goods": [],
+            }],
+        });
+        let candidates = parse_quality_candidates(&response, "high_res_thing");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].quality, "128");
+    }
+
+    /// 响应里压根没 data，返回空列表——上层会回退到「原 hash + 用户选的音质」。
+    #[test]
+    fn privilege_candidates_returns_empty_for_unrecognized_response() {
+        let candidates = parse_quality_candidates(&json!({}), "flac");
+        assert!(candidates.is_empty());
+
+        let candidates = parse_quality_candidates(&json!({"data": "garbage"}), "flac");
+        assert!(candidates.is_empty());
     }
 }
