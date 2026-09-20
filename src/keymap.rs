@@ -79,6 +79,8 @@ pub enum Action {
     ToggleMute,
     /// 顺序 → 单曲循环 → 随机 → 列表循环
     CyclePlaybackMode,
+    /// 在支持的音质档位之间循环（下一首生效）。
+    CycleQuality,
     /// 打开/关闭歌词面板。
     ToggleLyricPanel,
     /// 歌词整体延后 100ms。
@@ -234,6 +236,7 @@ pub fn action_from_name(name: &str) -> Option<Action> {
         "volume_down" => Action::VolumeDown,
         "toggle_mute" => Action::ToggleMute,
         "cycle_playback_mode" => Action::CyclePlaybackMode,
+        "cycle_quality" => Action::CycleQuality,
         "toggle_lyric_panel" => Action::ToggleLyricPanel,
         "lyric_delay" => Action::LyricDelay,
         "lyric_advance" => Action::LyricAdvance,
@@ -396,6 +399,8 @@ fn resolve_normal(key: KeyEvent) -> Action {
         KeyCode::Char('-') => Action::VolumeDown,
         KeyCode::Char('m') => Action::ToggleMute,
         KeyCode::Char('r') => Action::CyclePlaybackMode,
+        // y = quality：换个不冲突的键，r 已经被播放模式占了
+        KeyCode::Char('y') => Action::CycleQuality,
         KeyCode::Char('l') => Action::ToggleLyricPanel,
         // 歌词微调：方括号在键盘上紧邻，符合直觉
         KeyCode::Char(']') => Action::LyricAdvance,
@@ -461,6 +466,7 @@ pub const CHEATSHEET: &[(&str, &str, &str)] = &[
     ("x / X", "移出队列 / 清空队列（需确认）", "业务"),
     ("C", "清空音频缓存（需确认）", "业务"),
     ("o", "正序 ↔ 倒序（最后一首在最上）", "业务"),
+    ("y", "切换音质（下一首生效）", "业务"),
     ("b / c", "排行榜 / 云端歌单", "业务"),
     ("L", "扫码登录", "业务"),
     ("f", "歌手地区筛选（在歌手页）", "业务"),

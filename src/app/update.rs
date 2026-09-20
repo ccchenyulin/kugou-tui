@@ -463,6 +463,25 @@ impl App {
                 self.state.config.playback_mode = mode;
                 self.state.info(format!("播放模式：{}", mode.label()));
             }
+            // 音质只在**下一首**生效：当前这首歌的直链与缓存都是按旧档位取的，
+            // 中途换档没有意义。提示里说清楚，否则用户会以为没生效。
+            Action::CycleQuality => {
+                let current = self.state.config.quality.as_str();
+                let index = crate::config::SUPPORTED_QUALITIES
+                    .iter()
+                    .position(|quality| *quality == current)
+                    .unwrap_or(0);
+                let next = crate::config::SUPPORTED_QUALITIES
+                    [(index + 1) % crate::config::SUPPORTED_QUALITIES.len()];
+                self.state.config.quality = next.to_string();
+
+                if let Err(error) = self.state.config.save() {
+                    self.state
+                        .warn(format!("音质已切换，但保存配置失败：{error}"));
+                }
+                self.state
+                    .success(format!("音质：{}（下一首生效）", quality_label(next)));
+            }
             Action::ToggleLyricPanel => {
                 self.state.show_lyric_panel = !self.state.show_lyric_panel;
             }
@@ -2826,6 +2845,19 @@ impl App {
 }
 
 /// `歌手 - 歌名`，用于状态栏与提示。
+/// 把音质档位翻成人话。
+fn quality_label(quality: &str) -> String {
+    match quality {
+        "128" => "标准 128kbps".to_string(),
+        "320" => "较高 320kbps".to_string(),
+        "flac" => "无损 FLAC".to_string(),
+        "high" => "高品".to_string(),
+        "super" => "超高".to_string(),
+        "viper_clear" => "蝰蛇母带".to_string(),
+        other => other.to_string(),
+    }
+}
+
 fn describe_song(song: &Song) -> String {
     let singers = song.singer_text();
     if singers == "未知歌手" {
