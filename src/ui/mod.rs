@@ -140,6 +140,43 @@ fn render_main(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Them
         return;
     }
 
+    // 首页 / 队列 / 歌词 / 封面都是单一用途的页面，整块主区都给它——
+    // 塞进下面那套「条目 + 歌曲 + 队列」的分割里，每块都会小到没法用。
+    match state.tab {
+        Tab::Home => {
+            views::render_home(frame, area, state, theme);
+            return;
+        }
+        Tab::Lyrics => {
+            views::render_lyric(frame, area, state, theme);
+            return;
+        }
+        Tab::Cover => {
+            views::render_cover_page(frame, area, state, theme);
+            return;
+        }
+        Tab::Queue => {
+            let focused = state.focus == Focus::Primary;
+            let playback = state.playback;
+            // 先取出 hash：下面要可变借用 queue_cursor，不能再持有 state 的引用
+            let current_hash = state.current.as_ref().map(|song| song.hash.clone());
+            views::render_queue(
+                frame,
+                area,
+                &state.queue,
+                &mut state.queue_cursor,
+                views::QueueView {
+                    focused,
+                    current_hash: current_hash.as_deref(),
+                    playback,
+                },
+                theme,
+            );
+            return;
+        }
+        _ => {}
+    }
+
     let primary_height = match state.tab {
         // 搜索框只有一行输入，给 3 行（含边框）就够
         Tab::Search => 3,
@@ -168,7 +205,13 @@ fn render_main(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Them
             Tab::Ranks => state.ranks.list.len(),
             Tab::Cloud => state.cloud.list.len(),
             // 搜索页、可视化页、音源页都没有条目列表
-            Tab::Search | Tab::Visualizer | Tab::Sources => 0,
+            Tab::Search
+            | Tab::Home
+            | Tab::Queue
+            | Tab::Lyrics
+            | Tab::Cover
+            | Tab::Visualizer
+            | Tab::Sources => 0,
         };
         state.add_hit_zone(
             Rect::new(
@@ -260,7 +303,13 @@ impl AppState {
             Tab::Ranks => self.ranks.list.cursor.offset(),
             Tab::Cloud => self.cloud.list.cursor.offset(),
             // 搜索页、可视化页、音源页都没有条目列表
-            Tab::Search | Tab::Visualizer | Tab::Sources => 0,
+            Tab::Search
+            | Tab::Home
+            | Tab::Queue
+            | Tab::Lyrics
+            | Tab::Cover
+            | Tab::Visualizer
+            | Tab::Sources => 0,
         }
     }
 
@@ -311,8 +360,8 @@ fn render_primary(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &T
             views::render_cloud_entries(frame, area, &mut state.cloud.list, focused, theme)
         }
         Tab::Sources => views::render_sources(frame, area, state, focused, theme),
-        // 可视化页由 render_main 直接整屏渲染，不会走到这里
-        Tab::Visualizer => {}
+        // 这几页都由 render_main 整屏渲染，不会走到这里
+        Tab::Home | Tab::Queue | Tab::Lyrics | Tab::Cover | Tab::Visualizer => {}
     }
 }
 
@@ -338,7 +387,7 @@ fn render_song_pane(
         Tab::Ranks => Some(&mut state.ranks.songs),
         Tab::Cloud => Some(&mut state.cloud.songs),
         // 音源页没有歌曲列表
-        Tab::Visualizer | Tab::Sources => None,
+        Tab::Home | Tab::Queue | Tab::Lyrics | Tab::Cover | Tab::Visualizer | Tab::Sources => None,
     }) else {
         return;
     };

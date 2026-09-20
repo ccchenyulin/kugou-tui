@@ -616,6 +616,13 @@ impl App {
             // 「上下键完全无响应」（实测踩过）。放在 Sidebar / Queue 之后即可，
             // 那两个焦点的行为仍由上面的分支决定。
             (Tab::Visualizer, _) => self.move_sidebar(delta),
+            // 队列页的主区就是队列本身
+            (Tab::Queue, Focus::Primary) => {
+                move_selection(&mut self.state.queue_cursor, self.state.queue.len(), delta);
+            }
+            // 首页/歌词/封面都是展示页，没有可移动的列表；焦点在哪都退化成切标签页，
+            // 免得「上下键完全无响应」（可视化页踩过同样的坑）
+            (Tab::Home | Tab::Lyrics | Tab::Cover, _) => self.move_sidebar(delta),
             // 搜索页主区就是结果列表
             (Tab::Search, Focus::Primary | Focus::Secondary) => {
                 self.state.search.results.move_by(delta);
@@ -653,6 +660,14 @@ impl App {
                 }
             }
             (Tab::Visualizer, _) => self.select_sidebar_edge(to_first),
+            (Tab::Queue, Focus::Primary) => {
+                if to_first {
+                    select_first(&mut self.state.queue_cursor, len);
+                } else {
+                    select_last(&mut self.state.queue_cursor, len);
+                }
+            }
+            (Tab::Home | Tab::Lyrics | Tab::Cover, _) => self.select_sidebar_edge(to_first),
             (Tab::Search, _) => {
                 if to_first {
                     self.state.search.results.select_first();
@@ -697,6 +712,10 @@ impl App {
         match (self.state.tab, self.state.focus) {
             // 可视化页没有列表，方向键与 Enter 在它上面没有意义
             (Tab::Visualizer, _) => {}
+            // 队列页：Enter 播放选中的那首（与焦点在队列时一致）
+            (Tab::Queue, _) => self.play_from_queue(),
+            // 首页/歌词/封面是纯展示页，没有可激活的项
+            (Tab::Home | Tab::Lyrics | Tab::Cover, _) => {}
             // 音源页：Enter = 启用 / 禁用
             (Tab::Sources, _) => self.toggle_source_enabled(),
             // 搜索框还没进入编辑态时，Enter 先聚焦输入框
@@ -1432,6 +1451,9 @@ impl App {
             Tab::Cloud => self.load_cloud_playlists(),
             Tab::Visualizer => self.state.info("可视化页面没有需要刷新的数据"),
             Tab::Sources => self.state.info("音源状态会在切换与启动时自动探测"),
+            Tab::Home | Tab::Lyrics | Tab::Cover | Tab::Queue => self
+                .state
+                .info("这一页展示的是本地状态，没有需要刷新的列表"),
         }
     }
 
@@ -1729,53 +1751,14 @@ impl App {
     ///
     /// 只换「去哪儿请求 + 带什么身份」，**不碰播放队列、不打断当前曲目**——
     /// 正在放的音频已经在本地缓存里，换音源没有理由把它停掉。
-    /// 数字键 1-9：按当前焦点决定语义。
+    /// 数字键 1-9 与 0：切换到对应的标签页。
     ///
-    /// * 焦点在**侧边栏** → 切到第 N 个标签页（与之前一致，保留肌肉记忆）
-    /// * 焦点在**列表**里 → 跳到当前列表的第 N 项（长列表里比一路按 ↓ 快得多）
-    /// * 焦点在**队列** → 跳到队列的第 N 首
+    /// 早先这里按焦点区分语义（侧边栏里切页、列表里跳到第 N 项）。但「同一个键
+    /// 两种行为」并不直观——用户按下去之前得先想「现在焦点在哪」。列表内定位
+    /// 有 `g`/`G` 与 `PgUp`/`PgDn` 已经够用，数字键留给导航更清晰。
     fn handle_digit(&mut self, number: u8) {
-        if self.state.focus == Focus::Sidebar {
-            if let Some(tab) = Tab::from_number(number) {
-                self.switch_tab(tab);
-            }
-            return;
-        }
-
-        let index = number.saturating_sub(1) as usize;
-        match self.state.focus {
-            Focus::Queue => {
-                select_first(&mut self.state.queue_cursor, self.state.queue.len());
-                for _ in 0..index {
-                    move_selection(&mut self.state.queue_cursor, self.state.queue.len(), 1);
-                }
-            }
-            Focus::Primary if self.state.tab == Tab::Sources => {
-                let len = self.state.config.sources.ordered().len();
-                self.state
-                    .sources_cursor
-                    .select(Some(index.min(len.max(1) - 1)));
-            }
-            Focus::Primary => self.jump_entry_index(index),
-            Focus::Secondary => {
-                if let Some(list) = self.state.songs_mut() {
-                    list.select(index);
-                }
-            }
-            // 侧边栏 handled earlier
-            Focus::Sidebar => {}
-        }
-    }
-
-    /// 跳到「条目列表」（歌单/歌手/榜单）的第 `index` 项。
-    fn jump_entry_index(&mut self, index: usize) {
-        match self.state.tab {
-            Tab::Playlists => self.state.playlists.list.select(index),
-            Tab::Artists => self.state.artists.list.select(index),
-            Tab::Ranks => self.state.ranks.list.select(index),
-            Tab::Cloud => self.state.cloud.list.select(index),
-            // 搜索页的主区是输入框，没有条目列表可跳
-            Tab::Search | Tab::Visualizer | Tab::Sources => {}
+        if let Some(tab) = Tab::from_number(number) {
+            self.switch_tab(tab);
         }
     }
 

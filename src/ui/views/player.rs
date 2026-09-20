@@ -309,3 +309,105 @@ pub fn render_queue(
 
     frame.render_stateful_widget(widget, inner, cursor);
 }
+
+/// 在当前区域的**上半部分**画封面，返回留给下方内容的区域。
+///
+/// 抽出来是因为「首页」和「歌词页」都要它。kitty 终端把真图铺在预留区域上
+/// （渲染完成后由 `App::paint_cover` 放），其它终端退回字符画。
+fn draw_cover_block(frame: &mut Frame, inner: Rect, state: &mut AppState, theme: &Theme) -> Rect {
+    if state.cover.lines.is_empty() || inner.width < 12 || inner.height < 8 {
+        return inner;
+    }
+
+    // 字符宽高比约 1:2，方形区域的列数是行数的两倍；最多占一半高，留一行间距
+    let rows = (inner.height / 2).clamp(6, 24);
+    let columns = (rows * 2).min(inner.width);
+    let [cover_area, rest] =
+        Layout::vertical([Constraint::Length(rows + 1), Constraint::Min(1)]).areas(inner);
+
+    let x = cover_area.x + cover_area.width.saturating_sub(columns) / 2;
+    state.cover_area = Some(Rect::new(x, cover_area.y, columns, rows));
+
+    if !crate::ui::kitty::is_supported() {
+        let lines: Vec<Line> = state
+            .cover
+            .lines
+            .iter()
+            .map(|line| Line::from(Span::styled(line.clone(), theme.now_playing())))
+            .collect();
+        frame.render_widget(
+            Paragraph::new(lines).alignment(Alignment::Center),
+            cover_area,
+        );
+    }
+    rest
+}
+
+/// 封面页：整块主区只放封面，配上曲名与歌手。
+pub fn render_cover_page(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
+    let block = panel("封面", false, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height < 3 || inner.width < 8 {
+        return;
+    }
+
+    state.cover_area = None;
+
+    let Some(song) = state.current.as_ref() else {
+        frame.render_widget(empty_placeholder("播放歌曲后显示封面", theme), inner);
+        return;
+    };
+    // 先把要显示的文字取出来，释放对 state 的不可变借用——
+    // 下面 draw_cover_block 要可变借用它（记录封面区域）
+    let title = song.name.clone();
+    let subtitle = format!("{} · {}", song.singer_text(), song.album_name);
+
+    // 先把曲名信息留在底部一行，封面占其余空间
+    let [cover_area, info_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).areas(inner);
+
+    let _ = draw_cover_block(frame, cover_area, state, theme);
+
+    let info = vec![
+        Line::from(Span::styled(title, theme.now_playing())),
+        Line::from(Span::styled(subtitle, theme.dim())),
+    ];
+    frame.render_widget(Paragraph::new(info).alignment(Alignment::Center), info_area);
+}
+
+/// 首页：正在播放的总览——封面在左，曲目信息与歌词在右。
+pub fn render_home(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
+    let block = panel("正在播放", false, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height < 4 || inner.width < 20 {
+        return;
+    }
+
+    state.cover_area = None;
+
+    if state.current.is_none() {
+        frame.render_widget(
+            empty_placeholder("还没有播放任何歌曲 · 去搜索页按 / 找一首", theme),
+            inner,
+        );
+        return;
+    }
+
+    // 宽屏左右分栏（封面 | 歌词），窄屏上下堆叠——和歌词页的断点保持一致
+    if inner.width >= 60 {
+        let [left, right] =
+            Layout::horizontal([Constraint::Percentage(45), Constraint::Min(24)]).areas(inner);
+        let left_block = panel("封面", false, theme);
+        let left_inner = left_block.inner(left);
+        frame.render_widget(left_block, left);
+        let _ = draw_cover_block(frame, left_inner, state, theme);
+        render_lyric(frame, right, state, theme);
+    } else {
+        let rest = draw_cover_block(frame, inner, state, theme);
+        render_lyric(frame, rest, state, theme);
+    }
+}

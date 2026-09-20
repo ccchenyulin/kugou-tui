@@ -17,7 +17,9 @@ pub use lists::{
     render_artist_entries, render_cloud_entries, render_playlist_entries, render_rank_entries,
     render_search_input, render_song_list,
 };
-pub use player::{QueueView, render_lyric, render_player, render_queue};
+pub use player::{
+    QueueView, render_cover_page, render_home, render_lyric, render_player, render_queue,
+};
 pub use sources::{render_login_picker, render_sources};
 pub use visualizer::render_visualizer;
 

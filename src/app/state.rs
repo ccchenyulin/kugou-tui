@@ -20,12 +20,23 @@ use crate::config::Config;
 /// 顶层标签页。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tab {
+    /// 首页：正在播放的总览——封面 + 曲目信息 + 歌词。
+    ///
+    /// 这是默认落点：打开播放器最想看到的是「现在在放什么」，
+    /// 而不是一个空的搜索框。
     #[default]
+    Home,
     Search,
     Playlists,
     Artists,
     Ranks,
     Cloud,
+    /// 播放队列。原先挤在侧边栏/弹窗里，独立成页后能看全、能翻页。
+    Queue,
+    /// 歌词。原先和封面挤在同一块面板，拆开之后两边都舒展。
+    Lyrics,
+    /// 封面。kitty 终端放真图（1:1 还原），其它终端退回字符画。
+    Cover,
     /// 音频可视化。不承载列表，整块主区都用来画实时频谱。
     Visualizer,
     /// 音源管理：启用/禁用、设默认、调优先级、查看可用状态。
@@ -36,24 +47,37 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 7] = [
+    /// 全部标签页。**前 10 个对应数字键 1-9 与 0**；`Sources` 排最后不进数字键
+    /// （由 `v` 打开）——常用页面放在能被数字键直接够到的位置。
+    pub const ALL: [Tab; 11] = [
+        Tab::Home,
         Tab::Search,
         Tab::Playlists,
         Tab::Artists,
         Tab::Ranks,
         Tab::Cloud,
+        Tab::Queue,
+        Tab::Lyrics,
+        Tab::Cover,
         Tab::Visualizer,
         Tab::Sources,
     ];
 
+    /// 数字键能直接够到的标签页数量（1-9 加 0）。
+    pub const NUMBERED: usize = 10;
+
     pub fn title(self) -> &'static str {
         match self {
+            Self::Home => "首页",
             Self::Search => "搜索",
             Self::Playlists => "歌单",
             Self::Artists => "歌手",
             Self::Ranks => "排行榜",
             Self::Cloud => "云端",
             Self::Visualizer => "可视化",
+            Self::Queue => "队列",
+            Self::Lyrics => "歌词",
+            Self::Cover => "封面",
             Self::Sources => "音源",
         }
     }
@@ -68,8 +92,18 @@ impl Tab {
     }
 
     /// `1`..`6` 数字键（与 `Tab::ALL` 长度保持一致）。
+    /// 数字键 → 标签页。\`0\` 表示第 10 个（可视化），其余按 1 基索引。
     pub fn from_number(number: u8) -> Option<Self> {
-        Self::ALL.get(number.checked_sub(1)? as usize).copied()
+        let index = if number == 0 {
+            9
+        } else {
+            number.checked_sub(1)? as usize
+        };
+        // 只够到 NUMBERED 范围内的页面；音源管理排最后，由 \`v\` 打开
+        if index >= Self::NUMBERED {
+            return None;
+        }
+        Self::ALL.get(index).copied()
     }
 }
 
@@ -877,7 +911,13 @@ impl AppState {
             Tab::Ranks => self.ranks.list.select(index),
             Tab::Cloud => self.cloud.list.select(index),
             // 搜索页、可视化页、音源页都没有条目列表
-            Tab::Search | Tab::Visualizer | Tab::Sources => {}
+            Tab::Search
+            | Tab::Home
+            | Tab::Queue
+            | Tab::Lyrics
+            | Tab::Cover
+            | Tab::Visualizer
+            | Tab::Sources => {}
         }
     }
 
@@ -897,7 +937,9 @@ impl AppState {
             Tab::Artists => Some(&self.artists.songs),
             Tab::Ranks => Some(&self.ranks.songs),
             Tab::Cloud => Some(&self.cloud.songs),
-            Tab::Visualizer | Tab::Sources => None,
+            Tab::Home | Tab::Queue | Tab::Lyrics | Tab::Cover | Tab::Visualizer | Tab::Sources => {
+                None
+            }
         }
     }
 
@@ -909,7 +951,9 @@ impl AppState {
             Tab::Artists => Some(&mut self.artists.songs),
             Tab::Ranks => Some(&mut self.ranks.songs),
             Tab::Cloud => Some(&mut self.cloud.songs),
-            Tab::Visualizer | Tab::Sources => None,
+            Tab::Home | Tab::Queue | Tab::Lyrics | Tab::Cover | Tab::Visualizer | Tab::Sources => {
+                None
+            }
         }
     }
 
@@ -1171,10 +1215,21 @@ mod tests {
 
     #[test]
     fn tab_numbers_map_to_tabs() {
-        assert_eq!(Tab::from_number(1), Some(Tab::Search));
-        assert_eq!(Tab::from_number(5), Some(Tab::Cloud));
-        assert_eq!(Tab::from_number(0), None);
-        assert_eq!(Tab::from_number(9), None);
+        // 1-9 按 ALL 的顺序；0 是第 10 项（可视化）
+        assert_eq!(Tab::from_number(1), Some(Tab::Home));
+        assert_eq!(Tab::from_number(2), Some(Tab::Search));
+        assert_eq!(Tab::from_number(6), Some(Tab::Cloud));
+        assert_eq!(Tab::from_number(7), Some(Tab::Queue));
+        assert_eq!(Tab::from_number(8), Some(Tab::Lyrics));
+        assert_eq!(Tab::from_number(9), Some(Tab::Cover));
+        assert_eq!(
+            Tab::from_number(0),
+            Some(Tab::Visualizer),
+            "0 键 = 第 10 项"
+        );
+        // 音源管理排在 NUMBERED 之外，数字键够不到（用 v 打开）。
+        // 11 是 1 基索引下的第 11 项，正好指向 Sources，应当被挡住。
+        assert_eq!(Tab::from_number(11), None, "音源页不该被数字键够到");
     }
 
     #[test]
