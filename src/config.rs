@@ -276,6 +276,20 @@ impl Config {
     }
 
     fn normalize(&mut self) {
+        // 从未初始化过的音源：地址为空时补默认值并置为启用。
+        //
+        // 老配置文件里没有这些音源的段，serde 会走 `SourceProfile::default()`，
+        // 那里给的是空地址——照着空地址发请求必然失败，用户只会看到「连不上」
+        // 却不知道要填什么。这里按音源种类补上默认端口，并视为启用：
+        // 显式填过地址的音源则尊重用户设置，不动它的 enabled。
+        for kind in SourceKind::ALL {
+            let profile = self.sources.profile_mut(kind);
+            if profile.api_base.trim().is_empty() {
+                profile.api_base = kind.default_api_base().to_string();
+                profile.enabled = true;
+            }
+        }
+
         self.api_base = self.api_base.trim().trim_end_matches('/').to_string();
         if self.api_base.is_empty() {
             self.api_base = DEFAULT_API_BASE.to_string();

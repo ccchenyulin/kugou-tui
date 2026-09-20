@@ -1715,6 +1715,9 @@ impl App {
             return;
         }
         self.switch_tab(Tab::Sources);
+        // 焦点必须落到音源列表上：留在侧边栏的话 j/k 会去切标签页，
+        // 用户按了却像没反应。
+        self.state.focus = Focus::Primary;
         self.state
             .info("音源管理：Enter 启用/禁用 · E 设为默认 · K/J 调优先级");
     }
@@ -2573,20 +2576,33 @@ impl App {
     ///
     /// 失败只记日志：封面是锦上添花，不能因为它让播放流程报错。
     fn load_cover(&mut self, song: &Song) {
-        let Some(url) = song.cover.clone() else {
-            self.state.cover = CoverArt::default();
-            return;
-        };
         // 已经有这张封面就不用重复取
         if self.state.cover.belongs_to(&song.hash) && !self.state.cover.lines.is_empty() {
             return;
         }
+        if song.hash.is_empty() {
+            self.state.cover = CoverArt::default();
+            return;
+        }
 
+        let song = song.clone();
         let hash = song.hash.clone();
+        let api = self.api.clone();
+        let active_source = self.state.config.active_source_kind();
         let downloader = self.downloader.clone();
         let bus = self.bus.clone();
 
         self.runtime.spawn(async move {
+            // 封面地址由音源自己解析：多数音源在搜索结果里直接带 URL，
+            // 网易云只有 picId，要再查一次 /song/detail。
+            let url = match active_source.cover_url(&api, &song).await {
+                Ok(Some(url)) => url,
+                Ok(None) => return,
+                Err(error) => {
+                    crate::logger::tlog!(crate::logger::LEVEL_WARN, "取封面地址失败：{error}");
+                    return;
+                }
+            };
             let bytes = match downloader.fetch_bytes(&url).await {
                 Ok(bytes) => bytes,
                 Err(error) => {

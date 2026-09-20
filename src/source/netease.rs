@@ -298,3 +298,33 @@ pub async fn login_qr_check(client: &ApiClient, key: &str) -> Result<crate::api:
         userid: None,
     })
 }
+
+/// 取封面 URL。
+///
+/// ⚠️ 实测：这个版本的搜索响应里 album **只有 picId 没有 picUrl**，
+/// 拿不到地址，必须再查一次 \`/song/detail\`（那里是 \`al.picUrl\`）。
+/// 多数第三方 API 都在搜索结果里直接给 URL，这里是例外。
+pub async fn cover_url(client: &ApiClient, song: &Song) -> Result<Option<String>> {
+    // 已经有了就别多问一次
+    if let Some(cover) = song.cover.as_ref() {
+        return Ok(Some(cover.clone()));
+    }
+    if song.hash.is_empty() {
+        return Ok(None);
+    }
+
+    let root = client
+        .get_json_uncached("/song/detail", &[("ids", song.hash.clone())])
+        .await?;
+    let data = data_of(&root);
+
+    // 实测响应形状：{ songs: [ { al: { picUrl } } ] }
+    let url = data
+        .get("songs")
+        .and_then(Value::as_array)
+        .and_then(|songs| songs.first())
+        .and_then(|song| song.get("al").or_else(|| song.get("album")))
+        .and_then(|album| pick_string(album, &["picUrl", "pic"]));
+
+    Ok(url)
+}

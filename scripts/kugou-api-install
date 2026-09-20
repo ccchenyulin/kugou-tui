@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+#
+# kugou-api-install —— 一键拉取并启动某个音源依赖的第三方 API 服务。
+#
+# 为什么需要它：本程序不含任何音乐接口的实现，每个音源都对应一个第三方
+# 逆向封装的 Node.js 服务。新人拿到源码往往卡在「服务怎么起」这一步，
+# 这个脚本把 clone / 装依赖 / 起服务三步合成一条命令。
+#
+# 用法：
+#   kugou-api-install netease       # 安装并启动网易云服务
+#   kugou-api-install kugou         # 安装并启动酷狗两个实例（标准版 + 概念版）
+#   kugou-api-install qqmusic       # 安装并启动 QQ 音乐服务
+#   kugou-api-install all           # 全部
+#   kugou-api-install               # 列出可安装项与当前状态
+#
+set -euo pipefail
+
+# 安装根目录（各服务会放到它的子目录里）
+ROOT="${KUGOU_API_ROOT:-$HOME}"
+
+# 各音源对应的上游仓库与端口。
+# 端口必须与 src/source/mod.rs 里 default_api_base() 保持一致，改这里也要改那边。
+declare -A REPO PORT_LABEL
+REPO[kugou]="https://github.com/MakcRe/KuGouMusicApi.git"
+# 注意：原 Binaryify/NeteaseCloudMusicApi 已因版权问题停止维护（仓库只剩占位文件）。
+# 这里用社区持续维护的分支版本。
+REPO[netease]="https://github.com/neteasecloudmusicapienhanced/api-enhanced.git"
+REPO[qqmusic]="https://github.com/Rain120/qq-music-api.git"
+
+PORT_LABEL[kugou]="3000(标准版) / 3001(概念版)"
+PORT_LABEL[netease]="3002"
+PORT_LABEL[qqmusic]="3003"
+
+# 目录名：kugou -> KuGouMusicApi，netease -> NeteaseCloudMusicApi，qqmusic -> QQMusicApi
+dir_for() {
+  case "$1" in
+    kugou) echo "$ROOT/KuGouMusicApi" ;;
+    netease) echo "$ROOT/NeteaseCloudMusicApi" ;;
+    qqmusic) echo "$ROOT/QQMusicApi" ;;
+  esac
+}
+
+alive() {
+  curl -sf --max-time 2 "http://127.0.0.1:$1/" >/dev/null 2>&1
+}
+
+status_of() {
+  case "$1" in
+    kugou)
+      alive 3000 && printf '标准版:3000 运行中 ' || printf '标准版:3000 未运行 '
+      alive 3001 && printf '概念版:3001 运行中' || printf '概念版:3001 未运行'
+      ;;
+    netease)
+      alive 3002 && echo "3002 运行中" || echo "3002 未运行"
+      ;;
+    qqmusic)
+      alive 3003 && echo "3003 运行中" || echo "3003 未运行"
+      ;;
+  esac
+}
+
+start_kugou() {
+  # 酷狗要起两个实例（platform 不同），交给现成的 kugou-api 脚本
+  if [ -x "$(dirname "$0")/kugou-api" ]; then
+    "$(dirname "$0")/kugou-api" start
+  else
+    printf '  \033[33m找不到 kugou-api 脚本，请手动执行：kugou-api start\033[0m\n'
+  fi
+}
+
+start_simple() {
+  local name="$1" port="$2" dir="$3"
+  if alive "$port"; then
+    printf '  :%s 已在运行\n' "$port"
+    return 0
+  fi
+  ( cd "$dir" && PORT="$port" setsid nohup node app.js >/tmp/kugou-api-$name.log 2>&1 </dev/null & )
+  for _ in $(seq 1 40); do
+    sleep 0.5
+    alive "$port" && break
+  done
+  alive "$port" && printf '  \033[32m:%s 已就绪\033[0m\n' "$port" \
+    || printf '  \033[31m:%s 启动失败，日志：/tmp/kugou-api-%s.log\033[0m\n' "$port" "$name"
+}
+
+install_one() {
+  local name="$1"
+  local dir; dir=$(dir_for "$name")
+
+  printf '\033[36m== %s ==\033[0m\n' "$name"
+
+  # 判断「装好了没有」要看入口文件，不能只看目录在不在——
+  # clone 中断、只拉到 README 之类的情况都会留下一个空壳目录。
+  if [ -f "$dir/app.js" ]; then
+    printf '  已安装：%s\n' "$dir"
+  elif [ -d "$dir" ] && [ -n "$(ls -A "$dir" 2>/dev/null)" ]; then
+    printf '  \033[31m目录已存在但没有 app.js，疑似安装不完整：%s\033[0m\n' "$dir"
+    printf '  确认无误后可手动删除该目录再重试。\n'
+    return 1
+  else
+    # 空目录（或不存在）：清掉再克隆，避免 git 报「目标已存在」
+    [ -d "$dir" ] && rmdir "$dir"
+    printf '  克隆 %s → %s\n' "${REPO[$name]}" "$dir"
+    git clone --depth 1 "${REPO[$name]}" "$dir" || {
+      printf '  \033[31m克隆失败\033[0m\n'; return 1; }
+    printf '  安装依赖（首次约需一两分钟）…\n'
+    ( cd "$dir" && npm install ) || {
+      printf '  \033[31m依赖安装失败\033[0m\n'; return 1; }
+  fi
+
+  case "$name" in
+    kugou) start_kugou ;;
+    netease) start_simple netease 3002 "$dir" ;;
+    qqmusic) start_simple qqmusic 3003 "$dir" ;;
+  esac
+  printf '  端口：%s\n' "${PORT_LABEL[$name]}"
+}
+
+case "${1:-list}" in
+  all)
+    for name in kugou netease qqmusic; do install_one "$name"; done
+    ;;
+  kugou|netease|qqmusic)
+    install_one "$1"
+    ;;
+  list|"")
+    printf '可安装的音源服务（安装到 %s）：\n\n' "$ROOT"
+    for name in kugou netease qqmusic; do
+      printf '  %-8s %-45s %s\n' "$name" "${REPO[$name]}" "$(status_of "$name")"
+    done
+    printf '\n用法：kugou-api-install <kugou|netease|qqmusic|all>\n'
+    ;;
+  *)
+    printf '未知音源：%s\n用法：kugou-api-install <kugou|netease|qqmusic|all>\n' "$1" >&2
+    exit 1
+    ;;
+esac

@@ -191,7 +191,8 @@ impl SourceKind {
 /// 一个音源的连接与身份信息。
 ///
 /// **三个字段都是平台相关的，不能跨音源复用。**
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+// 刻意不 derive Default：见下面的手写实现（默认必须是「已启用」）
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceProfile {
     /// 该音源 API 服务的地址。
     pub api_base: String,
@@ -214,6 +215,22 @@ pub struct SourceProfile {
 
 fn default_enabled() -> bool {
     true
+}
+
+/// 手写 Default 而不是 derive：`enabled` 必须默认是 **true**。
+///
+/// 配置文件里缺某个音源的段时，serde 会走这里的 Default —— 若用 derive，
+/// bool 会拿到 false，新加的音源一上来就是禁用的，用户得先手动启用才能用。
+impl Default for SourceProfile {
+    fn default() -> Self {
+        Self {
+            api_base: String::new(),
+            cookie: None,
+            device_id: None,
+            enabled: true,
+            priority: 0,
+        }
+    }
 }
 
 impl SourceProfile {
@@ -348,6 +365,17 @@ impl SourceKind {
             Self::Kugou | Self::KugouConcept => client.song_stream_url(song, quality).await,
             Self::Netease => netease::song_stream_url(client, song, quality).await,
             Self::QqMusic => qqmusic::song_stream_url(client, song, quality).await,
+        }
+    }
+
+    /// 取封面图片地址。不支持或取不到时返回 \`Ok(None)\`。
+    ///
+    /// 酷狗与 QQ 音乐的搜索结果里直接带封面 URL；网易云的搜索结果**只有
+    /// \`picId\` 没有 URL**，得再查一次 \`/song/detail\` 才能拿到——实测确认。
+    pub async fn cover_url(self, client: &ApiClient, song: &Song) -> Result<Option<String>> {
+        match self {
+            Self::Kugou | Self::KugouConcept | Self::QqMusic => Ok(song.cover.clone()),
+            Self::Netease => netease::cover_url(client, song).await,
         }
     }
 
