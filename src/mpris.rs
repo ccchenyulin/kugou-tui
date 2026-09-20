@@ -308,6 +308,8 @@ pub fn spawn(bus: EventBus) -> Option<MprisHandle> {
     let info = Arc::new(Mutex::new(TrackInfo::default()));
 
     let info_clone = Arc::clone(&info);
+    // 信号循环需要独立的一份引用：info_clone 会被 move 进 Player
+    let info_signal = Arc::clone(&info);
     // 用独立线程跑 tokio 运行时：zbus 的连接是异步的，而我们的网络运行时
     // 只有 2 个 worker 且可能被下载占满，不适合再塞一个长驻连接。
     std::thread::spawn(move || {
@@ -325,18 +327,65 @@ pub fn spawn(bus: EventBus) -> Option<MprisHandle> {
                 bus,
             };
 
-            let result = async {
+            let result: Result<(), zbus::Error> = async {
                 let connection = ConnectionBuilder::session()?
                     .name(BUS_NAME)?
                     .serve_at(OBJECT_PATH, player)?
                     .serve_at(OBJECT_PATH, MediaPlayer2)?
                     .build()
                     .await?;
-                // 连接必须一直持有，drop 掉就等于从总线注销了。
-                // 这里挂起直到进程结束。
-                let _connection = connection;
-                std::future::pending::<()>().await;
-                Ok::<(), zbus::Error>(())
+
+                // 属性变化信号。
+                //
+                // `#[zbus(property)]` 只提供读取，不会在值变化时自动发
+                // `PropertiesChanged`。纯轮询的客户端（playerctl）无所谓，
+                // 但依赖信号更新的桌面组件会反应滞后甚至不更新。
+                // 所以这里定时比对快照，变了就发信号。
+                //
+                // 0.5 秒足够：媒体控件不需要更实时，而这个循环只是读一次锁。
+                let iface = connection
+                    .object_server()
+                    .interface::<_, Player>(OBJECT_PATH)
+                    .await?;
+                let mut last: Option<TrackInfo> = None;
+
+                loop {
+                    // lock() 返回 Result；锁中毒时取 inner，宁可显示旧值也别卡住循环
+                    let current = match info_signal.lock() {
+                        Ok(guard) => Some(guard.clone()),
+                        Err(poisoned) => Some(poisoned.into_inner().clone()),
+                    };
+
+                    let changed = match (&last, &current) {
+                        (Some(prev), Some(cur)) => {
+                            prev.title != cur.title
+                                || prev.artists != cur.artists
+                                || prev.album != cur.album
+                                || prev.art_url != cur.art_url
+                                || prev.status_str() != cur.status_str()
+                                // 位置一直在走，只有跳变超过 1 秒才发信号，
+                                // 否则每半秒一次太吵
+                                || (prev.position_us - cur.position_us).abs() > 1_000_000
+                        }
+                        _ => true,
+                    };
+
+                    if changed {
+                        last = current;
+                        let ctxt = iface.signal_emitter();
+                        // 生成的 *_changed 是实例方法，需要通过接口引用调用
+                        let player_ref = iface.get().await;
+                        let _ = player_ref.playback_status_changed(ctxt).await;
+                        let _ = player_ref.metadata_changed(ctxt).await;
+                        let _ = player_ref.position_changed(ctxt).await;
+                    }
+
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+
+                // loop 永不退出，这里只是为了满足类型推断（! 可 coerce 成 ()）
+                #[allow(unreachable_code)]
+                Ok(())
             }
             .await;
 
