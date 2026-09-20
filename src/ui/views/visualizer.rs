@@ -43,9 +43,8 @@ pub fn render_visualizer(
     }
 
     // 节奏：频谱占满剩余空间，底部依次是「曲目信息」和「说明」，中间留一行呼吸
-    let [bars_area, _gap, info_area, hint_area] = Layout::vertical([
+    let [bars_area, _gap, info_area] = Layout::vertical([
         Constraint::Min(2),
-        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
@@ -69,7 +68,6 @@ pub fn render_visualizer(
     }
 
     render_track_info(frame, info_area, state, theme);
-    render_hint(frame, hint_area, theme);
 }
 
 /// 两侧各收缩 `amount` 列（总量不够时不收缩）。
@@ -208,17 +206,6 @@ fn render_track_info(frame: &mut Frame, area: Rect, state: &AppState, theme: &Th
             Span::styled(title, theme.title()),
             Span::styled(position, theme.dim()),
         ]))
-        .alignment(Alignment::Center),
-        area,
-    );
-}
-
-fn render_hint(frame: &mut Frame, area: Rect, theme: &Theme) {
-    frame.render_widget(
-        ratatui::widgets::Paragraph::new(Span::styled(
-            "数据来自实时音频采样，不是随机动画",
-            theme.dim(),
-        ))
         .alignment(Alignment::Center),
         area,
     );

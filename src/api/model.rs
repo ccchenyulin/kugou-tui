@@ -255,8 +255,19 @@ pub fn pick_array<'a>(object: &'a Value, keys: &[&str]) -> &'a [Value] {
 
 /// 校验 KuGouMusicApi 的业务错误码。
 ///
-/// 只检查 `error_code`：`status` 字段在不同接口语义不一致（有的用 1/0，有的用 200），
-/// 拿它做判断会误杀正常响应。
+/// # 为什么只认 `error_code`
+///
+/// 曾试图把 `errcode` 也纳入判断（`/song/url` 用它返回 20028「本次请求需要验证」），
+/// 但实测发现**各接口的 `errcode` 语义不一致**：
+///
+/// * `/song/url` 失败：`errcode: 20028`
+/// * `/search/lyric` 成功：`errcode: 200`（！）
+///
+/// 一刀切地「非 0 即错」会把每次歌词搜索都判成失败。所以这里只认语义统一的
+/// `error_code`；`/song/url` 的错误由 `catalog::song_stream_url` 显式读 `error`
+/// 字段处理——那里能拿到「本次请求需要验证」这样的可读原因，比错误码更有用。
+///
+/// 同理刻意**不**看 `status`：不同接口 1 / 200 / 2 都出现过，且含义相反。
 pub fn check_error_code(path: &str, root: &Value) -> Result<()> {
     let Some(code) = root.get("error_code").and_then(value_to_i64) else {
         return Ok(());
