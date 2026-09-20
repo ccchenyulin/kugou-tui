@@ -1092,9 +1092,12 @@ impl AppState {
         // 一拍（5fps），若沿用 40ms 起振，每拍的系数是 1-exp(-0.2/0.04)≈0.99，
         // 等于电平每帧直接跳到当前真实值——八级块字符在 ▁ 与 █ 之间剧烈跳变，
         // 看起来就是侧边栏一直在闪（用户实测反馈）。
-        // 放到 0.15s / 0.6s 后，每拍只走 74% / 28%，变化就连续了。
-        let attack = 1.0 - (-seconds / 0.15).exp();
-        let decay = 1.0 - (-seconds / 0.60).exp();
+        // 时间常数必须**远大于帧间隔**才平滑：200ms 一帧时，0.45s 的起振每拍只走
+        // 36%，鼓点的瞬时冲击被摊到好几帧里，块字符才是「涨落」而不是「跳变」。
+        // （先前试过 0.15s，每拍仍走 74%，鼓点一响照样整条跳——用户实测反馈
+        // 「鼓点强的地方闪得快」，说的就是这个。）
+        let attack = 1.0 - (-seconds / 0.45).exp();
+        let decay = 1.0 - (-seconds / 1.20).exp();
         // 峰值刻度每秒下落 50%（约 2 秒落到底），比柱子慢得多，才有频谱仪的余韵
         let peak_fall = seconds * 0.5;
 
@@ -1236,6 +1239,35 @@ mod tests {
         // 音源管理排在 NUMBERED 之外，数字键够不到（用 v 打开）。
         // 11 是 1 基索引下的第 11 项，正好指向 Sources，应当被挡住。
         assert_eq!(Tab::from_number(11), None, "音源页不该被数字键够到");
+    }
+
+    /// 5fps（200ms 一拍）下，鼓点的瞬时冲击不能被一帧走完——否则块字符在
+    /// ▁ 与 █ 之间跳变，看起来就是侧边栏一直在闪（用户实测反馈「鼓点强的地方
+    /// 闪得快」，说的就是这个）。
+    #[test]
+    fn level_easing_smooths_spikes_at_low_fps() {
+        let mut state = AppState::new(Config::default());
+        let frame = std::time::Duration::from_millis(200);
+
+        // 静音中突然来一记鼓点
+        state.levels = vec![1.0; 8];
+        state.smooth_levels = vec![0.0; 8];
+        state.advance_visualizer(frame);
+        let after_one = state.smooth_levels[0];
+        assert!(
+            after_one < 0.5,
+            "单帧就跳到 {after_one:.2}，太快了，视觉上就是闪"
+        );
+
+        // 但持续几拍后要能爬到位，不能永远上不去
+        for _ in 0..8 {
+            state.advance_visualizer(frame);
+        }
+        assert!(
+            state.smooth_levels[0] > 0.9,
+            "8 拍后只到 {:.2}，太迟钝",
+            state.smooth_levels[0]
+        );
     }
 
     #[test]
