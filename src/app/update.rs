@@ -237,6 +237,7 @@ impl App {
                         ConfirmAction::ClearQueue => self.clear_queue(),
                         ConfirmAction::DeleteCloudPlaylist => self.delete_cloud_playlist(),
                         ConfirmAction::ClearCache => self.clear_cache(),
+                        ConfirmAction::Relogin => self.relogin(),
                     }
                 }
                 Action::Cancel | Action::Char('n') | Action::Char('N') => {
@@ -1330,15 +1331,33 @@ impl App {
     /// 流程是 `/login/qr/key` → `/login/qr/create` → 轮询 `/login/qr/check`。
     /// 二维码直接渲染在界面上，不用切终端，也不用额外依赖 `qrencode` 之类的命令行工具。
     fn start_login(&mut self) {
-        let config_path = Config::path();
-
+        // 已登录时**不能**就此挡住。
+        //
+        // `logged_in` 只看 cookie 里有没有 `token=` 字段，判断不出 token 是否已经
+        // 被服务端作废（实测 `/user/playlist` 会返回 20017）。若在这里直接返回，
+        // 用户就会陷入死局：云端功能全部报登录失效，可按 `L` 只回一句「已登录」，
+        // 没有任何途径重新扫码。
+        //
+        // 但仍要确认一次：凭据有效时误按 `L` 会把它冲掉。
         if self.state.logged_in {
-            // 只提示保存位置，不回显凭据
-            self.state
-                .info(format!("已登录，凭据保存在 {}", config_path.display()));
+            self.state.pending_confirm = Some(ConfirmAction::Relogin);
             return;
         }
 
+        self.begin_login();
+    }
+
+    /// 确认后重新登录：清掉旧凭据（保留 dfid，它是设备指纹不是登录态）再扫码。
+    fn relogin(&mut self) {
+        self.state.config.cookie = None;
+        self.state.logged_in = false;
+        // cookie 清空后 cookie_header() 只会剩下 dfid，正是想要的效果
+        self.api.set_cookie(self.state.config.cookie_header());
+        self.begin_login();
+    }
+
+    /// 真正发起扫码请求。与「要不要扫」的判断分开，两条入口共用。
+    fn begin_login(&mut self) {
         if let Some(login) = self.state.login.as_ref() {
             if !login.finished {
                 self.state.info("登录已在进行中，扫码或按 Esc 取消");
@@ -2120,6 +2139,12 @@ impl App {
                 self.state.busy = None;
                 self.state.download_progress = None;
                 tlog!(crate::logger::LEVEL_ERROR, "{context}：{error}");
+                // 凭据被服务端作废后，界面若还挂着「登录 是」就是谎言——用户会
+                // 以为登录态是好的、转而去怀疑别处。标记失效后，按 L 直接进扫码
+                // （不再弹「已登录，是否覆盖」的确认）。
+                if error.is_login_expired() {
+                    self.state.logged_in = false;
+                }
                 let hint = error.user_hint();
                 self.state.error(format!("{context}：{hint}"));
             }

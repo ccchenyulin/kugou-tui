@@ -635,6 +635,8 @@ pub enum ConfirmAction {
     DeleteCloudPlaylist,
     /// 清空音频缓存目录。
     ClearCache,
+    /// 已有登录态时再按 `L`：重新扫码会覆盖现有凭据。
+    Relogin,
 }
 
 impl ConfirmAction {
@@ -643,6 +645,7 @@ impl ConfirmAction {
             Self::ClearQueue => "清空整个播放队列并停止播放？",
             Self::DeleteCloudPlaylist => "删除这个云端歌单？该操作会取消收藏它。",
             Self::ClearCache => "清空音频缓存？已缓存的歌曲需要重新下载。",
+            Self::Relogin => "已登录。重新扫码会覆盖当前凭据，确定要重新登录？",
         }
     }
 
