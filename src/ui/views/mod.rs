@@ -35,7 +35,10 @@ use crate::ui::widgets::{display_width, human_bytes, panel, placeholder, truncat
 
 /// 侧边栏宽度：随终端宽度伸缩，但保持在一个可读区间内。
 pub fn sidebar_width(total_width: u16) -> u16 {
-    (total_width / 5).clamp(20, 30)
+    // 下限 24 而不是 20：panel 的左右内边距各占 1 列，加上边框 2 列，
+    // 20 列只剩 16 列可用——「API 127.0.0.1:3001」这类行会被挤断成两行。
+    // 24 列刚好放得下最长的那一行（20 字符）。
+    (total_width / 5).clamp(24, 32)
 }
 
 /// 左侧导航栏：标签页切换 + 连接/播放/缓存概览。

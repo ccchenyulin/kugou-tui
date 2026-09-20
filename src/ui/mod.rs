@@ -68,6 +68,8 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
         Constraint::Length(PLAYER_HEIGHT),
         Constraint::Length(STATUS_HEIGHT),
     ])
+    // 三段之间各留一空行：紧贴着会让整屏看起来像一堵墙
+    .spacing(1)
     .areas(area);
 
     let show_sidebar = state.sidebar_visible && content_area.width >= SIDEBAR_MIN_TOTAL_WIDTH;
@@ -76,6 +78,7 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
             Constraint::Length(views::sidebar_width(content_area.width)),
             Constraint::Min(24),
         ])
+        .spacing(1)
         .areas(content_area);
         (Some(sidebar), main)
     } else {

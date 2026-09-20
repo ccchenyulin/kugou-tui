@@ -5,6 +5,7 @@
 
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
+use ratatui::widgets::Padding;
 use ratatui::widgets::{Block, BorderType, Borders, HighlightSpacing, List, ListItem, Paragraph};
 
 use crate::api::model::Song;
@@ -117,6 +118,8 @@ pub fn panel(title: impl Into<Line<'static>>, focused: bool, theme: &Theme) -> B
         .border_style(border_style)
         .title(title.into())
         .title_style(if focused { theme.title() } else { theme.dim() })
+        // 左右各留一列：内容贴着边框会显得很挤（rmpc 全项目都这么做）
+        .padding(Padding::horizontal(1))
 }
 
 /// 在 `area` 内居中放置一个固定尺寸的矩形，用于弹窗。
