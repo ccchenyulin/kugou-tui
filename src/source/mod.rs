@@ -42,7 +42,6 @@
 //!
 
 mod netease;
-mod qqmusic;
 
 use serde::{Deserialize, Serialize};
 
@@ -70,8 +69,6 @@ pub enum SourceKind {
     KugouConcept,
     /// 网易云音乐（NeteaseCloudMusicApi）。
     Netease,
-    /// QQ 音乐（QQMusicApi）。
-    QqMusic,
 }
 
 /// 一个音源具备哪些能力。
@@ -102,11 +99,10 @@ pub struct Capability {
 }
 
 impl SourceKind {
-    pub const ALL: [SourceKind; 4] = [
+    pub const ALL: [SourceKind; 3] = [
         SourceKind::Kugou,
         SourceKind::KugouConcept,
         SourceKind::Netease,
-        SourceKind::QqMusic,
     ];
 
     /// 界面显示名。
@@ -115,7 +111,6 @@ impl SourceKind {
             SourceKind::Kugou => "酷狗",
             SourceKind::KugouConcept => "酷狗概念版",
             SourceKind::Netease => "网易云",
-            SourceKind::QqMusic => "QQ音乐",
         }
     }
 
@@ -145,16 +140,6 @@ impl SourceKind {
                 catalog: false,
                 cloud: true,
             },
-            // QQ 音乐：服务端的登录接口未确认，先不开放
-            SourceKind::QqMusic => Capability {
-                stream: true,
-                lyric: true,
-                cover: true,
-                login: false,
-                client_token: false,
-                catalog: false,
-                cloud: false,
-            },
         }
     }
 
@@ -167,7 +152,6 @@ impl SourceKind {
             SourceKind::Kugou => "http://127.0.0.1:3000",
             SourceKind::KugouConcept => "http://127.0.0.1:3001",
             SourceKind::Netease => "http://127.0.0.1:3002",
-            SourceKind::QqMusic => "http://127.0.0.1:3003",
         }
     }
 
@@ -176,7 +160,7 @@ impl SourceKind {
         match self {
             SourceKind::Kugou => None,
             SourceKind::KugouConcept => Some("lite"),
-            SourceKind::Netease | SourceKind::QqMusic => None,
+            SourceKind::Netease => None,
         }
     }
 
@@ -196,7 +180,6 @@ impl SourceKind {
         match self {
             SourceKind::Kugou | SourceKind::KugouConcept => "酷狗",
             SourceKind::Netease => "网易云音乐",
-            SourceKind::QqMusic => "QQ 音乐",
         }
     }
 
@@ -205,7 +188,6 @@ impl SourceKind {
         match self {
             SourceKind::Kugou | SourceKind::KugouConcept => "KuGouMusicApi",
             SourceKind::Netease => "NeteaseCloudMusicApi",
-            SourceKind::QqMusic => "QQMusicApi",
         }
     }
 }
@@ -288,8 +270,6 @@ pub struct SourceSet {
     pub kugou_concept: SourceProfile,
     #[serde(default)]
     pub netease: SourceProfile,
-    #[serde(default)]
-    pub qqmusic: SourceProfile,
     /// 当前选中的音源。
     pub active: SourceKind,
 }
@@ -300,7 +280,6 @@ impl Default for SourceSet {
             kugou: SourceProfile::new(SourceKind::Kugou),
             kugou_concept: SourceProfile::new(SourceKind::KugouConcept),
             netease: SourceProfile::new(SourceKind::Netease),
-            qqmusic: SourceProfile::new(SourceKind::QqMusic),
             active: SourceKind::Kugou,
         }
     }
@@ -312,7 +291,6 @@ impl SourceSet {
             SourceKind::Kugou => &self.kugou,
             SourceKind::KugouConcept => &self.kugou_concept,
             SourceKind::Netease => &self.netease,
-            SourceKind::QqMusic => &self.qqmusic,
         }
     }
 
@@ -321,7 +299,6 @@ impl SourceSet {
             SourceKind::Kugou => &mut self.kugou,
             SourceKind::KugouConcept => &mut self.kugou_concept,
             SourceKind::Netease => &mut self.netease,
-            SourceKind::QqMusic => &mut self.qqmusic,
         }
     }
 
@@ -372,7 +349,6 @@ impl SourceKind {
         match self {
             Self::Kugou | Self::KugouConcept => client.search_songs(keyword, page, page_size).await,
             Self::Netease => netease::search_songs(client, keyword, page, page_size).await,
-            Self::QqMusic => qqmusic::search_songs(client, keyword, page, page_size).await,
         }
     }
 
@@ -386,7 +362,6 @@ impl SourceKind {
         match self {
             Self::Kugou | Self::KugouConcept => client.song_stream_url(song, quality).await,
             Self::Netease => netease::song_stream_url(client, song, quality).await,
-            Self::QqMusic => qqmusic::song_stream_url(client, song, quality).await,
         }
     }
 
@@ -396,7 +371,7 @@ impl SourceKind {
     /// \`picId\` 没有 URL**，得再查一次 \`/song/detail\` 才能拿到——实测确认。
     pub async fn cover_url(self, client: &ApiClient, song: &Song) -> Result<Option<String>> {
         match self {
-            Self::Kugou | Self::KugouConcept | Self::QqMusic => Ok(song.cover.clone()),
+            Self::Kugou | Self::KugouConcept => Ok(song.cover.clone()),
             Self::Netease => netease::cover_url(client, song).await,
         }
     }
@@ -406,7 +381,6 @@ impl SourceKind {
         match self {
             Self::Kugou | Self::KugouConcept => client.fetch_lyric(song).await,
             Self::Netease => netease::fetch_lyric(client, song).await,
-            Self::QqMusic => qqmusic::fetch_lyric(client, song).await,
         }
     }
 
@@ -415,7 +389,6 @@ impl SourceKind {
         match self {
             Self::Kugou | Self::KugouConcept => client.login_qr_key().await,
             Self::Netease => netease::login_qr_key(client).await,
-            Self::QqMusic => Err(unsupported("登录")),
         }
     }
 
@@ -424,7 +397,6 @@ impl SourceKind {
         match self {
             Self::Kugou | Self::KugouConcept => client.login_qr_create(key).await,
             Self::Netease => netease::login_qr_create(client, key).await,
-            Self::QqMusic => Err(unsupported("登录")),
         }
     }
 
@@ -437,7 +409,6 @@ impl SourceKind {
         match self {
             Self::Kugou | Self::KugouConcept => client.login_qr_check(key).await,
             Self::Netease => netease::login_qr_check(client, key).await,
-            Self::QqMusic => Err(unsupported("登录")),
         }
     }
 
@@ -514,7 +485,6 @@ impl SourceKind {
         match self {
             Self::Kugou | Self::KugouConcept => client.user_playlists().await,
             Self::Netease => netease::user_playlists(client).await,
-            other => Err(unsupported(&format!("云端歌单（{}）", other.label()))),
         }
     }
 
@@ -526,7 +496,6 @@ impl SourceKind {
         match self {
             Self::Kugou | Self::KugouConcept => client.user_playlist_tracks_all(list_id).await,
             Self::Netease => netease::user_playlist_tracks_all(client, list_id).await,
-            other => Err(unsupported(&format!("云端歌单歌曲（{}）", other.label()))),
         }
     }
 }

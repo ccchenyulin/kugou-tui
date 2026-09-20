@@ -28,10 +28,6 @@ case "$ACTIVE_SOURCE" in
     API_DIR="${NETEASE_API_DIR:-$HOME/NeteaseCloudMusicApi}"
     SERVICE_NAME="NeteaseCloudMusicApi"
     ;;
-  qqmusic)
-    API_DIR="${QQMUSIC_API_DIR:-$HOME/QQMusicApi}"
-    SERVICE_NAME="QQMusicApi"
-    ;;
   *)
     API_DIR="${KUGOU_API_DIR:-$HOME/KuGouMusicApi}"
     SERVICE_NAME="KuGouMusicApi"

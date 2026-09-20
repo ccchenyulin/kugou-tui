@@ -25,18 +25,15 @@ REPO[kugou]="https://github.com/MakcRe/KuGouMusicApi.git"
 # 注意：原 Binaryify/NeteaseCloudMusicApi 已因版权问题停止维护（仓库只剩占位文件）。
 # 这里用社区持续维护的分支版本。
 REPO[netease]="https://github.com/neteasecloudmusicapienhanced/api-enhanced.git"
-REPO[qqmusic]="https://github.com/Rain120/qq-music-api.git"
 
 PORT_LABEL[kugou]="3000(标准版) / 3001(概念版)"
 PORT_LABEL[netease]="3002"
-PORT_LABEL[qqmusic]="3003"
 
-# 目录名：kugou -> KuGouMusicApi，netease -> NeteaseCloudMusicApi，qqmusic -> QQMusicApi
+# 目录名：kugou -> KuGouMusicApi，netease -> NeteaseCloudMusicApi
 dir_for() {
   case "$1" in
     kugou) echo "$ROOT/KuGouMusicApi" ;;
     netease) echo "$ROOT/NeteaseCloudMusicApi" ;;
-    qqmusic) echo "$ROOT/QQMusicApi" ;;
   esac
 }
 
@@ -52,9 +49,6 @@ status_of() {
       ;;
     netease)
       alive 3002 && echo "3002 运行中" || echo "3002 未运行"
-      ;;
-    qqmusic)
-      alive 3003 && echo "3003 运行中" || echo "3003 未运行"
       ;;
   esac
 }
@@ -75,20 +69,9 @@ start_simple() {
     return 0
   fi
 
-  # 启动方式按项目而定：网易云是纯 JS，直接 node app.js；
-  # QQ 音乐是 TypeScript（ts-node 跑 src/app.ts），只能走它自己的 npm start。
-  local cmd
-  case "$name" in
-    qqmusic) cmd=(npm start) ;;
-    *) cmd=(node app.js) ;;
-  esac
+  ( cd "$dir" && PORT="$port" setsid nohup node app.js >/tmp/kugou-api-$name.log 2>&1 </dev/null & )
 
-  ( cd "$dir" && PORT="$port" setsid nohup "${cmd[@]}" >/tmp/kugou-api-$name.log 2>&1 </dev/null & )
-
-  # ts-node 要现场编译，启动比纯 JS 慢，多等一会儿
-  local tries=40
-  [ "$name" = "qqmusic" ] && tries=80
-  for _ in $(seq 1 "$tries"); do
+  for _ in $(seq 1 40); do
     sleep 0.5
     alive "$port" && break
   done
@@ -104,13 +87,7 @@ install_one() {
 
   # 判断「装好了没有」要看入口文件，不能只看目录在不在——
   # clone 中断、只拉到 README 之类的情况都会留下一个空壳目录。
-  # 入口文件各项目不同：酷狗/网易云是纯 JS 的 app.js，
-  # QQ 音乐是 TypeScript 的 src/app.ts。
-  local entry
-  case "$name" in
-    qqmusic) entry="src/app.ts" ;;
-    *) entry="app.js" ;;
-  esac
+  local entry="app.js"
 
   if [ -f "$dir/$entry" ]; then
     printf '  已安装：%s\n' "$dir"
@@ -132,27 +109,26 @@ install_one() {
   case "$name" in
     kugou) start_kugou ;;
     netease) start_simple netease 3002 "$dir" ;;
-    qqmusic) start_simple qqmusic 3003 "$dir" ;;
   esac
   printf '  端口：%s\n' "${PORT_LABEL[$name]}"
 }
 
 case "${1:-list}" in
   all)
-    for name in kugou netease qqmusic; do install_one "$name"; done
+    for name in kugou netease; do install_one "$name"; done
     ;;
-  kugou|netease|qqmusic)
+  kugou|netease)
     install_one "$1"
     ;;
   list|"")
     printf '可安装的音源服务（安装到 %s）：\n\n' "$ROOT"
-    for name in kugou netease qqmusic; do
+    for name in kugou netease; do
       printf '  %-8s %-45s %s\n' "$name" "${REPO[$name]}" "$(status_of "$name")"
     done
-    printf '\n用法：kugou-api-install <kugou|netease|qqmusic|all>\n'
+    printf '\n用法：kugou-api-install <kugou|netease|all>\n'
     ;;
   *)
-    printf '未知音源：%s\n用法：kugou-api-install <kugou|netease|qqmusic|all>\n' "$1" >&2
+    printf '未知音源：%s\n用法：kugou-api-install <kugou|netease|all>\n' "$1" >&2
     exit 1
     ;;
 esac
