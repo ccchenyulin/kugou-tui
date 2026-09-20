@@ -16,6 +16,8 @@ use std::time::Duration;
 use rodio::Source;
 use rodio::source::SeekError;
 
+use crate::audio::spectrum::WINDOW_SIZE;
+
 /// 保留多少个电平格子。侧边栏宽度有限，28 格刚好铺满一行。
 pub const LEVEL_BUCKETS: usize = 28;
 
@@ -23,6 +25,60 @@ pub const LEVEL_BUCKETS: usize = 28;
 ///
 /// 44100Hz 立体声下约 15ms 一格：视觉上跟手，又不会被单个采样的抖动带偏。
 const SAMPLES_PER_BUCKET: usize = 1300;
+
+/// 供频谱分析用的原始采样窗口。
+///
+/// 为什么和电平格分开存：侧边栏的小条只要 28 个音量格就够，但频谱要做 FFT，
+/// 必须拿到**连续的**一段波形。两种数据用途不同，混在一起两边都别扭。
+///
+/// 同样是环形缓冲 + 原子量：音频线程每个采样写一次，主线程每帧读一次，
+/// 谁也不会被对方卡住。f32 没有原子版本，所以存它的位模式。
+#[derive(Debug, Clone)]
+pub struct SampleWindow {
+    samples: Arc<Vec<AtomicU32>>,
+    cursor: Arc<AtomicUsize>,
+}
+
+impl Default for SampleWindow {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SampleWindow {
+    pub fn new() -> Self {
+        let mut samples = Vec::with_capacity(WINDOW_SIZE);
+        samples.resize_with(WINDOW_SIZE, || AtomicU32::new(0.0f32.to_bits()));
+        Self {
+            samples: Arc::new(samples),
+            cursor: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// 追加一个（单声道）采样。
+    pub fn push(&self, sample: f32) {
+        let index = self.cursor.fetch_add(1, Ordering::Relaxed) % WINDOW_SIZE;
+        self.samples[index].store(sample.to_bits(), Ordering::Relaxed);
+    }
+
+    /// 按时间顺序取出整个窗口（最旧 → 最新）。
+    pub fn snapshot(&self) -> Vec<f32> {
+        let cursor = self.cursor.load(Ordering::Relaxed);
+        (0..WINDOW_SIZE)
+            .map(|offset| {
+                let index = (cursor + offset) % WINDOW_SIZE;
+                f32::from_bits(self.samples[index].load(Ordering::Relaxed))
+            })
+            .collect()
+    }
+
+    /// 清零。停止播放时调用，否则会留着上首歌的波形不动。
+    pub fn clear(&self) {
+        for sample in self.samples.iter() {
+            sample.store(0.0f32.to_bits(), Ordering::Relaxed);
+        }
+    }
+}
 
 /// 播放电平：环形缓冲，存最近若干格子的峰值（0..=1000 的整数，避免浮点原子量）。
 ///
@@ -32,6 +88,11 @@ const SAMPLES_PER_BUCKET: usize = 1300;
 pub struct AudioLevels {
     buckets: Arc<Vec<AtomicU32>>,
     cursor: Arc<AtomicUsize>,
+    /// 频谱分析用的原始波形。与电平格共享同一份 Arc，两边看到的是同一段声音。
+    window: Arc<SampleWindow>,
+    /// 当前音源的采样率，由 [`LevelMeter`] 建好时写入。FFT 要靠它把
+    /// bin 序号换算成频率，没有它就没法做对数分频。
+    sample_rate: Arc<AtomicU32>,
 }
 
 impl Default for AudioLevels {
@@ -47,6 +108,8 @@ impl AudioLevels {
         Self {
             buckets: Arc::new(buckets),
             cursor: Arc::new(AtomicUsize::new(0)),
+            window: Arc::new(SampleWindow::new()),
+            sample_rate: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -55,6 +118,25 @@ impl AudioLevels {
         let value = (level.clamp(0.0, 1.0) * 1000.0) as u32;
         let index = self.cursor.fetch_add(1, Ordering::Relaxed) % LEVEL_BUCKETS;
         self.buckets[index].store(value, Ordering::Relaxed);
+    }
+
+    /// 追加一个（单声道）原始采样，供频谱分析用。
+    fn push_sample(&self, sample: f32) {
+        self.window.push(sample);
+    }
+
+    /// 记录采样率。换歌时会变（不同来源的文件采样率未必相同）。
+    fn set_sample_rate(&self, sample_rate: u32) {
+        self.sample_rate.store(sample_rate, Ordering::Relaxed);
+    }
+
+    /// 当前这段声音的频谱，返回 `bands` 个 0.0 ~ 1.0 的能量值。
+    ///
+    /// 在主线程调用（每帧一次）：FFT 是纯计算，放在音频线程里会拖住播放。
+    pub fn spectrum(&self, bands: usize) -> Vec<f32> {
+        let samples = self.window.snapshot();
+        let sample_rate = self.sample_rate.load(Ordering::Relaxed);
+        crate::audio::spectrum::analyze(&samples, sample_rate, bands)
     }
 
     /// 按时间顺序取出全部格子（最旧 → 最新），归一化到 0.0 ~ 1.0。
@@ -73,6 +155,7 @@ impl AudioLevels {
         for bucket in self.buckets.iter() {
             bucket.store(0, Ordering::Relaxed);
         }
+        self.window.clear();
     }
 }
 
@@ -82,15 +165,26 @@ pub struct LevelMeter<S> {
     levels: AudioLevels,
     peak: f32,
     counted: usize,
+    /// 声道数与当前声道下标，用来只取一个声道——立体声的两个声道交错排列，
+    /// 全塞进采样窗口等于把两条不同的波形混在一起，频谱会乱。
+    channels: u16,
+    channel: u16,
 }
 
-impl<S> LevelMeter<S> {
+impl<S> LevelMeter<S>
+where
+    S: Source,
+{
     pub fn new(inner: S, levels: AudioLevels) -> Self {
+        let channels = inner.channels().get();
+        levels.set_sample_rate(inner.sample_rate().get());
         Self {
             inner,
             levels,
             peak: 0.0,
             counted: 0,
+            channels,
+            channel: 0,
         }
     }
 }
@@ -108,6 +202,12 @@ where
         if amplitude > self.peak {
             self.peak = amplitude;
         }
+
+        // 只把第 0 声道写进采样窗口，保证窗口里是一条连续的波形
+        if self.channel == 0 {
+            self.levels.push_sample(sample);
+        }
+        self.channel = (self.channel + 1) % self.channels;
 
         self.counted += 1;
         if self.counted >= SAMPLES_PER_BUCKET {

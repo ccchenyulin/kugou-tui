@@ -26,6 +26,7 @@ pub mod cache;
 pub mod download;
 pub mod engine;
 pub mod levels;
+pub mod spectrum;
 
 pub use cache::AudioCache;
 pub use download::Downloader;

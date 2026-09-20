@@ -245,6 +245,14 @@ impl AudioHandle {
         self.levels.snapshot()
     }
 
+    /// 当前这段声音的频谱（`bands` 个 0.0 ~ 1.0 的能量值）。
+    ///
+    /// FFT 在这里（主线程）算，不在音频线程：它是一次纯计算，放进音频线程
+    /// 会拖住采样供给，表现出来就是爆音。
+    pub fn spectrum(&self, bands: usize) -> Vec<f32> {
+        self.levels.spectrum(bands)
+    }
+
     /// 标记为「缓冲中」。UI 在发起下载前调用，让用户立刻看到反馈。
     pub fn mark_loading(&self) {
         self.shared.set_state(PlaybackState::Loading);

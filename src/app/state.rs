@@ -105,6 +105,15 @@ impl Tab {
         }
         Self::ALL.get(index).copied()
     }
+
+    /// 侧边栏第 `index` 项对应的标签页（鼠标点击用）。
+    ///
+    /// 刻意不走 [`Self::from_number`]：那是**数字键**的映射，只覆盖前
+    /// [`Self::NUMBERED`] 页。鼠标不受键盘上那十个键的限制——列表里点得到
+    /// 第几项，就该切到第几页。
+    pub fn from_sidebar_index(index: usize) -> Option<Self> {
+        Self::ALL.get(index).copied()
+    }
 }
 
 /// 当前获得按键的面板。
@@ -630,12 +639,16 @@ pub struct AppState {
     pub hover: Option<(u16, u16)>,
 
     /// 播放电平（0.0~1.0），来自音频线程的真实采样峰值。会随播放逐帧刷新。
+    ///
+    /// 这是**时域**的——最近若干格子的音量历史，侧边栏那条小跳动条用它。
     pub levels: Vec<f32>,
-    /// 平滑后的电平。原始电平每 ~15ms 跳一次，直接画会明显抖动；这里做
+    /// 当前这段声音的频谱（0.0~1.0），由 FFT 分频得到，**频域**。
+    pub spectrum: Vec<f32>,
+    /// 平滑后的频谱。原始频谱每帧跳一次，直接画会明显抖动；这里做
     /// 「快起慢落」的缓动后，柱子才跟手又不抖。
-    pub smooth_levels: Vec<f32>,
+    pub smooth_spectrum: Vec<f32>,
     /// 峰值保持：柱顶那条刻度线的高度，比柱子本身落得慢，形成经典频谱的观感。
-    pub peak_levels: Vec<f32>,
+    pub peak_spectrum: Vec<f32>,
     /// 当前音量，`0.0 ~ 1.0`。
     pub volume: f32,
     /// 静音前的音量，用于 `m` 键还原。
@@ -831,8 +844,9 @@ impl AppState {
             position_ms: 0,
             hover: None,
             levels: Vec::new(),
-            smooth_levels: Vec::new(),
-            peak_levels: Vec::new(),
+            spectrum: Vec::new(),
+            smooth_spectrum: Vec::new(),
+            peak_spectrum: Vec::new(),
             duration_ms: 0,
             volume,
             volume_before_mute: None,
@@ -1096,15 +1110,15 @@ impl AppState {
     /// 按**真实经过时间**做指数平滑，而不是按帧数。这样帧率变化（例如从省电的
     /// 5fps 切到 30fps）时，柱子的快慢观感保持一致，不会出现「帧率低就掉得慢」。
     pub fn advance_visualizer(&mut self, elapsed: std::time::Duration) {
-        if self.levels.is_empty() {
-            self.smooth_levels.clear();
-            self.peak_levels.clear();
+        if self.spectrum.is_empty() {
+            self.smooth_spectrum.clear();
+            self.peak_spectrum.clear();
             return;
         }
 
-        let count = self.levels.len();
-        self.smooth_levels.resize(count, 0.0);
-        self.peak_levels.resize(count, 0.0);
+        let count = self.spectrum.len();
+        self.smooth_spectrum.resize(count, 0.0);
+        self.peak_spectrum.resize(count, 0.0);
 
         // 夹一下：切标签页或卡顿后 elapsed 可能很大，避免一帧跳到底
         let seconds = elapsed.as_secs_f32().clamp(0.0, 0.5);
@@ -1124,14 +1138,14 @@ impl AppState {
         let peak_fall = seconds * 0.5;
 
         for index in 0..count {
-            let target = self.levels[index].clamp(0.0, 1.0);
-            let current = self.smooth_levels[index];
+            let target = self.spectrum[index].clamp(0.0, 1.0);
+            let current = self.smooth_spectrum[index];
             let factor = if target > current { attack } else { decay };
             let next = current + (target - current) * factor;
-            self.smooth_levels[index] = next;
+            self.smooth_spectrum[index] = next;
 
-            let peak = self.peak_levels[index];
-            self.peak_levels[index] = (peak - peak_fall).max(next);
+            let peak = self.peak_spectrum[index];
+            self.peak_spectrum[index] = (peak - peak_fall).max(next);
         }
     }
 }
@@ -1263,6 +1277,25 @@ mod tests {
         assert_eq!(Tab::from_number(11), None, "音源页不该被数字键够到");
     }
 
+    /// 鼠标点击侧边栏必须能到**每一页**，包括数字键够不到的那几页。
+    ///
+    /// 之前点击走的是 `from_number`，结果点第 11 项（音源）拿到 None，
+    /// 表现就是「点了没反应」。
+    #[test]
+    fn sidebar_click_reaches_every_tab() {
+        for (index, expected) in Tab::ALL.iter().enumerate() {
+            assert_eq!(
+                Tab::from_sidebar_index(index),
+                Some(*expected),
+                "侧边栏第 {index} 项应当切到 {expected:?}"
+            );
+        }
+        // 最后一页正是数字键够不到、但鼠标必须够得到的那个
+        assert_eq!(Tab::ALL.len(), 11);
+        assert_eq!(Tab::from_sidebar_index(10), Some(Tab::Sources));
+        assert!(Tab::from_sidebar_index(Tab::ALL.len()).is_none());
+    }
+
     /// 5fps（200ms 一拍）下，鼓点的瞬时冲击不能被一帧走完——否则块字符在
     /// ▁ 与 █ 之间跳变，看起来就是侧边栏一直在闪（用户实测反馈「鼓点强的地方
     /// 闪得快」，说的就是这个）。
@@ -1272,10 +1305,10 @@ mod tests {
         let frame = std::time::Duration::from_millis(200);
 
         // 静音中突然来一记鼓点
-        state.levels = vec![1.0; 8];
-        state.smooth_levels = vec![0.0; 8];
+        state.spectrum = vec![1.0; 8];
+        state.smooth_spectrum = vec![0.0; 8];
         state.advance_visualizer(frame);
-        let after_one = state.smooth_levels[0];
+        let after_one = state.smooth_spectrum[0];
         assert!(
             after_one < 0.5,
             "单帧就跳到 {after_one:.2}，太快了，视觉上就是闪"
@@ -1286,9 +1319,9 @@ mod tests {
             state.advance_visualizer(frame);
         }
         assert!(
-            state.smooth_levels[0] > 0.9,
+            state.smooth_spectrum[0] > 0.9,
             "8 拍后只到 {:.2}，太迟钝",
-            state.smooth_levels[0]
+            state.smooth_spectrum[0]
         );
     }
 

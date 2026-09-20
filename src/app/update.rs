@@ -25,6 +25,7 @@ use crate::source::SourceKind;
 
 use crate::audio::download::Downloader;
 use crate::audio::engine::{AudioEvent, PlaybackState, SEEK_STEP_MS, VOLUME_STEP};
+use crate::audio::spectrum::BAND_COUNT;
 use crate::event::{Event, Loaded, PlaylistSource};
 use crate::keymap::{Action, KeyMode};
 use crate::logger::tlog;
@@ -79,9 +80,6 @@ const MPRIS_COVER_SIZE: u32 = 400;
 /// 封面的尺寸（列 x 行）。每个字符承载上下 2 个像素，所以实际是 24x24 像素。
 const COVER_WIDTH: usize = 24;
 const COVER_HEIGHT: usize = 12;
-
-/// 滚轮一格滚动多少行。1 行太慢、10 行太跳，3 行是手感上的折中。
-const WHEEL_ROWS: isize = 3;
 
 impl App {
     // ==================================================================
@@ -154,7 +152,9 @@ impl App {
             return;
         }
         self.focus_hit_target(zone.target);
-        self.move_selection(delta * WHEEL_ROWS);
+        // 一次滚一行。列表是要停在某一首上的，跳着滚会越过目标再往回滚，
+        // 看着快、实际更慢——精确比速度重要。
+        self.move_selection(delta);
     }
 
     /// 左键点击。
@@ -165,7 +165,7 @@ impl App {
 
         match zone.target {
             HitTarget::Tab(index) => {
-                if let Some(tab) = Tab::from_number(index as u8 + 1) {
+                if let Some(tab) = Tab::from_sidebar_index(index) {
                     self.switch_tab(tab);
                 }
             }
@@ -2781,6 +2781,15 @@ impl App {
 
         // 电平每帧刷新（audio 那一侧只是读原子量，开销可忽略）
         self.state.levels = self.audio.levels();
+        // 频谱只在可视化页且真的在播时算：一次 2048 点 FFT 只要零点几毫秒，
+        // 但为所有页面每帧都付这份钱没必要——别的页面根本不显示它。
+        let wants_spectrum =
+            self.state.tab == Tab::Visualizer && self.state.playback == PlaybackState::Playing;
+        if wants_spectrum {
+            self.state.spectrum = self.audio.spectrum(BAND_COUNT);
+        } else {
+            self.state.spectrum.clear();
+        }
         self.state.advance_visualizer(elapsed);
 
         self.sync_mpris();
