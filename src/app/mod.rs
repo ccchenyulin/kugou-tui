@@ -239,7 +239,7 @@ impl App {
         let mut stdout = std::io::stdout();
         // 移到区域左上角再放图（MoveTo 是 0 基坐标）
         ratatui::crossterm::execute!(stdout, ratatui::crossterm::cursor::MoveTo(area.x, area.y))?;
-        stdout.write_all(crate::ui::kitty::display_png(png, area.width, area.height).as_bytes())?;
+        stdout.write_all(crate::ui::kitty::display_png(png, area.width).as_bytes())?;
         stdout.flush()?;
         Ok(())
     }

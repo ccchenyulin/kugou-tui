@@ -404,7 +404,10 @@ fn playlist_from_json(value: &Value) -> Option<crate::api::model::Playlist> {
 pub async fn user_playlist_tracks_all(client: &ApiClient, list_id: i64) -> Result<Vec<Song>> {
     let mut songs = Vec::new();
     let mut offset = 0u32;
-    const PAGE: u32 = 200;
+    // 单页取 500：**这个接口本身很慢**（实测 145 首要 2.4~3.4 秒，跟 limit
+    // 关系不大，是服务端在逐个补全曲目信息）。所以优化点是「少发几次请求」，
+    // 而不是「每次少拿一点」。400 首的歌单这样一次就够。
+    const PAGE: u32 = 500;
     const MAX_PAGES: u32 = 20;
 
     for _ in 0..MAX_PAGES {

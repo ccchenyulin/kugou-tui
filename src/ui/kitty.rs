@@ -45,10 +45,15 @@ pub fn is_supported() -> bool {
     })
 }
 
-/// 生成「把 PNG 画在指定字符格子里」的转义序列。
+/// 生成「把 PNG 画出来」的转义序列。
 ///
-/// `columns` / `rows` 是目标字符格数，终端会按这个尺寸缩放图片。
-pub fn display_png(png: &[u8], columns: u16, rows: u16) -> String {
+/// **只指定列数，不指定行数**，高度由终端按图片自身的宽高比推算。
+///
+/// 早先这里同时传了 `c` 和 `r`，封面会被压变形——终端会老老实实把图片
+/// **拉伸**填满那个矩形，而字符格不是正方形（高约为宽的两倍），于是
+/// 「列数 = 行数 × 2」的矩形在像素上并不是方的，方形封面就被拉窄了。
+/// 交给终端自己算比例，怎么都不会变形。
+pub fn display_png(png: &[u8], columns: u16) -> String {
     let encoded = base64(png);
     let mut out = String::with_capacity(encoded.len() + 64);
 
@@ -64,7 +69,7 @@ pub fn display_png(png: &[u8], columns: u16, rows: u16) -> String {
         if index == 0 {
             // 只有第一块带控制参数
             out.push_str("\x1b_Ga=T,f=100,");
-            out.push_str(&format!("c={columns},r={rows},"));
+            out.push_str(&format!("c={columns},"));
         } else {
             out.push_str("\x1b_G");
         }
@@ -127,9 +132,9 @@ mod tests {
     #[test]
     fn display_sequence_carries_size_and_chunks() {
         let png = vec![0u8; 8];
-        let seq = display_png(&png, 30, 15);
+        let seq = display_png(&png, 30);
         assert!(
-            seq.starts_with("\x1b_Ga=T,f=100,c=30,r=15,m=0;"),
+            seq.starts_with("\x1b_Ga=T,f=100,c=30,m=0;"),
             "首块要带控制参数"
         );
         assert!(seq.ends_with("\x1b\\"), "必须以 ST 结束");
@@ -139,7 +144,7 @@ mod tests {
     fn large_payload_is_split_into_chunks() {
         // 超过一块的阈值，应该出现多条序列且中间块 m=1
         let png = vec![0u8; 8192];
-        let seq = display_png(&png, 10, 5);
+        let seq = display_png(&png, 10);
         assert!(seq.contains("m=1;"), "分块时中间块应为 m=1");
         assert_eq!(seq.matches("\x1b_G").count(), 3, "8192 字节 → 3 块 base64");
     }
