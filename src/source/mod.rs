@@ -180,6 +180,26 @@ impl SourceKind {
         }
     }
 
+    /// 该音源是否需要酷狗那套设备指纹（`dfid`）。
+    ///
+    /// 只有酷狗用得上：它把 dfid 拼进 cookie 一起发给上游做风控校验。
+    /// 其它平台没有这个机制，客户端也就不该去请求。
+    pub fn uses_device_fingerprint(self) -> bool {
+        matches!(self, SourceKind::Kugou | SourceKind::KugouConcept)
+    }
+
+    /// 扫码要用哪个 App。登录提示里会念出这个名字。
+    ///
+    /// 不能写死「酷狗」：登录提示是在**选定音源之后**才显示的，
+    /// 对着网易云的用户说「用酷狗 App 扫码」纯属误导。
+    pub fn scan_app(self) -> &'static str {
+        match self {
+            SourceKind::Kugou | SourceKind::KugouConcept => "酷狗",
+            SourceKind::Netease => "网易云音乐",
+            SourceKind::QqMusic => "QQ 音乐",
+        }
+    }
+
     /// 对应的第三方服务项目，用于启动脚本与文档提示。
     pub fn service_name(self) -> &'static str {
         match self {

@@ -225,6 +225,17 @@ impl App {
     /// `dfid` 是 `/song/url` 的必需参数，缺失时酷狗会返回「本次请求需要验证」。
     /// 探测失败不阻塞任何功能——只是取播放链接时会更依赖登录态。
     fn ensure_device_fingerprint(&mut self) {
+        // `dfid` 是酷狗独有的设备指纹（`/register/dev`），网易云、QQ 音乐没有
+        // 这个概念。对它们发这个请求只会白跑一趟，还会在配置里留下一个
+        // 语义不明的 device_id，看着像是登录凭据。
+        if !self
+            .state
+            .config
+            .active_source_kind()
+            .uses_device_fingerprint()
+        {
+            return;
+        }
         if self.state.config.dfid.is_some() {
             return;
         }

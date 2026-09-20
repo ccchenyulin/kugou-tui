@@ -2470,7 +2470,10 @@ impl App {
                 let login = self.state.login.get_or_insert_with(LoginState::default);
                 login.qr = qr;
                 login.key = key;
-                login.message = "用酷狗 App 扫码登录".to_string();
+                login.message = format!(
+                    "用 {} App 扫码登录",
+                    self.state.config.active_source_kind().scan_app()
+                );
                 login.finished = false;
             }
 
