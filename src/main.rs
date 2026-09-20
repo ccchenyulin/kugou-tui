@@ -74,8 +74,16 @@ fn main() -> anyhow::Result<()> {
     // 这三者是分别持久化的，历史上出现过「界面显示概念版、实际却在打标准版」的
     // 不一致——原因是某次用 `--api-base` 临时指向别处后被写回了顶层。以 `sources.active`
     // 为准统一一次即可；放在 merge_cli 之前，所以命令行的 --api-base 依旧能覆盖本次会话。
+    // 【诊断】记录对齐前后的值，排查「启动时地址不对」。
+    // 注意：必须在 logger::init 之后才能打日志，所以先记下来，初始化完再输出。
+    let before = format!("{:?}", config.active_source_kind());
+    let before_base = config.api_base.clone();
+
     let active = config.active_source_kind();
     config.switch_source(active);
+
+    let after_base = config.api_base.clone();
+    let after = format!("{:?}", config.active_source_kind());
 
     config.merge_cli(&cli);
 
@@ -90,6 +98,15 @@ fn main() -> anyhow::Result<()> {
         env!("CARGO_PKG_VERSION"),
         config.api_base,
         log_path.display()
+    );
+    tlog!(
+        logger::LEVEL_INFO,
+        "[诊断] 音源对齐：{} ({}) → {} ({})，merge_cli 后 API={}",
+        before_base,
+        before,
+        after_base,
+        after,
+        config.api_base
     );
 
     if cli.print_config {
