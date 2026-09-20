@@ -305,7 +305,18 @@ pub fn song_from_json(value: &Value) -> Option<Song> {
 
     let name = pick_string(
         value,
-        &["SongName", "songname", "audio_name", "filename", "name"],
+        &[
+            // OriSongName 是干净歌名（如「晴天」），优先用它
+            "OriSongName",
+            "SongName",
+            "songname",
+            "audio_name",
+            // 搜索结果用的是 FileName（大写 F/N），且形如「周杰伦 - 晴天」；
+            // 歌单条目则可能是小写的 filename。两个都要认，大小写不能想当然。
+            "FileName",
+            "filename",
+            "name",
+        ],
     )
     .map(|name| strip_extension(&name))
     .unwrap_or_else(|| "未知曲目".to_string());
