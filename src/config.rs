@@ -89,6 +89,10 @@ pub struct Config {
     /// 是否强制使用 16 色板（适配老终端）。
     pub basic_color: bool,
 
+    /// 单曲下载目录。**不设置时**按 `~/Music` 处理（首次启动也要能正常下载）。
+    /// 设置页里限定在几个常见位置之间选，避免路径写错把下载弄失败。
+    pub download_dir: Option<String>,
+
     /// 界面主题。存的是 [`crate::ui::theme::ThemeName::id`]，解析不出来时回落
     /// 到默认主题——改坏配置文件不该让程序起不来。
     pub theme: ThemeName,
@@ -124,6 +128,7 @@ impl Default for Config {
             quality: DEFAULT_QUALITY.to_string(),
             basic_color: false,
             theme: ThemeName::default(),
+            download_dir: None,
             keymap: std::collections::BTreeMap::new(),
             sources: SourceSet::default(),
         }

@@ -93,6 +93,8 @@ pub enum Action {
     OpenSearch,
     /// 打开设置页（数字键够不到它，所以要有直达键）。
     OpenSettings,
+    /// 下载当前播放歌曲到设置页里选的目录。
+    DownloadCurrent,
     /// 重新拉取当前视图数据。
     Reload,
     /// 把当前选中歌曲追加到播放队列。
@@ -244,6 +246,7 @@ pub fn action_from_name(name: &str) -> Option<Action> {
         "lyric_advance" => Action::LyricAdvance,
         "open_search" => Action::OpenSearch,
         "open_settings" => Action::OpenSettings,
+        "download_current" => Action::DownloadCurrent,
         "reload" => Action::Reload,
         "queue_append" => Action::QueueAppend,
         "add_all_to_queue" => Action::AddAllToQueue,
@@ -435,6 +438,9 @@ fn resolve_normal(key: KeyEvent) -> Action {
         KeyCode::Char('\\') => Action::ToggleSidebar,
         // `v` 不再循环切换音源：改为打开音源管理页，在那里面挑更直观
         KeyCode::Char('v') => Action::SwitchSource,
+        // 大写 W：下载当前播放歌曲到设置页里选的目录。
+        // 用大写是为了避开键盘上更常用的小写字母，避免和未来可能加的快捷键冲突。
+        KeyCode::Char('W') => Action::DownloadCurrent,
         // 音源管理页专用。用大写是为了避开已经占满的小写键位。
         KeyCode::Char('E') => Action::SetDefaultSource,
         KeyCode::Char('K') => Action::RaiseSourcePriority,
@@ -493,6 +499,7 @@ pub const CHEATSHEET: &[(&str, &str, &str)] = &[
     ("r", "循环播放模式", "播放"),
     ("l", "歌词面板开关", "播放"),
     ("[ / ]", "歌词延后 / 提前 100ms", "播放"),
+    ("W", "下载当前播放歌曲到设置里的目录", "播放"),
 ];
 
 #[cfg(test)]

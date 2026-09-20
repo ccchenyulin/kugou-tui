@@ -36,10 +36,12 @@ pub enum Setting {
     LyricPanel,
     /// 侧边栏（标签导航）。
     Sidebar,
+    /// 单曲下载到哪个目录（只能选预设的几个常见位置）。
+    DownloadDir,
 }
 
 impl Setting {
-    pub const ALL: [Setting; 10] = [
+    pub const ALL: [Setting; 11] = [
         Self::Theme,
         Self::Quality,
         Self::PlaybackMode,
@@ -50,6 +52,7 @@ impl Setting {
         Self::BasicColor,
         Self::LyricPanel,
         Self::Sidebar,
+        Self::DownloadDir,
     ];
 
     /// 左侧的名字。
@@ -65,6 +68,7 @@ impl Setting {
             Self::BasicColor => "16 色模式",
             Self::LyricPanel => "歌词面板",
             Self::Sidebar => "侧边导航",
+            Self::DownloadDir => "下载目录",
         }
     }
 
@@ -81,6 +85,7 @@ impl Setting {
             Self::BasicColor => "老终端画不出真彩时打开",
             Self::LyricPanel => "右侧歌词栏（快捷键 y）",
             Self::Sidebar => "左侧标签导航（快捷键 b）",
+            Self::DownloadDir => "下载单曲保存到这里（默认 ~/Music）",
         }
     }
 }
@@ -105,6 +110,14 @@ pub const PLAYBACK_MODES: [PlaybackMode; 4] = [
     PlaybackMode::RepeatOne,
     PlaybackMode::Shuffle,
 ];
+
+/// 单曲下载目录的预设选项。
+///
+/// **故意不开自由输入**：路径一旦写错（权限不足 / 不存在的目录 / 输入了错误的
+/// 字符），下载会失败但用户可能想不到是路径的问题。限定在几个常见位置，
+/// 既够用，又把出错范围卡死在已知选项里——`expand_user` 会自动把 `~/` 换成
+/// `$HOME`，所以这几个路径在任何系统上都是有效的。
+pub const DOWNLOAD_DIR_OPTIONS: [&str; 3] = ["~/Music", "~/Downloads", "~/Downloads/Music"];
 
 /// 把音质档位翻成人话。
 ///
@@ -144,6 +157,7 @@ pub fn value_text(setting: Setting, state: &AppState) -> String {
         Setting::BasicColor => toggle_text(state.config.basic_color),
         Setting::LyricPanel => toggle_text(state.show_lyric_panel),
         Setting::Sidebar => toggle_text(state.sidebar_visible),
+        Setting::DownloadDir => expand_download_dir(state.config.download_dir.as_deref()),
     }
 }
 
@@ -166,6 +180,40 @@ pub fn cycle<T: PartialEq + Copy>(options: &[T], current: T, delta: isize) -> Op
     let len = options.len() as isize;
     let next = (index as isize + delta).rem_euclid(len) as usize;
     options.get(next).copied()
+}
+
+/// 把 `~/foo` 展开成绝对路径。其它形式的输入原样返回。
+///
+/// 设为 None 时（配置文件里没填）按 `~/Music` 处理——这是默认下载目录，
+/// 跟**新用户**第一次启动时不应该让程序坏在「路径不存在」上。
+pub fn expand_download_dir(value: Option<&str>) -> String {
+    let raw = value.unwrap_or("~/Music");
+    if let Some(suffix) = raw.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            // 不用 `home.display()`：那是 `OsString` 的 Display，要求 Rust 1.87。
+            // 项目 MSRV 是 1.86，用 `to_string_lossy` 更稳。
+            return format!("{}/{}", home.to_string_lossy(), suffix);
+        }
+    } else if let Some(rest) = raw.strip_prefix("~") {
+        // `~user/...`：跨用户跨平台不好处理，保持原样并让下载器报错
+        let _ = rest;
+    }
+    raw.to_string()
+}
+
+/// 把歌名-歌手这种字符串清洗成可当文件名的形式。
+///
+/// 路径分隔符、控制字符、Windows 保留字符都替换成 `_`。其它字符原样保留——
+/// 汉字、空格、常见标点都保留（用户期待的就是原文件名）。
+pub fn sanitize_filename(label: &str) -> String {
+    label
+        .chars()
+        .map(|ch| match ch {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => '_',
+            ch if (ch as u32) < 0x20 => '_',
+            other => other,
+        })
+        .collect()
 }
 
 /// 同上，但用于字符串候选（`cycle` 要求 `Copy`，`String` 不满足）。
@@ -214,5 +262,53 @@ mod tests {
             let next = PLAYBACK_MODES[(index + 1) % PLAYBACK_MODES.len()];
             assert_eq!(mode.next(), next, "{mode:?} 的下一档对不上");
         }
+    }
+
+    /// `~/foo` 展开、`None` 兜底成 `~/Music`——这是「首次启动还没填下载目录」
+    /// 也能正常工作的基础。
+    #[test]
+    fn expand_download_dir_handles_all_forms() {
+        // 测试不依赖真实 $HOME（CI 里可能没设）：手动覆盖
+        // SAFETY：测试串行执行
+        unsafe { std::env::set_var("HOME", "/home/tester") };
+
+        assert_eq!(expand_download_dir(Some("~/Music")), "/home/tester/Music");
+        assert_eq!(
+            expand_download_dir(Some("~/Downloads/Music")),
+            "/home/tester/Downloads/Music"
+        );
+        assert_eq!(
+            expand_download_dir(None),
+            "/home/tester/Music",
+            "None 兜底为 ~/Music，第一次启动不该让下载坏在路径上"
+        );
+        assert_eq!(
+            expand_download_dir(Some("/absolute/path")),
+            "/absolute/path",
+            "绝对路径原样"
+        );
+    }
+
+    /// 文件名清洗：去掉会让 OS 拒写或变成子目录的危险字符，
+    /// 同时保留汉字、空格、常见标点——用户期待原文件名。
+    #[test]
+    fn sanitize_filename_strips_dangerous_chars() {
+        // 用户实测反馈过："忘不掉的你 /" 这种带斜杠的歌名会直接创建子目录
+        assert_eq!(sanitize_filename("歌手 - 歌名"), "歌手 - 歌名");
+        assert_eq!(
+            sanitize_filename("a/b\\c:d*e?f\"g<h>i|j"),
+            "a_b_c_d_e_f_g_h_i_j",
+            "所有路径分隔符与 Windows 保留字符"
+        );
+        assert_eq!(
+            sanitize_filename("歌名\n换行\0结束"),
+            "歌名_换行_结束",
+            "控制字符也要拦"
+        );
+        assert_eq!(
+            sanitize_filename("Hello, World! (Remix)"),
+            "Hello, World! (Remix)",
+            "空格与常见标点保留"
+        );
     }
 }

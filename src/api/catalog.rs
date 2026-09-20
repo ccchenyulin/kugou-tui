@@ -397,7 +397,7 @@ impl ApiClient {
     /// 由界面告诉用户这是片段、不要误当成播完了。
     pub async fn song_stream_url(&self, song: &Song, quality: &str) -> Result<StreamUrl> {
         let full = self.request_song_url(song, quality, false).await?;
-        if let Some(url) = extract_stream_url(&full) {
+        if let Some(url) = self.extract_stream_url(&full) {
             return Ok(StreamUrl {
                 url,
                 is_trial: false,
@@ -406,10 +406,10 @@ impl ApiClient {
         }
 
         // 完整版拿不到，先记下原因再退到试听片段
-        let reason = Self::fail_reason(&full);
+        let reason = self.fail_reason(&full);
 
         let trial = self.request_song_url(song, quality, true).await?;
-        if let Some(url) = extract_stream_url(&trial) {
+        if let Some(url) = self.extract_stream_url(&trial) {
             return Ok(StreamUrl {
                 url,
                 is_trial: true,
@@ -419,16 +419,21 @@ impl ApiClient {
 
         // 两次都没有。优先把服务端给的原因透出去，比笼统的「可能需要 VIP」有用得多。
         for root in [&full, &trial] {
-            if let Some(reason) = pick_string(root, &["error", "error_msg", "msg"]) {
+            // KuGouMusicApi 的 `/song/url` 把真正的失败信息放在 `data` 嵌套层里，
+            // 顶层只有元数据——所以读两层。
+            let data = root.get("data").unwrap_or(root);
+            if let Some(message) = pick_string(data, &["error", "error_msg", "msg", "errmsg"]) {
+                let status = pick_i64(data, &["status"]).unwrap_or(0);
+                let reason = self.status_reason(status).unwrap_or(message);
                 return Err(AppError::Api {
                     path: "/song/url".to_string(),
-                    code: pick_i64(root, &["errcode", "error_code"]).unwrap_or_default(),
+                    code: pick_i64(data, &["errcode", "error_code"]).unwrap_or(status),
                     message: reason,
                 });
             }
 
             // `fail_process` 会说明卡在哪一步，实测见过 ["pkg","buy"]（需购买/开通）
-            if let Some(process) = root.get("fail_process").and_then(Value::as_array) {
+            if let Some(process) = data.get("fail_process").and_then(Value::as_array) {
                 if !process.is_empty() {
                     let steps = process
                         .iter()
@@ -453,8 +458,9 @@ impl ApiClient {
     ///
     /// `fail_process` 是服务端给的步骤数组，实测见过 `["pkg","buy"]`（需开通或购买）。
     /// 读不到就返回 None，交给调用方用通用文案。
-    fn fail_reason(root: &Value) -> Option<String> {
-        let array = root.get("fail_process").and_then(Value::as_array)?;
+    fn fail_reason(&self, root: &Value) -> Option<String> {
+        let data = root.get("data").unwrap_or(root);
+        let array = data.get("fail_process").and_then(Value::as_array)?;
         let steps: Vec<&str> = array.iter().filter_map(Value::as_str).collect();
         if steps.is_empty() {
             return None;
@@ -466,13 +472,34 @@ impl ApiClient {
         })
     }
 
+    /// 把服务端 `status` 字段翻译成人话。
+    ///
+    /// KuGouMusicApi 把上游酷狗的状态码转成自己的 `status`，下面是实测过的几个：
+    ///
+    /// * `1` 成功（这一支不会是这条路径返回的——`status == 1` 时已经拿到 url 了）
+    /// * `2` 需要验证（缺 dfid 或 token），界面提示去登录 / 检查设备指纹
+    /// * `3` 该歌曲暂无版权，下架或地区限制
+    /// * 其它  透出服务端原文
+    fn status_reason(&self, status: i64) -> Option<String> {
+        match status {
+            0 => None,
+            2 => Some("需要登录或重新登录后再试".to_string()),
+            3 => Some("该歌曲暂无版权（可能已下架或地区受限）".to_string()),
+            other => Some(format!("服务端返回 {other}")),
+        }
+    }
+
     /// 发一次 `/song/url`。`free_part` 决定是否只要试听片段。
+    ///
+    /// 调参历史：之前会传 `album_id` / `album_audio_id`，但服务端没有就默认 0，
+    /// 反而干扰服务端做 hash 候选匹配——MoeKoeMusic 客户端就不传。这里去掉。
+    /// `ppage_id` 是「官方客户端指纹」，缺这个酷狗会按非官方客户端降级处理，
+    /// VIP 歌曲直接给空 url。**这是之前 VIP 歌曲「没资源」的真凶之一**。
     async fn request_song_url(&self, song: &Song, quality: &str, free_part: bool) -> Result<Value> {
         let mut query = vec![
             ("hash", song.hash.clone()),
-            ("album_id", song.album_id.clone()),
-            ("album_audio_id", song.album_audio_id.to_string()),
             ("quality", quality.to_string()),
+            ("ppage_id", PPAGE_ID.to_string()),
         ];
         if free_part {
             query.push(("free_part", "true".to_string()));
@@ -480,7 +507,23 @@ impl ApiClient {
 
         self.get_json_uncached("/song/url", &query).await
     }
+
+    /// 从 `/song/url` 的响应里挖出直链。
+    fn extract_stream_url(&self, root: &Value) -> Option<String> {
+        extract_stream_url(root)
+    }
 }
+
+/// 「官方客户端指纹」。酷狗的服务端按这个识别调用方是不是真客户端，
+/// 缺这个或值不对，VIP 歌曲就拿不到直链。
+///
+/// 来源是 [`KuGouMusicApi` 模块 song_url.js](https://github.com/MakcRe/KuGouMusicApi/blob/main/module/song_url.js)：
+/// 概念版与正式版各有一组。`kugou-tui` 默认按用户当前音源选择：
+/// `KugouConcept`（即 `lite`）用那一组，其它用标准版。
+/// （实际只有一组写在这里——这里给的是标准版那组，概念版的差异是 page_id。）
+///
+/// 之前没传这个，所以 VIP 歌曲在 `status` 上就被识别为非官方客户端而拒绝。
+const PPAGE_ID: &str = "463467626,350369493,788954147";
 
 /// `/song/url` 的结果。
 pub struct StreamUrl {
@@ -525,7 +568,18 @@ fn collect_playlists(root: &Value, assume_own: bool) -> Vec<Playlist> {
 ///
 /// 且 `url` 有时是字符串、有时是数组。所以按「data 数组 → data 对象 → 顶层」
 /// 三级找，每级内部再试多个键名。
+///
+/// **关键**：必须看 `status` 字段。`status == 1` 才是真正的成功；
+/// `status == 3` 给的 url 是空的，我们之前会把它当成"没 url"然后给
+/// 用户一个「可能需要 VIP」的笼统提示——但其实是版权问题。提前一步
+/// 把这种响应挡在 URL 解析外面，让上层看到明确的 status 翻译。
 fn extract_stream_url(root: &Value) -> Option<String> {
+    if let Some(status) = root.get("status").and_then(Value::as_i64) {
+        if status != 1 {
+            return None;
+        }
+    }
+
     const URL_KEYS: &[&str] = &["url", "play_url", "backup_url", "backupUrl"];
 
     if let Some(items) = root.get("data").and_then(Value::as_array) {
@@ -618,5 +672,29 @@ mod tests {
     fn ignores_non_http_placeholder() {
         let root = json!({"data": {"url": ""}});
         assert_eq!(extract_stream_url(&root), None);
+    }
+
+    /// `status == 3` 是版权问题——之前我们拿到 url 是空的、却当"找不到 url"
+    /// 一路兜底，给用户「可能需要 VIP」的笼统提示。这一步必须拦在前面，
+    /// 让上层走 status_reason 给出「该歌曲暂无版权」的具体文案。
+    #[test]
+    fn rejects_when_status_is_not_one() {
+        let root = json!({
+            "status": 3,
+            "url": ["https://fsmobile.kugou.com/a.mp3"]
+        });
+        assert_eq!(extract_stream_url(&root), None);
+    }
+
+    /// 没有 status 字段就当老接口看待（旧版服务端不返回 status）。
+    #[test]
+    fn works_without_status_field() {
+        let root = json!({
+            "url": ["https://fsmobile.kugou.com/a.mp3"]
+        });
+        assert_eq!(
+            extract_stream_url(&root).as_deref(),
+            Some("https://fsmobile.kugou.com/a.mp3")
+        );
     }
 }

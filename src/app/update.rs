@@ -232,6 +232,101 @@ impl App {
         }
     }
 
+    /// 把当前播放的歌曲下载到设置里的目录。
+    ///
+    /// 设计上的几个选择：
+    ///
+    /// * **同名不覆盖**：目标文件已存在就跳过并提示，让用户改名或换目录——避免
+    ///   「下载中途被覆盖丢半首」。
+    /// * **文件名**：`<歌手> - <歌名>.<ext>`；扩展名从直链 URL 末段推断（`.mp3`
+    ///   / `.flac` / `.m4a`）。这样手动打开就能识别格式。
+    /// * **异步**：下载可能几十秒，阻塞主循环会让整个 TUI 卡住，所以 spawn 出去。
+    fn download_current(&mut self) {
+        let Some(song) = self.state.current.clone() else {
+            self.state.warn("当前没有在播放的歌曲");
+            return;
+        };
+        let dir =
+            crate::app::settings::expand_download_dir(self.state.config.download_dir.as_deref());
+        let target_dir = std::path::PathBuf::from(&dir);
+        let label = format!("{} - {}", song.singer_text(), song.name);
+
+        // 文件名清洗：去掉路径分隔符和控制字符，避免把歌名变成子目录或
+        // 让 OS 拒绝写入。保留字母、数字、汉字、空格、常见标点。
+        let sanitized = crate::app::settings::sanitize_filename(&label);
+
+        let api = match self.client_for(song.source) {
+            Ok(client) => client,
+            Err(error) => {
+                self.state
+                    .error(format!("无法连接「{}」：{error}", song.source.label()));
+                return;
+            }
+        };
+        let downloader = self.downloader.clone();
+        let quality = self.state.config.quality.clone();
+        let bus = self.bus.clone();
+
+        self.runtime.spawn(async move {
+            let stream = match song.source.song_stream_url(&api, &song, &quality).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    bus.fail(format!("获取《{}》的播放地址失败", song.name), error);
+                    return;
+                }
+            };
+
+            // 文件扩展名：从 URL 路径末段里取。免费试听是 `.m4a`/`.mp3`/`.flac`，
+            // 直链里看得到。取不到就退到 `.mp3`——绝大多数情况是 mp3。
+            let ext = std::path::Path::new(&stream.url)
+                .extension()
+                .and_then(|os| os.to_str())
+                .filter(|ext| matches!(*ext, "mp3" | "flac" | "m4a"))
+                .unwrap_or("mp3")
+                .to_string();
+            let file_name = format!("{sanitized}.{ext}");
+            let target = target_dir.join(&file_name);
+
+            if target.exists() {
+                bus.emit(Loaded::CloudNotice(format!(
+                    "《{}》已存在：{}（请换目录或改名）",
+                    song.name,
+                    target.display()
+                )));
+                return;
+            }
+
+            let dir_label = target_dir.display().to_string();
+            match downloader
+                .fetch_to(
+                    &stream.url,
+                    &target,
+                    &(|received, total| {
+                        let _ = total;
+                        if received % (256 * 1024) == 0 {
+                            crate::logger::tlog!(
+                                crate::logger::LEVEL_DEBUG,
+                                "下载 {file_name} {received}/{:?}",
+                                total
+                            );
+                        }
+                    }),
+                )
+                .await
+            {
+                Ok(written) => bus.emit(Loaded::CloudNotice(format!(
+                    "已下载《{}》（{} MiB → {}）",
+                    song.name,
+                    written / 1024 / 1024,
+                    dir_label
+                ))),
+                Err(error) => {
+                    bus.fail(format!("下载《{}》失败", song.name), error);
+                }
+            }
+        });
+    }
+
     /// 把设置页选中的那一项按 `delta` 调整一档（左为 -1、右为 +1），并落盘。
     ///
     /// 改完立刻 `save()`：设置页的价值就在于「改了就是改了」，退出时再保存
@@ -299,6 +394,14 @@ impl App {
             s::Setting::Sidebar => {
                 if delta != 0 {
                     self.state.sidebar_visible = !self.state.sidebar_visible;
+                }
+            }
+            // 路径用 Cycle 在几个预设之间切，配置文件里空着也行
+            // （首次启动按 `~/Music` 走，不会坏在「路径不存在」上）。
+            s::Setting::DownloadDir => {
+                let current = config.download_dir.as_deref().unwrap_or("~/Music");
+                if let Some(next) = s::cycle(&s::DOWNLOAD_DIR_OPTIONS, current, delta) {
+                    config.download_dir = Some(next.to_string());
                 }
             }
         }
@@ -614,6 +717,7 @@ impl App {
                 self.switch_tab(Tab::Settings);
                 self.state.focus = Focus::Primary;
             }
+            Action::DownloadCurrent => self.download_current(),
             Action::Reload => self.reload_current_tab(),
             Action::QueueAppend => self.queue_focused_song(false),
             Action::AddAllToQueue => self.queue_all_songs(),
