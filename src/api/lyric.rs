@@ -403,8 +403,8 @@ mod tests {
         use base64::Engine;
 
         let payload = r#"{"content":[
-            {"language":0,"type":0,"lyricContent":[["","mo "]]},
-            {"language":0,"type":1,"lyricContent":[["","就算身处流逝的时光里"]]}
+            {"language":0,"type":1,"lyricContent":[["","no mi ko"]]},
+            {"language":0,"type":2,"lyricContent":[["","就算身处流逝的时光里"]]}
         ]}"#;
         let encoded = base64::engine::general_purpose::STANDARD.encode(payload);
         // 一行 KRC：时间标签形如 [起始毫秒,持续毫秒]
@@ -418,12 +418,12 @@ mod tests {
         assert_eq!(
             lyric.lines[0].translation.as_deref(),
             Some("就算身处流逝的时光里"),
-            "type=1 应填进 translation"
+            "中文密度高的轨应被选为译文（Bad Apple!! 是 type=2）"
         );
         assert_eq!(
             lyric.lines[0].romanization.as_deref(),
-            Some("mo "),
-            "type=0 应填进 romanization"
+            Some("no mi ko"),
+            "拉丁字符多的轨应被选为音译（Bad Apple!! 是 type=1）"
         );
     }
 
