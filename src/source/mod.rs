@@ -248,6 +248,23 @@ impl SourceProfile {
         }
     }
 
+    /// 拼出可直接放进请求头的 cookie（必要时补上 dfid）。
+    ///
+    /// 与 `Config::cookie_header` 同样的规则，区别是这里读的是**本音源档案**
+    /// 里的凭据。跨音源播放时要用它——队列里的歌可能来自另一个音源，
+    /// 拿当前音源的 cookie 去请求是错的。
+    pub fn cookie_header(&self) -> Option<String> {
+        let base = self.cookie.as_deref().unwrap_or_default().trim();
+        let has_dfid = base.split(';').any(|pair| pair.trim().starts_with("dfid="));
+
+        match (base.is_empty(), has_dfid, self.device_id.as_deref()) {
+            (true, _, Some(dfid)) => Some(format!("dfid={dfid}")),
+            (true, _, None) => None,
+            (false, false, Some(dfid)) => Some(format!("{base}; dfid={dfid}")),
+            (false, _, _) => Some(base.to_string()),
+        }
+    }
+
     /// 默认优先级：按声明顺序拉开间距，方便 UI 把某个音源插到中间。
     fn default_priority(kind: SourceKind) -> u32 {
         SourceKind::ALL
@@ -332,6 +349,16 @@ impl SourceSet {
 // 新增音源 = 在本文件加枚举变体 + 在下面各方法加一个分支 + 写一个实现模块。
 // ============================================================================
 
+/// 给解析出来的歌曲盖上来源章。
+///
+/// 每个返回 `Vec<Song>` 的分派方法都要调它——队列允许跨音源，
+/// 播放时必须知道每首歌该回哪个音源取链接。
+fn stamp_songs(songs: &mut [Song], kind: SourceKind) {
+    for song in songs {
+        song.source = kind;
+    }
+}
+
 /// 音源不支持某能力时的统一报错。
 fn unsupported(what: &str) -> crate::error::AppError {
     crate::error::AppError::Other(format!("当前音源不支持{what}"))
@@ -346,10 +373,12 @@ impl SourceKind {
         page: u32,
         page_size: u32,
     ) -> Result<Vec<Song>> {
-        match self {
+        let mut songs = match self {
             Self::Kugou | Self::KugouConcept => client.search_songs(keyword, page, page_size).await,
             Self::Netease => netease::search_songs(client, keyword, page, page_size).await,
-        }
+        }?;
+        stamp_songs(&mut songs, self);
+        Ok(songs)
     }
 
     /// 取播放直链。
@@ -437,10 +466,12 @@ impl SourceKind {
         client: &ApiClient,
         global_id: &str,
     ) -> Result<Vec<Song>> {
-        match self {
+        let mut songs = match self {
             Self::Kugou | Self::KugouConcept => client.playlist_tracks_all(global_id).await,
             other => Err(unsupported(&format!("歌单歌曲（{}）", other.label()))),
-        }
+        }?;
+        stamp_songs(&mut songs, self);
+        Ok(songs)
     }
 
     pub async fn artist_list(
@@ -461,10 +492,12 @@ impl SourceKind {
         artist_id: i64,
         sort: &str,
     ) -> Result<Vec<Song>> {
-        match self {
+        let mut songs = match self {
             Self::Kugou | Self::KugouConcept => client.artist_tracks_all(artist_id, sort).await,
             other => Err(unsupported(&format!("歌手歌曲（{}）", other.label()))),
-        }
+        }?;
+        stamp_songs(&mut songs, self);
+        Ok(songs)
     }
 
     pub async fn rank_boards(self, client: &ApiClient) -> Result<Vec<RankBoard>> {
@@ -475,10 +508,12 @@ impl SourceKind {
     }
 
     pub async fn rank_tracks_all(self, client: &ApiClient, rank_id: i64) -> Result<Vec<Song>> {
-        match self {
+        let mut songs = match self {
             Self::Kugou | Self::KugouConcept => client.rank_tracks_all(rank_id).await,
             other => Err(unsupported(&format!("榜单歌曲（{}）", other.label()))),
-        }
+        }?;
+        stamp_songs(&mut songs, self);
+        Ok(songs)
     }
 
     pub async fn user_playlists(self, client: &ApiClient) -> Result<Vec<Playlist>> {
@@ -493,9 +528,64 @@ impl SourceKind {
         client: &ApiClient,
         list_id: i64,
     ) -> Result<Vec<Song>> {
-        match self {
+        let mut songs = match self {
             Self::Kugou | Self::KugouConcept => client.user_playlist_tracks_all(list_id).await,
             Self::Netease => netease::user_playlist_tracks_all(client, list_id).await,
-        }
+        }?;
+        stamp_songs(&mut songs, self);
+        Ok(songs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 跨音源队列的核心不变式：分派层必须给每首歌盖上来源章。
+    ///
+    /// 没有这个章，播放时就只能拿「当前音源」去取链接——而队列是允许跨音源的
+    /// （酷狗搜几首入队 → 切到网易云），那些酷狗的歌会因为 hash 在网易云
+    /// 的接口里查不到而全部播不了。
+    #[test]
+    fn stamp_marks_every_song_with_its_source() {
+        let mut songs = vec![Song::default(), Song::default()];
+        stamp_songs(&mut songs, SourceKind::Netease);
+        assert!(
+            songs.iter().all(|song| song.source == SourceKind::Netease),
+            "每首歌都要带上来源音源"
+        );
+    }
+
+    /// 盖章要覆盖解析时填的初始值：酷狗标准版与概念版共用同一套解析，
+    /// 解析函数里填的是 `Kugou`，概念版必须被改写成 `KugouConcept`，
+    /// 否则取链接会打到标准版的端口上。
+    #[test]
+    fn stamp_overrides_parse_time_default() {
+        let mut songs = vec![Song::default()];
+        assert_eq!(songs[0].source, SourceKind::Kugou, "默认是酷狗");
+        stamp_songs(&mut songs, SourceKind::KugouConcept);
+        assert_eq!(songs[0].source, SourceKind::KugouConcept, "应被改写");
+    }
+
+    /// 跨音源取链接要用**目标音源档案**里的凭据，不能拿当前音源的。
+    #[test]
+    fn profile_cookie_header_uses_own_credentials() {
+        let mut profile = SourceProfile::new(SourceKind::Netease);
+        assert_eq!(profile.cookie_header(), None, "没有凭据时不给 cookie");
+
+        profile.cookie = Some("token=abc; userid=1".to_string());
+        profile.device_id = Some("df-1".to_string());
+        assert_eq!(
+            profile.cookie_header().as_deref(),
+            Some("token=abc; userid=1; dfid=df-1"),
+            "应把 dfid 拼进去"
+        );
+
+        // 已经带了 dfid 就不要重复拼
+        profile.cookie = Some("token=abc; dfid=own".to_string());
+        assert_eq!(
+            profile.cookie_header().as_deref(),
+            Some("token=abc; dfid=own")
+        );
     }
 }

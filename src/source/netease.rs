@@ -99,6 +99,7 @@ fn song_from_json(value: &Value) -> Option<Song> {
         privilege: None,
         album_audio_id: 0,
         file_id: None,
+        source: crate::source::SourceKind::Netease,
     })
 }
 

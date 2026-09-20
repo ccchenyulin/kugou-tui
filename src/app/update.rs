@@ -1030,13 +1030,22 @@ impl App {
             return;
         }
 
-        let api = self.api.clone();
-        let active_source = self.state.config.active_source_kind();
+        // 用**这首歌自己的来源**，不是当前音源：队列可以跨音源，
+        // 切过音源之后队列里的旧歌仍要能播。
+        let source = song.source;
+        let api = match self.client_for(source) {
+            Ok(client) => client,
+            Err(error) => {
+                self.state
+                    .error(format!("无法连接「{}」：{error}", source.label()));
+                return;
+            }
+        };
         let bus = self.bus.clone();
         let quality = self.state.config.quality.clone();
 
         self.runtime.spawn(async move {
-            match active_source.song_stream_url(&api, &song, &quality).await {
+            match source.song_stream_url(&api, &song, &quality).await {
                 Ok(stream) => bus.emit(Loaded::StreamReady {
                     song: Box::new(song),
                     url: stream.url,
@@ -1049,14 +1058,43 @@ impl App {
         });
     }
 
+    /// 为**指定音源**构造 HTTP 客户端。
+    ///
+    /// 队列允许跨音源：播放队列里的歌时不能想当然地用「当前音源」的客户端——
+    /// 那会把请求发到另一个服务上，而这首歌的 hash 在那个平台根本查不到。
+    /// 地址与凭据都取自目标音源自己的档案。
+    fn client_for(&self, kind: SourceKind) -> crate::error::Result<crate::api::ApiClient> {
+        if kind == self.state.config.active_source_kind() {
+            // 当前音源已经有现成的客户端，直接复用（省一次连接池重建）
+            return Ok(self.api.clone());
+        }
+        let profile = self.state.config.sources.profile(kind);
+        crate::api::ApiClient::new(
+            &profile.api_base,
+            profile.cookie_header(),
+            self.state.config.proxy.as_deref(),
+        )
+    }
+
     fn request_lyric(&mut self, song: Song) {
-        let api = self.api.clone();
-        let active_source = self.state.config.active_source_kind();
+        // 歌词同样按歌曲自己的来源取：跨音源时 hash 只在该平台的接口里有意义
+        let source = song.source;
+        let api = match self.client_for(source) {
+            Ok(client) => client,
+            Err(error) => {
+                crate::logger::tlog!(
+                    crate::logger::LEVEL_WARN,
+                    "无法连接「{}」取歌词：{error}",
+                    source.label()
+                );
+                return;
+            }
+        };
         let bus = self.bus.clone();
 
         self.state.lyric.loading = true;
         self.runtime.spawn(async move {
-            match active_source.fetch_lyric(&api, &song).await {
+            match source.fetch_lyric(&api, &song).await {
                 Ok(lyric) => bus.emit(Loaded::Lyric {
                     hash: song.hash.clone(),
                     lyric,
@@ -2629,8 +2667,20 @@ impl App {
 
         let song = song.clone();
         let hash = song.hash.clone();
-        let api = self.api.clone();
-        let active_source = self.state.config.active_source_kind();
+        // 封面同样按歌曲自己的来源取：网易云要额外查 /song/detail，
+        // 拿当前音源的客户端去问是问不到的
+        let active_source = song.source;
+        let api = match self.client_for(active_source) {
+            Ok(client) => client,
+            Err(error) => {
+                crate::logger::tlog!(
+                    crate::logger::LEVEL_WARN,
+                    "无法连接「{}」取封面：{error}",
+                    active_source.label()
+                );
+                return;
+            }
+        };
         let downloader = self.downloader.clone();
         let bus = self.bus.clone();
 

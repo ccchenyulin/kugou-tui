@@ -51,6 +51,17 @@ pub struct Song {
     pub privilege: Option<i64>,
     /// 歌单条目 id，仅从歌单接口返回，云端删歌时需要。
     pub file_id: Option<i64>,
+    /// 这首歌是从哪个音源取来的。
+    ///
+    /// **取播放链接时必须用它，而不是「当前音源」**：队列是可以跨音源的——
+    /// 在酷狗搜几首入队、再切到网易云，那些酷狗的歌仍应能正常播放。
+    /// 早先没有这个字段，播放时一律用当前音源去取链接，切过音源之后
+    /// 队列里的旧歌就全部播不了（hash 在另一个平台的接口里根本查不到）。
+    ///
+    /// 默认值只为让反序列化/结构体更新语法不用到处改；真正的来源由分派层
+    /// （`SourceKind` 上那些返回 `Vec<Song>` 的方法）统一盖章。
+    #[serde(default)]
+    pub source: crate::source::SourceKind,
 }
 
 impl Song {
@@ -396,6 +407,8 @@ pub fn song_from_json(value: &Value) -> Option<Song> {
         // 缺失即「未知」，交给 looks_playable 决定要不要预警
         privilege: pick_i64(value, &["Privilege", "privilege", "pay_type"]),
         file_id: pick_i64(value, &["Fileid", "FileId", "fileid", "file_id"]),
+        // 标准版与概念版共用这套解析，具体来源由分派层盖章覆盖
+        source: crate::source::SourceKind::Kugou,
     })
 }
 
