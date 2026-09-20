@@ -297,6 +297,7 @@ fn attach_translations(lyric: &mut Lyric, krc_text: &str) {
         return;
     }
 
+    // 汉字（Han）占比。注意**汉字分不清中文和日文**——日文也用汉字。
     let hanzi_ratio = |text: &str| -> f64 {
         let (chars, hanzi) =
             text.chars()
@@ -317,15 +318,78 @@ fn attach_translations(lyric: &mut Lyric, krc_text: &str) {
             hanzi as f64 / chars as f64
         }
     };
+
+    // 是否含假名（平假名 / 片假名）。有假名就说明这是**日文**，
+    // 不能当中文译文——否则日文歌会把「日文原文」当成译文，显示出来跟原文重复。
+    let has_kana =
+        |text: &str| -> bool { text.chars().any(|ch| matches!(ch, '\u{3040}'..='\u{30ff}')) };
+
+    // 判定「这是一条中文译文轨」：有汉字、且不含假名。
+    // 密度阈值取 0.2：中文译文几乎全是汉字，日文原文因为夹杂大量假名通常低于此值，
+    // 取宽松一点避免漏掉夹杂少量假名的译文（比如引用原句时）。
+    let is_chinese_track = |text: &str| -> bool { !has_kana(text) && hanzi_ratio(text) >= 0.2 };
+
+    // 排序：中文轨排最前（按汉字密度降序），其余（日文原文 / 罗马音）排后面。
+    // 罗马音密度接近 0，自然落在最后，正好当音译。
     tracks.sort_by(|a, b| {
-        hanzi_ratio(&b.1)
-            .partial_cmp(&hanzi_ratio(&a.1))
-            .unwrap_or(std::cmp::Ordering::Equal)
+        let a_cn = is_chinese_track(&a.1);
+        let b_cn = is_chinese_track(&b.1);
+        match (a_cn, b_cn) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => hanzi_ratio(&b.1)
+                .partial_cmp(&hanzi_ratio(&a.1))
+                .unwrap_or(std::cmp::Ordering::Equal),
+        }
     });
 
-    let mut iter = tracks.into_iter();
-    let (translation_kind, translation_text) = iter.next().unwrap();
-    let romanization = iter.next();
+    // 有中文轨才把它当译文；否则留空，让界面回退显示音译（罗马音）——
+    // 日语歌常常只有「日文原文 + 罗马音」两条轨，此时显示罗马音比重复原文有用得多，
+    // 用户至少能跟着念。
+    let chinese_count = tracks.iter().filter(|(_, t)| is_chinese_track(t)).count();
+
+    // 译文位：只有存在中文轨时才填；没有就留空，界面会退回显示音译。
+    // （用 first 是因为排序已把中文轨排到最前）
+    let (translation_kind, translation_text) = if chinese_count > 0 {
+        tracks.first().cloned().unwrap()
+    } else {
+        (i64::MAX, String::new())
+    };
+
+    // 音译位：取**汉字密度最低**的那条轨，也就是罗马音。
+    //
+    // 排序后中文在最前、其余按密度降序，所以最低密度的落在末尾。
+    // 不能取第一条——没有中文轨时第一条是日文原文，而原文已经显示在上面了，
+    // 再显示一遍毫无意义；罗马音至少能让人跟着念。
+    let romanization = tracks
+        .last()
+        .cloned()
+        .filter(|(kind, _)| *kind != translation_kind);
+
+    // ---- 行号对齐（关键）----
+    //
+    // 各语言轨的 lyricContent 是按**原始 KRC 定时行**顺序排列的，而 parse_lrc 会
+    // 跳过空内容的行（间奏之类的空行）。两边序号会错位：歌词第 5 行可能对应轨道的第 8 项。
+    // 不对齐的话译文会取到空值，界面就退回去显示音译——这正是「翻译显示成音译」的根因。
+    //
+    // 所以这里复刻 parse_lrc 的筛选逻辑，算出每条保留下来的歌词行在定时行中的真实序号。
+    let mut ordinals: Vec<usize> = Vec::new();
+    let mut timed_seen = 0usize;
+    for raw in krc_text.lines() {
+        let line = raw.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+        let (timestamps, remainder) = consume_time_tags(line);
+        if timestamps.is_empty() {
+            continue; // 元信息行（[id:] [ti:] [language:] 等）
+        }
+        let ordinal = timed_seen;
+        timed_seen += 1;
+        if !clean_krc_markup(remainder).is_empty() {
+            ordinals.push(ordinal);
+        }
+    }
 
     // 预先切好行，避免在内层循环里反复 split（也顺带解决借用/move 的麻烦）
     let translation_lines: Vec<&str> = translation_text.lines().collect();
@@ -341,12 +405,14 @@ fn attach_translations(lyric: &mut Lyric, krc_text: &str) {
         .unwrap_or_default();
 
     for (index, line) in lyric.lines.iter_mut().enumerate() {
-        if let Some(text) = translation_lines.get(index) {
+        // 歌词行 → 它在定时行中的序号 → 再到轨道里取对应项
+        let source = ordinals.get(index).copied().unwrap_or(index);
+        if let Some(text) = translation_lines.get(source) {
             if !text.trim().is_empty() {
                 line.translation = Some((*text).to_string());
             }
         }
-        if let Some(text) = romanization_lines.get(index) {
+        if let Some(text) = romanization_lines.get(source) {
             if !text.trim().is_empty() {
                 line.romanization = Some((*text).to_string());
             }
@@ -394,10 +460,43 @@ mod tests {
     use serde_json::json;
 
     /// 译文与音译的提取。
+    /// 日语歌：只有「日文原文 + 罗马音」两条轨，没有中文译文时的行为。
     ///
-    /// 锁住两个坑：
-    /// 1. 轨道靠 `type` 区分，不是 `language`（实测同一首歌两轨 language 都是 0）
-    /// 2. `lyricContent` 的元素是 `["原文","译文"]` 成对数组，取最后一个槽位
+    /// 锁住两点。
+    ///
+    /// 一是**不能把日文原文当成译文**：日文也用汉字，光看汉字密度会误判，
+    /// 必须靠「含假名」把日文排除掉。
+    ///
+    /// 二是没有中文轨时译文留空、音译位放**罗马音**（密度最低那条），
+    /// 而不是再显示一遍日文原文——原文已经在上面显示过了，重复毫无意义。
+    #[test]
+    fn japanese_song_without_chinese_uses_romaji() {
+        use base64::Engine;
+
+        let payload = r#"{"content":[
+            {"language":0,"type":0,"lyricContent":[["","na ga re te ku to ki no na ka de de mo"]]},
+            {"language":0,"type":1,"lyricContent":[["","流れてく時の中ででも"]]}
+        ]}"#;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(payload);
+        let krc = format!("[id:1]\n[language:{encoded}]\n[0,1000]流れてく時の中ででも\n");
+
+        let mut lyric = parse_lrc(&krc);
+        attach_translations(&mut lyric, &krc);
+
+        assert_eq!(lyric.lines.len(), 1);
+        // 含假名 → 不算中文译文，译文留空
+        assert_eq!(
+            lyric.lines[0].translation, None,
+            "日文原文（含假名）不能被当成中文译文"
+        );
+        // 音译位应是罗马音，不是日文原文
+        assert_eq!(
+            lyric.lines[0].romanization.as_deref(),
+            Some("na ga re te ku to ki no na ka de de mo"),
+            "没有中文轨时，音译位应放罗马音"
+        );
+    }
+
     #[test]
     fn attaches_translation_and_romanization() {
         use base64::Engine;
