@@ -32,7 +32,9 @@ impl ApiClient {
         let query = [
             ("id", lyric_id),
             ("accesskey", access_key),
-            ("fmt", "lrc".to_string()),
+            // 必须是 krc：翻译与音译只在 KRC 的 [language:] 标签里，lrc 没有。
+            // 参考 MoeKoeMusic 的实现。
+            ("fmt", "krc".to_string()),
             ("decode", "true".to_string()),
             ("charset", "utf8".to_string()),
         ];
@@ -47,7 +49,8 @@ impl ApiClient {
             Err(_) => body,
         };
 
-        let lyric = parse_lrc(&text);
+        let mut lyric = parse_lrc(&text);
+        attach_translations(&mut lyric, &text);
         if lyric.is_empty() {
             return Err(AppError::NotFound(format!("《{}》的歌词为空", song.name)));
         }
@@ -142,6 +145,7 @@ pub fn parse_lrc(text: &str) -> Lyric {
             lines.push(LyricLine {
                 time_ms,
                 text: content.clone(),
+                translation: None,
             });
         }
     }
@@ -320,5 +324,92 @@ mod tests {
         // "abc" 的 base64
         let root = json!({"content": "YWJj"});
         assert_eq!(extract_lyric_text(&root), "abc");
+    }
+}
+
+/// 从 KRC 的 `[language:base64]` 标签里取出译文，按行挂到歌词上。
+///
+/// 标签形如：
+///
+/// ```text
+/// [language:eyJjb250ZW50IjpbeyJsYW5ndWFnZSI6MCwibHlyaWNDb250ZW50Ijpb...]]
+/// ```
+///
+/// base64 解开后是：
+///
+/// ```json
+/// {"content":[{"type":1,"lyricContent":["译文1","译文2"]},{"type":0,"lyricContent":["音译1"]}]}
+/// ```
+///
+/// `type` 为 1 是翻译、0 是音译。优先用翻译，没有再退回音译——实测不少外文歌
+/// 只填了 type 0，但内容其实是中文译文。
+fn attach_translations(lyric: &mut Lyric, krc_text: &str) {
+    let Some(payload) = extract_language_payload(krc_text) else {
+        return;
+    };
+    let Some(content) = payload.get("content").and_then(|value| value.as_array()) else {
+        return;
+    };
+
+    // 先找翻译(type 1)，没有再用音译(type 0)
+    let lines = content
+        .iter()
+        .find(|section| section.get("type").and_then(serde_json::Value::as_i64) == Some(1))
+        .or_else(|| {
+            content
+                .iter()
+                .find(|section| section.get("type").and_then(serde_json::Value::as_i64) == Some(0))
+        })
+        .and_then(|section| section.get("lyricContent"))
+        .and_then(|value| value.as_array());
+
+    let Some(lines) = lines else {
+        return;
+    };
+
+    for (index, entry) in lines.iter().enumerate() {
+        let Some(text) = flatten_lyric_content(entry) else {
+            continue;
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        if let Some(line) = lyric.lines.get_mut(index) {
+            line.translation = Some(text);
+        }
+    }
+}
+
+/// 取出 `[language:...]` 里的载荷字符串。
+fn extract_language_payload(text: &str) -> Option<serde_json::Value> {
+    let start = text.find("[language:")? + "[language:".len();
+    let end = text[start..].find(']')? + start;
+    let raw = &text[start..end];
+
+    // 载荷里偶尔混进换行等字符，先清掉再补 padding
+    let cleaned: String = raw.chars().filter(|ch| !ch.is_whitespace()).collect();
+    let mut padded = cleaned;
+    while padded.len() % 4 != 0 {
+        padded.push('=');
+    }
+
+    let engine = base64::engine::general_purpose::STANDARD;
+    let decoded = engine.decode(padded).ok()?;
+    serde_json::from_slice(&decoded).ok()
+}
+
+/// `lyricContent` 的元素可能是字符串，也可能是 `["原文","译文"]` 这样的数组。
+fn flatten_lyric_content(entry: &serde_json::Value) -> Option<String> {
+    match entry {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Array(parts) => {
+            let text: String = parts
+                .iter()
+                .filter_map(|part| part.as_str())
+                .collect::<Vec<_>>()
+                .join("");
+            Some(text)
+        }
+        _ => None,
     }
 }
