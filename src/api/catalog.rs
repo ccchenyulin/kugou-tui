@@ -46,6 +46,9 @@ const PAGE_LIMIT: u32 = 30;
 /// 翻页上限，防止接口异常（比如始终回满页）时无限循环。60 页 = 1800 首，足够极端歌单。
 const MAX_PAGES: u32 = 60;
 
+/// 并发翻页时一批发多少页。太大容易触发上游限流，太小提速不明显；6 是个折中。
+const CONCURRENT_PAGES: u32 = 6;
+
 impl ApiClient {
     // ------------------------------------------------------------------
     // 搜索
@@ -239,47 +242,99 @@ impl ApiClient {
     // 取全（翻页）
     // ------------------------------------------------------------------
 
-    /// 逐页取全量歌曲的通用实现。
+    /// 逐页取全量歌曲的通用实现（**并发**翻页）。
     ///
-    /// 四个「取全部」接口长得一模一样，早先各抄一遍（48 行重复）。收敛成一处后，
-    /// 翻页上限与「不足一页即停止」的判断只有一份，不会漏改。
+    /// # 为什么要并发
     ///
-    /// 目前是**顺序**翻页：歌单接口硬限每页 30 条，400 首歌就是 14 次串行往返，
-    /// 这是大歌单加载慢的主因。改成并发能明显提速，但涉及错误传播与页码顺序还原，
-    /// 单独做，不混在这次去重里。
-    async fn collect_all_pages<F, Fut>(&self, mut fetch_page: F) -> Result<Vec<Song>>
+    /// 歌单接口硬限每页 30 条，400 首歌就是 14 次往返。串行做的话 RTT 直接累加，
+    /// 大歌单要等好几秒——而这几秒里界面只有一个"加载中"。改成一批页同时发，
+    /// 耗时就接近单页的延迟。
+    ///
+    /// # 批次策略
+    ///
+    /// 不知道总数，所以**先取第 1 页**：它满页说明后面可能还有，就按
+    /// [`CONCURRENT_PAGES`] 一批继续取；某一页不满就停（同串行版的判定）。
+    /// 一批里只要有一页失败就整体报错，避免静默漏歌。
+    async fn collect_all_pages<F, Fut>(&self, make: F) -> Result<Vec<Song>>
     where
-        F: FnMut(u32) -> Fut,
-        Fut: std::future::Future<Output = Result<Vec<Song>>>,
+        F: Fn(ApiClient, u32) -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<Song>>> + Send + 'static,
     {
-        let mut all = Vec::new();
-        for page in 1..=MAX_PAGES {
-            let songs = fetch_page(page).await?;
-            let got = songs.len();
-            all.extend(songs);
-            if got < PAGE_LIMIT as usize {
+        let mut all: Vec<Song> = Vec::new();
+
+        // 第 1 页单独取：确定后面还有没有内容，避免一上来就并发一堆空请求
+        let first = make(self.clone(), 1).await?;
+        let first_full = first.len() >= PAGE_LIMIT as usize;
+        all.extend(first);
+        if !first_full {
+            return Ok(all);
+        }
+
+        let mut page: u32 = 2;
+        while page <= MAX_PAGES {
+            let batch_end = (page + CONCURRENT_PAGES - 1).min(MAX_PAGES);
+
+            let mut set = tokio::task::JoinSet::new();
+            for batch_page in page..=batch_end {
+                // 每页一份克隆：ApiClient 内部是 Arc，克隆很便宜
+                set.spawn(make(self.clone(), batch_page));
+            }
+
+            let mut stop = false;
+            while let Some(joined) = set.join_next().await {
+                match joined {
+                    Ok(Ok(songs)) => {
+                        if songs.len() < PAGE_LIMIT as usize {
+                            stop = true; // 不足一页说明后面没有了
+                        }
+                        all.extend(songs);
+                    }
+                    Ok(Err(error)) => return Err(error),
+                    Err(error) => {
+                        // 任务本身panic/取消。不该发生，报出来而不是静默丢页
+                        crate::logger::tlog!(crate::logger::LEVEL_WARN, "翻页任务失败：{error}");
+                        return Err(AppError::Other(format!("翻页任务失败：{error}")));
+                    }
+                }
+            }
+
+            if stop {
                 break;
             }
+            page = batch_end + 1;
         }
+
         Ok(all)
     }
 
     /// 歌单内**全部**歌曲（公开歌单）。
     pub async fn playlist_tracks_all(&self, global_id: &str) -> Result<Vec<Song>> {
-        self.collect_all_pages(|page| self.playlist_tracks(global_id, page, PAGE_LIMIT))
-            .await
+        self.collect_all_pages(|client, page| {
+            let global_id = global_id.to_string();
+            async move { client.playlist_tracks(&global_id, page, PAGE_LIMIT).await }
+        })
+        .await
     }
 
     /// 用户歌单内**全部**歌曲（自建/收藏，按数字 `listid`）。
     pub async fn user_playlist_tracks_all(&self, list_id: i64) -> Result<Vec<Song>> {
-        self.collect_all_pages(|page| self.user_playlist_tracks(list_id, page, PAGE_LIMIT))
-            .await
+        self.collect_all_pages(move |client, page| async move {
+            client.user_playlist_tracks(list_id, page, PAGE_LIMIT).await
+        })
+        .await
     }
 
     /// 歌手**全部**歌曲。`sort` 同 [`Self::artist_tracks`]。
     pub async fn artist_tracks_all(&self, artist_id: i64, sort: &str) -> Result<Vec<Song>> {
-        self.collect_all_pages(|page| self.artist_tracks(artist_id, sort, page, PAGE_LIMIT))
-            .await
+        self.collect_all_pages(|client, page| {
+            let sort = sort.to_string();
+            async move {
+                client
+                    .artist_tracks(artist_id, &sort, page, PAGE_LIMIT)
+                    .await
+            }
+        })
+        .await
     }
 
     /// 榜单**全部**歌曲。
@@ -287,8 +342,10 @@ impl ApiClient {
     /// `/rank/audio` 不像歌单那样硬限 30（传 100 能回 100），但统一按页取更省心，
     /// 也避免榜单扩容后要回头改。
     pub async fn rank_tracks_all(&self, rank_id: i64) -> Result<Vec<Song>> {
-        self.collect_all_pages(|page| self.rank_tracks(rank_id, page, PAGE_LIMIT))
-            .await
+        self.collect_all_pages(move |client, page| async move {
+            client.rank_tracks(rank_id, page, PAGE_LIMIT).await
+        })
+        .await
     }
 
     // ------------------------------------------------------------------

@@ -49,6 +49,9 @@ pub enum AppError {
 
     #[error("未找到资源：{0}")]
     NotFound(String),
+    #[error("{0}")]
+    /// 其它内部错误（任务调度失败之类），保留上下文便于定位。
+    Other(String),
 }
 
 impl AppError {
