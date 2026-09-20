@@ -264,7 +264,7 @@ fn render_main(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Them
     }
 
     if let Some(lyric_area) = lyric_area {
-        views::render_lyric(frame, lyric_area, state, theme);
+        views::render_lyric_panel(frame, lyric_area, state, theme);
     }
 
     if queue_area.height > 0 {

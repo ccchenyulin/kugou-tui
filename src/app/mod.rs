@@ -50,6 +50,14 @@ pub use state::AppState;
 /// 不会波及终端里其它程序放的图。
 const COVER_IMAGE_ID: u32 = 1;
 
+/// 两次封面发送之间的最小间隔。
+///
+/// 一次发送是几百 KB 的转义序列。正常情况下「只在内容或区域变化时发送」
+/// 已经足够，但这个判定依赖区域稳定——一旦有意外（比如某页的区域每帧重算），
+/// 就会退化成每帧发送，终端消费不过来会让 stdout 写入阻塞，主线程卡死。
+/// 用最小间隔兜底，最坏也只是每秒两次。
+const COVER_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// 主循环每帧最多处理的事件数在 [`update`] 里定义。
 pub struct App {
     pub state: AppState,
@@ -79,6 +87,14 @@ pub struct App {
     /// 它），每帧删掉重画反而会让终端反复擦除+绘制，看起来就是整屏乱闪。
     /// 只有内容或位置真的变了才需要动它。
     cover_painted: Option<(String, ratatui::layout::Rect)>,
+
+    /// 上一次真的把图片写进终端的时间。
+    ///
+    /// 用来节流：一次发送是几百 KB 的转义序列，若因任何原因退化成每帧发送，
+    /// 终端消费不过来会阻塞 stdout 写入，主线程就卡死在 write_all 上
+    /// （用户实测：切到封面页之后按键、音量全无响应）。限流之后最坏情况也只是
+    /// 每秒两次，不会把主线程写死。
+    cover_sent_at: Option<std::time::Instant>,
 }
 
 impl App {
@@ -128,6 +144,7 @@ impl App {
             last_frame_at: Instant::now(),
             mpris,
             cover_painted: None,
+            cover_sent_at: None,
         };
 
         app.announce_readiness();
@@ -286,6 +303,13 @@ impl App {
         }
 
         if let Some((hash, area, png)) = wanted {
+            // 节流：不到间隔就先不画。图片还在屏幕上（ratatui 的重绘擦不掉它），
+            // 所以晚半秒补上不会有任何视觉损失。
+            if let Some(last) = self.cover_sent_at {
+                if last.elapsed() < COVER_MIN_INTERVAL {
+                    return Ok(());
+                }
+            }
             // 移到区域左上角再放图（MoveTo 是 0 基坐标）
             ratatui::crossterm::execute!(
                 stdout,
@@ -302,6 +326,7 @@ impl App {
                 area.height
             );
             self.cover_painted = Some((hash, area));
+            self.cover_sent_at = Some(std::time::Instant::now());
         }
 
         stdout.flush()?;

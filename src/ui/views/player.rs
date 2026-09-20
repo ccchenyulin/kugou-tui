@@ -301,6 +301,18 @@ fn draw_cover_block(frame: &mut Frame, inner: Rect, state: &mut AppState, theme:
     rest
 }
 
+/// 普通页面右下角的歌词面板：上方小封面 + 下方歌词。
+///
+/// 这里的面板**没有自己的边框**（外层已经由调用方画好了），所以不要在内部
+/// 再套一层 `panel`。封面仍走 `draw_cover_block`，保证 cover_area 单一来源。
+pub fn render_lyric_panel(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
+    if area.height < 3 || area.width < 8 {
+        return;
+    }
+    let rest = draw_cover_block(frame, area, state, theme);
+    render_lyric(frame, rest, state, theme);
+}
+
 /// 歌词页：上方封面、下方歌词。
 ///
 /// 封面与歌词都是「当前这首歌」的信息，放一起语义最顺。组合方式与首页一致，
