@@ -69,7 +69,8 @@
 | 云端歌单 | 收藏单曲（`s`）、整个队列同步（`S`）、从歌单移除（`d`）、删除歌单（`D`）、新建歌单（`N`） |
 | 登录 | **应用内扫码**（`L`），二维码直接画在终端里，无需额外工具 |
 | 输入 | 键盘 + 鼠标（点击选中、双击激活、滚轮、点进度条跳转） |
-| 缓存 | 音频落盘缓存 + LRU 上限回收 |
+| 缓存 | 音频落盘缓存 + LRU 上限回收；`C` 一键清空 |
+| **桌面集成** | **MPRIS**：注册为 `org.mpris.MediaPlayer2.kugou-tui`，状态栏/媒体控件/`playerctl` 可直接控制并显示封面 |
 
 支持的音频格式由 rodio 决定：**MP3、FLAC、M4A/MP4、OGG(Vorbis)、WAV**。
 可选的播放音质见[配置文件](#配置文件)的 `quality`。
@@ -84,6 +85,7 @@
 | Node.js | 用于运行 KuGouMusicApi（需 16+） |
 | 音频输出 | 任意 rodio 支持的后端（Linux 上为 ALSA/PulseAudio） |
 | 终端 | 支持 256 色与 UTF-8；老终端可加 `--basic-color` 退回 16 色 |
+| D-Bus（可选） | 有 session bus 时自动启用 MPRIS 桌面集成；没有（纯 tty）则跳过，**不影响播放** |
 
 ---
 
@@ -242,6 +244,7 @@ kugou-api stop     # 停止
 | `/` | 聚焦搜索框 |
 | `b` / `c` | 排行榜 / 云端歌单 |
 | `f` | 歌手地区筛选（在歌手页） |
+| `C` | 清空音频缓存（需确认） |
 
 > `x` / `X` 作用于播放队列，需要先把焦点切到队列面板（按 `Tab` 轮转）。
 > `d` / `D` 作用于云端歌单，需要先在「云端」标签页选中一个歌单。
@@ -312,6 +315,29 @@ api_base = "http://127.0.0.1:3001"
   搜索结果没有——所以 `d` 只能对歌单里的歌用。
 - **重命名没有实现**：`/playlist/update` 额外要求 `total_ver`（歌单版本号），
   而现有的歌单列表接口不返回它。
+
+---
+
+## 桌面集成（MPRIS）
+
+程序启动时会向 D-Bus session bus 注册 `org.mpris.MediaPlayer2.kugou-tui`。
+注册成功后，桌面环境**自动**识别，无需任何配置：
+
+```bash
+playerctl -l                      # 应能看到 kugou-tui
+playerctl -p kugou-tui status     # Playing / Paused / Stopped
+playerctl -p kugou-tui metadata   # 标题、歌手、专辑、封面 URL、时长
+playerctl -p kugou-tui play-pause
+playerctl -p kugou-tui position 90   # 拖进度条（走 SetPosition）
+```
+
+在 Hyprland / DankMaterialShell 这类桌面上，状态栏媒体控件、通知中心、
+锁屏界面会直接显示曲目与封面。可用 `dms ipc call mpris list` 确认 DMS 是否看到。
+
+**注意**：桌面环境同时存在多个播放器时（比如浏览器在放视频），会各自打分选
+一个显示。若没看到 kugou-tui，先把其它播放器暂停即可。
+
+没有 D-Bus 的环境（纯 tty、容器）会自动跳过注册，播放功能不受影响。
 
 ---
 
@@ -465,14 +491,18 @@ audio thread ──────────────────────�
 
 实测（release 构建，x86_64 Linux，108×30 终端，CPU 取 `/proc/<pid>/stat` 差分）：
 
-| 场景 | 常驻内存 | CPU |
-|---|---|---|
-| 空闲（已连接、无播放） | 12.7 MiB | 0.6% |
-| 播放中（歌词跟随滚动） | 13.3 MiB | 0.9% |
-| 播放中（`--tick-ms 1000`） | 13.3 MiB | 0.7% |
+| 场景 | 常驻内存 |
+|---|---|
+| 启动后空闲 | 13.6 MiB |
+| 歌单页（列表已加载） | 14.1 MiB |
+| 打开歌单（歌曲已加载） | 15.0 MiB |
+| 播放中 | 16.3 MiB |
 
-内存与"在放什么"基本无关：128 kbps 的 MP3 和 30 MiB 的 FLAC 常驻内存都是 13 MiB 上下，
-因为音频落盘播放，内存里只有解码缓冲。
+（release 构建，Linux 6.x/7.x x86_64，100×34 终端，读 `/proc/<pid>/status` 的 `VmRSS`；
+以上已含 MPRIS 的 D-Bus 连接开销。）
+
+内存与"在放什么"基本无关：128 kbps 的 MP3 和 30 MiB 的 FLAC 常驻内存都是十几 MiB，
+因为音频落盘播放，内存里只有解码缓冲。二进制本体约 6 MiB。
 
 主要取舍：事件驱动而非忙轮询（主循环 `recv_timeout(tick)`，默认 200 ms）；
 音频完全落盘；下载进度每 256 KiB 才上报一次；不引入 `tracing` / `chrono` / `rand`，
