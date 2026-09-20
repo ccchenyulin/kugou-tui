@@ -102,11 +102,21 @@ pub(crate) fn extract_list<T>(
         }
     }
 
+    // 兜底：扫描整棵树，取第一个能解析出内容的数组。
+    //
+    // 这一级的代价是**可能选中不该选的数组**（例如歌单条目里嵌套的 `authors[]`），
+    // 结果是界面显示了别的实体而没有任何报错——所以命中时必须记一条日志，
+    // 让「上游改了字段布局」这件事有据可查，而不是静默降级。
     let mut arrays = Vec::new();
     collect_object_arrays(root, &mut arrays, 0);
     for array in arrays {
         let parsed: Vec<T> = array.iter().filter_map(&parse).collect();
         if !parsed.is_empty() {
+            crate::logger::tlog!(
+                crate::logger::LEVEL_WARN,
+                "响应未命中任何候选键，兜底扫描命中了一个数组（{} 项），请核对字段布局",
+                parsed.len()
+            );
             return parsed;
         }
     }

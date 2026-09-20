@@ -257,25 +257,11 @@ impl AppState {
     }
 
     fn songs_offset(&self) -> usize {
-        match self.tab {
-            Tab::Search => self.search.results.cursor.offset(),
-            Tab::Playlists => self.playlists.songs.cursor.offset(),
-            Tab::Artists => self.artists.songs.cursor.offset(),
-            Tab::Ranks => self.ranks.songs.cursor.offset(),
-            Tab::Cloud => self.cloud.songs.cursor.offset(),
-            Tab::Visualizer => 0,
-        }
+        self.songs().map(|list| list.cursor.offset()).unwrap_or(0)
     }
 
     fn songs_len(&self) -> usize {
-        match self.tab {
-            Tab::Search => self.search.results.len(),
-            Tab::Playlists => self.playlists.songs.len(),
-            Tab::Artists => self.artists.songs.len(),
-            Tab::Ranks => self.ranks.songs.len(),
-            Tab::Cloud => self.cloud.songs.len(),
-            Tab::Visualizer => 0,
-        }
+        self.songs().map(|list| list.len()).unwrap_or(0)
     }
 }
 

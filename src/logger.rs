@@ -35,6 +35,13 @@ pub fn init(path: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let file = OpenOptions::new().create(true).append(true).open(path)?;
+    // 与配置文件（0600）保持一致：日志里会记响应体片段（见 client.rs 的非 JSON
+    // 分支），不该让同机其他用户可读。失败不影响日志本身，忽略。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
     let _ = SINK.set(Mutex::new(file));
     Ok(())
 }

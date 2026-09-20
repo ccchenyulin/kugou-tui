@@ -17,8 +17,8 @@ use crate::api::cloud::QrStatus;
 use crate::api::model::{Artist, Playlist, RankBoard, Song};
 use crate::app::App;
 use crate::app::state::{
-    ConfirmAction, Focus, HitTarget, HitZone, LoginState, PromptAction, PromptState, Tab,
-    move_selection, select_first, select_last,
+    ConfirmAction, EntryList, Focus, HitTarget, HitZone, LoginState, PromptAction, PromptState,
+    Tab, move_selection, select_first, select_last,
 };
 use crate::config::Config;
 
@@ -45,6 +45,19 @@ const MAX_EVENTS_PER_FRAME: usize = 64;
 /// 默认 200ms 一拍，50 拍约 10 秒。目录扫描放在阻塞线程池里，
 /// 因此这个频率不会影响界面流畅度。
 const CACHE_MEASURE_TICKS: u64 = 50;
+
+/// 搜索接口的最大页数。
+///
+/// 实测 `page` 超过 16 会返回 `error_code: 149`（Out Page Range）。分页是服务端
+/// 硬限，不是约定，所以提在这里并注明：改这个数之前要重新打一次接口确认。
+const SEARCH_MAX_PAGES: u32 = 16;
+
+/// 歌手列表一次取多少个。接口叫 `hotsize`，与「歌曲每页条数」不是一个概念，
+/// 因此刻意不跟着 `config.page_size` 走。
+const ARTIST_LIST_SIZE: u32 = 60;
+
+/// 滚轮一格滚动多少行。1 行太慢、10 行太跳，3 行是手感上的折中。
+const WHEEL_ROWS: isize = 3;
 
 impl App {
     // ==================================================================
@@ -117,7 +130,7 @@ impl App {
             return;
         }
         self.focus_hit_target(zone.target);
-        self.move_selection(delta * 3);
+        self.move_selection(delta * WHEEL_ROWS);
     }
 
     /// 左键点击。
@@ -352,6 +365,8 @@ impl App {
             Action::Prev => self.previous_track(),
             Action::SeekForward => self.seek_by(SEEK_STEP_MS),
             Action::SeekTo(position_ms) => self.seek_to(position_ms),
+            // MPRIS 的 Seek：一次带数值的相对跳转（见 keymap::Action::SeekBy）
+            Action::SeekBy(delta_ms) => self.seek_by(delta_ms),
             Action::LoadMoreSearch => self.load_more_search(),
             Action::SeekBackward => self.seek_by(-SEEK_STEP_MS),
             Action::VolumeUp => self.adjust_volume(VOLUME_STEP),
@@ -482,6 +497,28 @@ impl App {
         }
     }
 
+    /// 侧边栏：跳到第一个 / 最后一个标签。
+    fn select_sidebar_edge(&mut self, to_first: bool) {
+        let target = if to_first {
+            Tab::ALL[0]
+        } else {
+            Tab::ALL[Tab::ALL.len() - 1]
+        };
+        if target != self.state.tab {
+            self.switch_tab_inner(target, false);
+        }
+    }
+
+    /// 条目列表（歌单 / 歌手 / 榜单）跳到首/末项。泛型是因为三类条目的类型不同。
+    fn select_entry_edge<T>(list: &mut EntryList<T>, to_first: bool) {
+        if to_first {
+            list.select_first();
+        } else {
+            list.select_last();
+        }
+    }
+
+    /// 移动当前列表的选择（↑/↓、PgUp/PgDn）。
     fn move_selection(&mut self, delta: isize) {
         match (self.state.tab, self.state.focus) {
             // 侧边栏里上下移动 = 切换标签页（侧边栏的高亮就是当前标签）
@@ -489,44 +526,42 @@ impl App {
             (_, Focus::Queue) => {
                 move_selection(&mut self.state.queue_cursor, self.state.queue.len(), delta);
             }
+            // 可视化页没有任何列表，焦点在哪都退化成切换标签页——否则这一页会
+            // 「上下键完全无响应」（实测踩过）。放在 Sidebar / Queue 之后即可，
+            // 那两个焦点的行为仍由上面的分支决定。
+            (Tab::Visualizer, _) => self.move_sidebar(delta),
+            // 搜索页主区就是结果列表
             (Tab::Search, Focus::Primary | Focus::Secondary) => {
                 self.state.search.results.move_by(delta);
             }
+            // 其余标签页的 Primary 是「条目列表」（歌单 / 歌手 / 榜单）
             (Tab::Playlists, Focus::Primary) => self.state.playlists.list.move_by(delta),
-            (Tab::Playlists, Focus::Secondary) => self.state.playlists.songs.move_by(delta),
             (Tab::Artists, Focus::Primary) => self.state.artists.list.move_by(delta),
-            (Tab::Artists, Focus::Secondary) => self.state.artists.songs.move_by(delta),
             (Tab::Ranks, Focus::Primary) => self.state.ranks.list.move_by(delta),
-            (Tab::Ranks, Focus::Secondary) => self.state.ranks.songs.move_by(delta),
             (Tab::Cloud, Focus::Primary) => self.state.cloud.list.move_by(delta),
-            (Tab::Cloud, Focus::Secondary) => self.state.cloud.songs.move_by(delta),
-            // 可视化页没有列表。必须放在最后：否则会抢在 Sidebar / Queue 之前，
-            // 导致这一页连侧边栏切换标签都不响应（实测踩过）。放在最后时，焦点在
-            // 侧边栏或队列仍走上面的分支；焦点在主区则退化为切换标签页，避免
-            // 上下键完全无响应。
-            (Tab::Visualizer, _) => self.move_sidebar(delta),
+            // Secondary 一律是当前标签页的歌曲列表。走 `songs_mut()` 而不是逐个
+            // 枚举标签，新增标签页时这里不用跟着改。
+            (_, Focus::Secondary) => {
+                if let Some(list) = self.state.songs_mut() {
+                    list.move_by(delta);
+                }
+            }
         }
     }
+
+    /// 移动到当前列表的首/末项（Home/End、g/G）。
     fn move_selection_edge(&mut self, to_first: bool) {
+        let len = self.state.queue.len();
         match (self.state.tab, self.state.focus) {
-            // 侧边栏：跳到第一个 / 最后一个标签
-            (_, Focus::Sidebar) => {
-                let target = if to_first {
-                    Tab::ALL[0]
-                } else {
-                    Tab::ALL[Tab::ALL.len() - 1]
-                };
-                if target != self.state.tab {
-                    self.switch_tab_inner(target, false);
-                }
-            }
+            (_, Focus::Sidebar) => self.select_sidebar_edge(to_first),
             (_, Focus::Queue) => {
                 if to_first {
-                    select_first(&mut self.state.queue_cursor, self.state.queue.len());
+                    select_first(&mut self.state.queue_cursor, len);
                 } else {
-                    select_last(&mut self.state.queue_cursor, self.state.queue.len());
+                    select_last(&mut self.state.queue_cursor, len);
                 }
             }
+            (Tab::Visualizer, _) => self.select_sidebar_edge(to_first),
             (Tab::Search, _) => {
                 if to_first {
                     self.state.search.results.select_first();
@@ -535,70 +570,24 @@ impl App {
                 }
             }
             (Tab::Playlists, Focus::Primary) => {
-                if to_first {
-                    self.state.playlists.list.select_first();
-                } else {
-                    self.state.playlists.list.select_last();
-                }
-            }
-            (Tab::Playlists, Focus::Secondary) => {
-                if to_first {
-                    self.state.playlists.songs.select_first();
-                } else {
-                    self.state.playlists.songs.select_last();
-                }
+                Self::select_entry_edge(&mut self.state.playlists.list, to_first);
             }
             (Tab::Artists, Focus::Primary) => {
-                if to_first {
-                    self.state.artists.list.select_first();
-                } else {
-                    self.state.artists.list.select_last();
-                }
-            }
-            (Tab::Artists, Focus::Secondary) => {
-                if to_first {
-                    self.state.artists.songs.select_first();
-                } else {
-                    self.state.artists.songs.select_last();
-                }
+                Self::select_entry_edge(&mut self.state.artists.list, to_first);
             }
             (Tab::Ranks, Focus::Primary) => {
-                if to_first {
-                    self.state.ranks.list.select_first();
-                } else {
-                    self.state.ranks.list.select_last();
-                }
-            }
-            (Tab::Ranks, Focus::Secondary) => {
-                if to_first {
-                    self.state.ranks.songs.select_first();
-                } else {
-                    self.state.ranks.songs.select_last();
-                }
+                Self::select_entry_edge(&mut self.state.ranks.list, to_first);
             }
             (Tab::Cloud, Focus::Primary) => {
-                if to_first {
-                    self.state.cloud.list.select_first();
-                } else {
-                    self.state.cloud.list.select_last();
-                }
+                Self::select_entry_edge(&mut self.state.cloud.list, to_first);
             }
-            (Tab::Cloud, Focus::Secondary) => {
-                if to_first {
-                    self.state.cloud.songs.select_first();
-                } else {
-                    self.state.cloud.songs.select_last();
-                }
-            }
-            // 同 move_selection：必须放在最后，否则会抢在 Sidebar / Queue 之前。
-            (Tab::Visualizer, _) => {
-                let target = if to_first {
-                    Tab::ALL[0]
-                } else {
-                    Tab::ALL[Tab::ALL.len() - 1]
-                };
-                if target != self.state.tab {
-                    self.switch_tab_inner(target, false);
+            (_, Focus::Secondary) => {
+                if let Some(list) = self.state.songs_mut() {
+                    if to_first {
+                        list.select_first();
+                    } else {
+                        list.select_last();
+                    }
                 }
             }
         }
@@ -738,7 +727,9 @@ impl App {
     /// 每次 tick 调一次。开销就是一次互斥锁写入，可忽略；桌面组件的轮询
     /// 频率远低于此，没必要更高频。
     fn sync_mpris(&mut self) {
-        let Some(handle) = self.mpris.as_ref() else {
+        // D-Bus 注册是异步的，尚未成功（或压根没有 session bus）时没必要每帧
+        // 构造一份快照——那只是白白做几次字符串克隆。
+        let Some(handle) = self.mpris.as_ref().filter(|handle| handle.is_connected()) else {
             return;
         };
 
@@ -803,7 +794,7 @@ impl App {
 
         let next_page = self.state.search.page + 1;
         // 实测上限 16 页，再往后会返回 code=149 Out Page Range
-        if next_page > 16 {
+        if next_page > SEARCH_MAX_PAGES {
             self.state.info("已经到最后一页了");
             return;
         }
@@ -1047,7 +1038,7 @@ impl App {
         self.state.busy = Some("载入歌手列表".to_string());
 
         self.runtime.spawn(async move {
-            match api.artist_list(kind, 60).await {
+            match api.artist_list(kind, ARTIST_LIST_SIZE).await {
                 Ok(artists) => bus.emit(Loaded::Artists(artists)),
                 Err(error) => bus.fail("载入歌手列表失败", error),
             }
@@ -1589,8 +1580,6 @@ impl App {
         self.state.info(format!("列表排列：{order}"));
     }
 
-    /// 执行「清空播放队列」。**停止当前播放**——队列都没了，继续播一首不在队列里的歌既没意义
-    /// （下一首无从查找）。若只想删掉其中一首，用 `x`，它不会打断当前播放。
     /// 清空音频缓存目录。
     ///
     /// 由确认弹窗触发——删文件不可恢复，不能让一次误按就清掉全部缓存。
@@ -1619,6 +1608,8 @@ impl App {
         }
     }
 
+    /// 执行「清空播放队列」。**停止当前播放**——队列都没了，继续播一首不在队列里的
+    /// 歌既没意义（下一首无从查找）。若只想删掉其中一首，用 `x`，它不会打断当前播放。
     fn clear_queue(&mut self) {
         if self.state.queue.is_empty() {
             self.state.warn("播放队列已经为空");

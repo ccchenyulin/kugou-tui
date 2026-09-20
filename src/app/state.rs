@@ -809,16 +809,42 @@ impl AppState {
         }
     }
 
+    /// 当前标签页的歌曲列表。可视化页没有列表，返回 `None`。
+    ///
+    /// # 为什么要有这一层
+    ///
+    /// 「当前标签页该操作哪个歌曲列表」的分派原先散落在 6 处（`state.rs` 的
+    /// `select_song_index` / `current_tab_songs`、`ui/mod.rs` 的 `songs_offset` /
+    /// `songs_len`、`update.rs` 的 `move_selection` / `move_selection_edge`），
+    /// 每处都是一份同样的 6 分支 match。新增标签页时漏改一处，表现就是「这个页里
+    /// 方向键没反应」——可视化页就踩过一次。收敛到这里之后只剩这一份。
+    pub fn songs(&self) -> Option<&SongList> {
+        match self.tab {
+            Tab::Search => Some(&self.search.results),
+            Tab::Playlists => Some(&self.playlists.songs),
+            Tab::Artists => Some(&self.artists.songs),
+            Tab::Ranks => Some(&self.ranks.songs),
+            Tab::Cloud => Some(&self.cloud.songs),
+            Tab::Visualizer => None,
+        }
+    }
+
+    /// 同上，可变版本。
+    pub fn songs_mut(&mut self) -> Option<&mut SongList> {
+        match self.tab {
+            Tab::Search => Some(&mut self.search.results),
+            Tab::Playlists => Some(&mut self.playlists.songs),
+            Tab::Artists => Some(&mut self.artists.songs),
+            Tab::Ranks => Some(&mut self.ranks.songs),
+            Tab::Cloud => Some(&mut self.cloud.songs),
+            Tab::Visualizer => None,
+        }
+    }
+
     /// 选中「歌曲列表」的第 `index` 项。
     pub fn select_song_index(&mut self, index: usize) {
-        match self.tab {
-            Tab::Search => self.search.results.select(index),
-            Tab::Playlists => self.playlists.songs.select(index),
-            Tab::Artists => self.artists.songs.select(index),
-            Tab::Ranks => self.ranks.songs.select(index),
-            Tab::Cloud => self.cloud.songs.select(index),
-            // 可视化页没有歌曲列表
-            Tab::Visualizer => {}
+        if let Some(list) = self.songs_mut() {
+            list.select(index);
         }
     }
 
@@ -923,14 +949,7 @@ impl AppState {
 
     /// 当前标签页的歌曲列表。可视化页没有列表，返回 `None`。
     fn current_tab_songs(&self) -> Option<&SongList> {
-        match self.tab {
-            Tab::Search => Some(&self.search.results),
-            Tab::Playlists => Some(&self.playlists.songs),
-            Tab::Artists => Some(&self.artists.songs),
-            Tab::Ranks => Some(&self.ranks.songs),
-            Tab::Cloud => Some(&self.cloud.songs),
-            Tab::Visualizer => None,
-        }
+        self.songs()
     }
 
     /// 推进可视化动画：把原始电平做「快起慢落」的缓动，并维护峰值刻度。

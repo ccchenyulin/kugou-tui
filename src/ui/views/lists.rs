@@ -196,24 +196,8 @@ fn render_entry_list<T: EntryTitle>(
         .entries
         .iter()
         .enumerate()
-        .map(|(index, entry)| entry_row(index, "", &subtitle(entry), None, width, theme))
+        .map(|(index, entry)| entry_row(index, entry.title(), &subtitle(entry), None, width, theme))
         .collect();
-
-    // `entry_row` 需要标题，这里按类型分别传入名称字段
-    let items = items
-        .into_iter()
-        .zip(list.entries.iter().enumerate())
-        .map(|(_, (index, entry))| {
-            entry_row(
-                index,
-                entry_title(entry),
-                &subtitle(entry),
-                None,
-                width,
-                theme,
-            )
-        })
-        .collect::<Vec<_>>();
 
     let widget = selection_list(items, theme);
 
@@ -242,10 +226,6 @@ impl EntryTitle for RankBoard {
     fn title(&self) -> &str {
         &self.name
     }
-}
-
-fn entry_title<T: EntryTitle>(entry: &T) -> &str {
-    entry.title()
 }
 
 /// 搜索输入框。
@@ -319,4 +299,68 @@ fn render_scrollbar(frame: &mut Frame, area: Rect, total: usize, position: Optio
         area,
         &mut state,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::theme::Theme;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    /// 取屏幕文本，并去掉所有空白。
+    ///
+    /// ratatui 会给宽字符（CJK）后面补一个占位格，直接按原样比对字符串会失败，
+    /// 所以这里统一把空白挤掉再断言。
+    fn rendered_text(buffer: &ratatui::buffer::Buffer) -> String {
+        buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect()
+    }
+
+    /// 条目列表的行里必须带上标题。
+    ///
+    /// 之前这里先把每一行用**空标题**构造了一遍（那份结果随后被整体丢弃），
+    /// 再用真标题构造第二遍。除了每帧多一次全量分配，读代码的人也很难判断哪份
+    /// 才是真正生效的。这个测试锁住「屏幕上真的有标题」。
+    #[test]
+    fn entry_list_rows_show_titles() {
+        let mut list = EntryList::default();
+        list.replace(vec![
+            Playlist {
+                name: "我的歌单".to_string(),
+                ..Playlist::default()
+            },
+            Playlist {
+                name: "第二张".to_string(),
+                ..Playlist::default()
+            },
+        ]);
+
+        let mut terminal = Terminal::new(TestBackend::new(36, 8)).expect("建测试终端");
+        let area = Rect::new(0, 0, 36, 8);
+        terminal
+            .draw(|frame| {
+                render_entry_list(
+                    frame,
+                    area,
+                    &mut list,
+                    "测试",
+                    true,
+                    &Theme::truecolor(),
+                    |_| "副标题".to_string(),
+                );
+            })
+            .expect("渲染");
+
+        let text = rendered_text(terminal.backend().buffer());
+        assert!(text.contains("我的歌单"), "第一行应显示标题：{text:?}");
+        assert!(text.contains("第二张"), "第二行应显示标题：{text:?}");
+        assert!(text.contains("副标题"), "副标题也应显示：{text:?}");
+    }
 }

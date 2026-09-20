@@ -468,17 +468,25 @@ fn strip_singer_prefix(name: &str, singers: &[Singer]) -> String {
 /// 部分入口返回的歌名形如 `Overcast Sky.mp3`——扩展名对听歌没有任何帮助，却会挤占
 /// 列表本来就紧张的列名宽度。这里只在「后缀确实是常见音频格式、且去掉后名字不为空」
 /// 时才动手，避免误伤本来就以此结尾的正常歌名。
+///
+/// # 为什么不能按字节切片
+///
+/// 早先的写法是 `name.to_lowercase()` 之后按长度回切原串。但 `to_lowercase()`
+/// **不保证字节长度不变**（如 `İ` U+0130 会变成 `i` + 组合用点，2 字节变 3 字节），
+/// 回切时可能落在 UTF-8 字符边界之外直接 panic——而 release 是 `panic = "abort"`，
+/// 等于解析一个歌名就能让进程死掉。所以这里全程按 `char` / `&str` 操作。
 fn strip_extension(name: &str) -> String {
-    const EXTENSIONS: [&str; 6] = [".mp3", ".flac", ".m4a", ".wav", ".ogg", ".aac"];
+    const EXTENSIONS: [&str; 6] = ["mp3", "flac", "m4a", "wav", "ogg", "aac"];
 
-    let lower = name.to_lowercase();
-    for extension in EXTENSIONS {
-        if let Some(stem) = lower.strip_suffix(extension) {
-            if !stem.trim().is_empty() {
-                // 按原串长度切片，保留原本的大小写
-                return name[..name.len() - extension.len()].trim_end().to_string();
-            }
-        }
+    let Some((stem, extension)) = name.rsplit_once('.') else {
+        return name.to_string();
+    };
+    if EXTENSIONS
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(extension))
+        && !stem.trim().is_empty()
+    {
+        return stem.trim_end().to_string();
     }
     name.to_string()
 }
@@ -535,12 +543,15 @@ fn split_singer_text(text: &str) -> Vec<Singer> {
 
 /// 酷狗的 `Duration` 单位不稳定：有时是秒，有时是毫秒。
 ///
-/// 用 10000 做分界——超过 10000 的只可能是毫秒（约 2.7 小时以上），
-/// 秒数超过 10000 的歌曲不存在。
+/// 用 10000 做分界——**大于等于** 10000 的只可能是毫秒（约 10 秒以上），
+/// 因为不存在时长 10000 秒（2.7 小时）的歌曲。
+///
+/// 注意边界必须取 `>=` 而不是 `>`：取值恰好为 `10000` 时，真实含义是「10 秒的
+/// 毫秒数」，走秒分支会被算成 10000 秒 ≈ 2.78 小时，进度条直接报废。
 fn normalize_duration(raw: u64) -> u64 {
     if raw == 0 {
         0
-    } else if raw > 10_000 {
+    } else if raw >= 10_000 {
         raw
     } else {
         raw.saturating_mul(1_000)
@@ -885,6 +896,36 @@ mod tests {
         assert_eq!(lyric.index_at(1_000), Some(0));
         assert_eq!(lyric.index_at(7_000), Some(1));
         assert_eq!(lyric.index_at(60_000), Some(2));
+    }
+
+    #[test]
+    fn strips_audio_extension() {
+        assert_eq!(strip_extension("Overcast Sky.mp3"), "Overcast Sky");
+        assert_eq!(strip_extension("Song.FLAC"), "Song", "扩展名大小写无关");
+        assert_eq!(strip_extension("No Extension"), "No Extension");
+        // 去掉后为空的名字要保持原样（`.mp3` 本身可能是歌名）
+        assert_eq!(strip_extension(".mp3"), ".mp3");
+        assert_eq!(strip_extension("海阔天空.MP3"), "海阔天空");
+    }
+
+    /// 早先的实现先 `to_lowercase()` 再按长度回切原串。`to_lowercase()` 不保证
+    /// 字节长度不变（`İ` 会变成 `i` + 组合用点），回切可能落在字符边界之外 → panic。
+    /// 这里锁住「多字节歌名带扩展名」不会出问题。
+    #[test]
+    fn strip_extension_is_safe_for_multibyte_names() {
+        assert_eq!(strip_extension("İ.mp3"), "İ");
+        assert_eq!(strip_extension("straße.flac"), "straße");
+    }
+
+    #[test]
+    fn normalizes_duration_units() {
+        assert_eq!(normalize_duration(0), 0);
+        assert_eq!(normalize_duration(317), 317_000, "秒 → 毫秒");
+        assert_eq!(normalize_duration(210_000), 210_000, "毫秒原样保留");
+        // 边界：恰好 10000 是「10 秒的毫秒数」。用 `>` 判定会被当成 10000 秒
+        // （≈2.78 小时），进度条直接报废。
+        assert_eq!(normalize_duration(10_000), 10_000);
+        assert_eq!(normalize_duration(9_999), 9_999_000);
     }
 
     #[test]

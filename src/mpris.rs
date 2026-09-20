@@ -65,6 +65,9 @@ impl TrackInfo {
 #[derive(Debug, Clone)]
 pub struct MprisHandle {
     info: Arc<Mutex<TrackInfo>>,
+    /// D-Bus 连接是否真的建起来了。注册是异步的，失败时（没有 session bus 等）
+    /// 主线程不该继续往一个没人读的快照里写。
+    connected: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MprisHandle {
@@ -73,6 +76,11 @@ impl MprisHandle {
         if let Ok(mut guard) = self.info.lock() {
             *guard = info;
         }
+    }
+
+    /// D-Bus 注册是否已成功。未成功时桌面集成不可用，但播放不受影响。
+    pub fn is_connected(&self) -> bool {
+        self.connected.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -154,21 +162,16 @@ impl Player {
     async fn seeked(ctxt: &SignalEmitter<'_>, position_us: i64) -> zbus::Result<()>;
 
     /// 相对跳转（微秒）。正负皆可。
+    ///
+    /// 一次投递一个带数值的动作。早先拆成「N 次 ±5 秒」去凑，拖一次 1 小时的
+    /// 进度条就是 720 条事件——主循环单帧只处理 64 条，界面会被自己的事件队列
+    /// 饿死。
     async fn seek(&self, offset_us: i64) {
         let step_ms = offset_us / 1_000;
         if step_ms == 0 {
             return;
         }
-        // 只有前后步进，没有绝对定位的动作。多次触发会串行执行，够用。
-        let count = step_ms.abs() / 5_000;
-        let action = if step_ms > 0 {
-            Action::SeekForward
-        } else {
-            Action::SeekBackward
-        };
-        for _ in 0..count.max(1) {
-            self.dispatch(action);
-        }
+        self.dispatch(Action::SeekBy(step_ms));
     }
 
     #[zbus(property)]
@@ -326,6 +329,8 @@ impl MediaPlayer2 {
 /// 程序该放歌还是放歌。所以这里返回 `Option`。
 pub fn spawn(bus: EventBus) -> Option<MprisHandle> {
     let info = Arc::new(Mutex::new(TrackInfo::default()));
+    let connected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let connected_thread = Arc::clone(&connected);
 
     let info_clone = Arc::clone(&info);
     // 信号循环需要独立的一份引用：info_clone 会被 move 进 Player
@@ -354,6 +359,9 @@ pub fn spawn(bus: EventBus) -> Option<MprisHandle> {
                     .serve_at(OBJECT_PATH, MediaPlayer2)?
                     .build()
                     .await?;
+
+                // 到这一步才说明桌面组件真的能看到我们了
+                connected_thread.store(true, std::sync::atomic::Ordering::Relaxed);
 
                 // 属性变化信号。
                 //
@@ -418,5 +426,5 @@ pub fn spawn(bus: EventBus) -> Option<MprisHandle> {
         });
     });
 
-    Some(MprisHandle { info })
+    Some(MprisHandle { info, connected })
 }

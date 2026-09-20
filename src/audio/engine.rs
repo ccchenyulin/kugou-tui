@@ -232,6 +232,14 @@ impl AudioHandle {
         }
     }
 
+    /// 音频线程是否连启动都没成功（`thread::Builder::spawn` 失败）。
+    ///
+    /// 注意它只能反映**线程创建**这一步。设备打不开、解码失败这类问题发生在线程
+    /// 内部，会通过 [`AudioEvent::Failed`] 上报到界面，不走这里。
+    pub fn spawn_failed(&self) -> bool {
+        self.thread.is_none()
+    }
+
     /// 当前播放电平（0.0 ~ 1.0 的一串格子，旧的在前）。
     pub fn levels(&self) -> Vec<f32> {
         self.levels.snapshot()

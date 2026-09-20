@@ -37,11 +37,10 @@ use crate::api::model::{
 use crate::api::{data_of, extract_list};
 use crate::error::{AppError, Result};
 
-/// 歌单 / 榜单类接口每页的硬上限。
+/// 歌单 / 榜单类接口每页的硬上限。首屏加载也用它，保证与翻页一致。
 ///
 /// 实测 `/playlist/track/all` 传 `pagesize=100|300|500` 都只回 30 条，所以取全只能翻页。
 /// 榜单接口其实能吃下更大的值，但统一用这个上限更省心，也免得榜单扩容后要回头改。
-/// 歌单 / 榜单类接口每页的硬上限。首屏加载也用它，保证与翻页一致。
 pub(crate) const PAGE_LIMIT: u32 = 30;
 
 /// 翻页上限，防止接口异常（比如始终回满页）时无限循环。60 页 = 1800 首，足够极端歌单。

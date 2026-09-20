@@ -411,10 +411,11 @@ fn attach_translations(lyric: &mut Lyric, krc_text: &str) {
 
     // 译文位：只有存在中文轨时才填；没有就留空，界面会退回显示音译。
     // （用 first 是因为排序已把中文轨排到最前）
-    let (translation_kind, translation_text) = if chinese_count > 0 {
-        tracks.first().cloned().unwrap()
-    } else {
-        (i64::MAX, String::new())
+    let (translation_kind, translation_text) = match tracks.first().cloned() {
+        // `chinese_count > 0` 已经保证 tracks 非空，但这里仍然显式匹配而不 unwrap——
+        // 项目约定非测试代码不得出现裸 unwrap（见 src/error.rs 模块文档）。
+        Some(first) if chinese_count > 0 => first,
+        _ => (i64::MAX, String::new()),
     };
 
     // 音译位：取**汉字密度最低**的那条轨，也就是罗马音。
