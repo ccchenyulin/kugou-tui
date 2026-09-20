@@ -297,13 +297,28 @@ impl ApiClient {
                     }
                     Ok(Err(error)) => {
                         // 页码越界 = 后面没有了，属正常终止，保留已取到的内容。
-                        // 不这样做的话，搜「周杰伦」（上限 16 页）会整次失败，
-                        // 界面只剩首屏那 30 条。
                         if error.is_page_out_of_range() {
                             stop = true;
                             continue;
                         }
-                        return Err(error);
+
+                        // 后续某页失败（限流、超时、上游偶发错误）：
+                        // **不再让整次失败**，而是记日志并停在已取到的内容上。
+                        //
+                        // 之前整次失败时，界面会退回首屏那一页——用户刚做完一次
+                        // 搜索、紧接着打开几百首的歌单时很容易碰到，表现为
+                        // "明明有几百首却只显示 30 首"。部分结果比没有强，
+                        // 而且首屏已经显示过了，中断只是少后面几页。
+                        if all.is_empty() {
+                            // 一首都还没取到，那确实是失败
+                            return Err(error);
+                        }
+                        crate::logger::tlog!(
+                            crate::logger::LEVEL_WARN,
+                            "翻到第 {page} 页起失败，保留已取到的 {} 首：{error}",
+                            all.len()
+                        );
+                        stop = true;
                     }
                     Err(error) => {
                         // 任务本身panic/取消。不该发生，报出来而不是静默丢页
