@@ -31,18 +31,23 @@ pub async fn search_songs(
 ) -> Result<Vec<Song>> {
     let size = if page_size == 0 { 30 } else { page_size };
 
+    // 实测：路径是 `/getSearchByKey`，参数走 **query**（`?key=`）。
+    // 按路由声明的 `:key?` 用路径参数传会被判成空——服务端返回
+    // `{"response":"search key is null"}`，看着像没搜到，其实是没传进去。
     let root = client
         .get_json_uncached(
-            "/search",
+            "/getSearchByKey",
             &[
                 ("key", keyword.to_string()),
-                ("pageNo", page.max(1).to_string()),
-                ("pageSize", size.to_string()),
+                ("limit", size.to_string()),
+                ("page", page.max(1).to_string()),
             ],
         )
         .await?;
 
-    let songs = extract_list(data_of(&root), &["list", "songlist"], song_from_json);
+    // 响应嵌得比较深：`response.data.song.list[]`。
+    // 同层还有个 `semantic.list`（空的），extract_list 会跳过解析不出内容的那组。
+    let songs = extract_list(data_of(&root), &["list"], song_from_json);
     Ok(songs)
 }
 
@@ -117,11 +122,9 @@ pub async fn song_stream_url(
     song: &Song,
     quality: &str,
 ) -> Result<crate::api::catalog::StreamUrl> {
+    // 实测：路径参数 `/getMusicPlay/:songmid`，不是 query
     let root = client
-        .get_json_uncached(
-            "/song/url",
-            &[("id", song.hash.clone()), ("br", bitrate_for(quality))],
-        )
+        .get_json_uncached(&format!("/getMusicPlay/{}", song.hash), &[])
         .await?;
 
     let data = data_of(&root);
@@ -167,8 +170,9 @@ fn bitrate_for(quality: &str) -> String {
 
 /// 取歌词。
 pub async fn fetch_lyric(client: &ApiClient, song: &Song) -> Result<Lyric> {
+    // 实测：路径参数 `/getLyric/:songmid`
     let root = client
-        .get_json_uncached("/lyric", &[("songmid", song.hash.clone())])
+        .get_json_uncached(&format!("/getLyric/{}", song.hash), &[])
         .await?;
     let data = data_of(&root);
 

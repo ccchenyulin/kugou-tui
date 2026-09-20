@@ -74,8 +74,21 @@ start_simple() {
     printf '  :%s 已在运行\n' "$port"
     return 0
   fi
-  ( cd "$dir" && PORT="$port" setsid nohup node app.js >/tmp/kugou-api-$name.log 2>&1 </dev/null & )
-  for _ in $(seq 1 40); do
+
+  # 启动方式按项目而定：网易云是纯 JS，直接 node app.js；
+  # QQ 音乐是 TypeScript（ts-node 跑 src/app.ts），只能走它自己的 npm start。
+  local cmd
+  case "$name" in
+    qqmusic) cmd=(npm start) ;;
+    *) cmd=(node app.js) ;;
+  esac
+
+  ( cd "$dir" && PORT="$port" setsid nohup "${cmd[@]}" >/tmp/kugou-api-$name.log 2>&1 </dev/null & )
+
+  # ts-node 要现场编译，启动比纯 JS 慢，多等一会儿
+  local tries=40
+  [ "$name" = "qqmusic" ] && tries=80
+  for _ in $(seq 1 "$tries"); do
     sleep 0.5
     alive "$port" && break
   done
@@ -91,10 +104,18 @@ install_one() {
 
   # 判断「装好了没有」要看入口文件，不能只看目录在不在——
   # clone 中断、只拉到 README 之类的情况都会留下一个空壳目录。
-  if [ -f "$dir/app.js" ]; then
+  # 入口文件各项目不同：酷狗/网易云是纯 JS 的 app.js，
+  # QQ 音乐是 TypeScript 的 src/app.ts。
+  local entry
+  case "$name" in
+    qqmusic) entry="src/app.ts" ;;
+    *) entry="app.js" ;;
+  esac
+
+  if [ -f "$dir/$entry" ]; then
     printf '  已安装：%s\n' "$dir"
   elif [ -d "$dir" ] && [ -n "$(ls -A "$dir" 2>/dev/null)" ]; then
-    printf '  \033[31m目录已存在但没有 app.js，疑似安装不完整：%s\033[0m\n' "$dir"
+    printf '  \033[31m目录已存在但没有 %s，疑似安装不完整：%s\033[0m\n' "$entry" "$dir"
     printf '  确认无误后可手动删除该目录再重试。\n'
     return 1
   else
