@@ -13,8 +13,30 @@
 #
 set -euo pipefail
 
-API_DIR="${KUGOU_API_DIR:-$HOME/KuGouMusicApi}"
 API_LOG="${KUGOU_API_LOG:-${XDG_CACHE_HOME:-$HOME/.cache}/kugou-tui/api.log}"
+
+# 服务目录按**当前音源**选择。
+#
+# 每个音源对应一个不同的第三方服务，目录也不同。写死 KuGouMusicApi 会导致：
+# 当前音源是网易云时，启动器拿酷狗的代码去监听 :3002，而真正的网易云服务
+# 已经占用了这个端口 —— 于是 EADDRINUSE，程序直接起不来。
+ACTIVE_SOURCE=$(sed -n 's/^[[:space:]]*active[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+  "${XDG_CONFIG_HOME:-$HOME/.config}/kugou-tui/config.toml" 2>/dev/null | head -n 1)
+
+case "$ACTIVE_SOURCE" in
+  netease)
+    API_DIR="${NETEASE_API_DIR:-$HOME/NeteaseCloudMusicApi}"
+    SERVICE_NAME="NeteaseCloudMusicApi"
+    ;;
+  qqmusic)
+    API_DIR="${QQMUSIC_API_DIR:-$HOME/QQMusicApi}"
+    SERVICE_NAME="QQMusicApi"
+    ;;
+  *)
+    API_DIR="${KUGOU_API_DIR:-$HOME/KuGouMusicApi}"
+    SERVICE_NAME="KuGouMusicApi"
+    ;;
+esac
 
 # 定位二进制：优先环境变量，其次脚本所在仓库的 target/release。
 # 用 readlink -f 解析软链接，这样把脚本软链到 ~/.local/bin 也能找对地方。
@@ -87,18 +109,22 @@ esac
 
 # 用本地静态页做健康检查：/register/dev 会真的去请求酷狗服务器（冷缓存时 1 秒以上），
 # 而 `/` 由 express.static 直接吐出来，是纯本地操作。顺手校验内容，确认监听的是本服务。
-api_alive() { curl -sf --max-time 2 "$CHECK_BASE/" 2>/dev/null | grep -q '酷狗'; }
+# 只判断「这个地址有没有服务在听」，**不校验响应内容**。
+#
+# 早先这里要求响应里含「酷狗」二字：KuGouMusicApi 的首页确实有，但网易云、
+# QQ 音乐的首页当然没有，于是明明服务在跑却被判成未运行，接着又去启动一遍，
+# 撞上端口占用（EADDRINUSE）。探活就该只探活。
+api_alive() { curl -sf --max-time 2 -o /dev/null "$CHECK_BASE/" 2>/dev/null; }
 
 if ! api_alive; then
   if [ ! -d "$API_DIR" ]; then
-    printf '\033[33mKuGouMusicApi 未运行，且目录不存在：%s\033[0m\n' "$API_DIR" >&2
-    printf '先执行：\n  git clone https://github.com/MakcRe/KuGouMusicApi.git "%s"\n  cd "%s" && npm install --omit=dev\n' \
-      "$API_DIR" "$API_DIR" >&2
+    printf '\033[33m%s 未运行，且目录不存在：%s\033[0m\n' "$SERVICE_NAME" "$API_DIR" >&2
+    printf '先执行：\n  kugou-api-install %s\n' "${ACTIVE_SOURCE:-kugou}" >&2
     exit 1
   fi
 
-  printf '\033[36mKuGouMusicApi 未运行，正在启动…（端口 %s%s）\033[0m\n' \
-    "$API_PORT" "${API_PLATFORM:+，平台 $API_PLATFORM}" >&2
+  printf '\033[36m%s 未运行，正在启动…（端口 %s%s）\033[0m\n' \
+    "$SERVICE_NAME" "$API_PORT" "${API_PLATFORM:+，平台 $API_PLATFORM}" >&2
   mkdir -p "$(dirname "$API_LOG")"
   # 端口与平台用命令行参数传，不用 env：参数可以留空，`env ""` 反而会报错。
   # setsid 让服务脱离当前会话，避免终端或父进程退出时被一起回收；没有就退回 nohup。
