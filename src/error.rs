@@ -67,6 +67,17 @@ impl AppError {
     ///
     /// 已知码：`152` 搜索接口缺 cookie；`20005` / `40004` 登录态失效；
     /// `20028` 取播放直链时返回的「本次请求需要验证」。
+    /// 是否是「页码越界」。
+    ///
+    /// 实测搜索接口 `page` 最多到 16 页，再往后返回 `error_code: 149`（Out Page Range）。
+    /// 这是正常的"没更多了"，不是故障——翻页时应当据此停止，而不是当错误抛出。
+    pub fn is_page_out_of_range(&self) -> bool {
+        match self {
+            Self::Api { code, .. } => *code == 149,
+            _ => false,
+        }
+    }
+
     pub fn is_auth_related(&self) -> bool {
         match self {
             Self::Api { code, .. } => matches!(code, 152 | 20005 | 20028 | 40004),

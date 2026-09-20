@@ -44,6 +44,8 @@ pub enum Loaded {
     Search {
         keyword: String,
         songs: Vec<Song>,
+        /// true 表示追加到现有结果后面（「加载更多」），false 表示替换。
+        append: bool,
     },
     /// 歌单广场 / 搜索结果里的歌单列表。
     Playlists {

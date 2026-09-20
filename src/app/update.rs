@@ -352,6 +352,7 @@ impl App {
             Action::Prev => self.previous_track(),
             Action::SeekForward => self.seek_by(SEEK_STEP_MS),
             Action::SeekTo(position_ms) => self.seek_to(position_ms),
+            Action::LoadMoreSearch => self.load_more_search(),
             Action::SeekBackward => self.seek_by(-SEEK_STEP_MS),
             Action::VolumeUp => self.adjust_volume(VOLUME_STEP),
             Action::VolumeDown => self.adjust_volume(-VOLUME_STEP),
@@ -784,6 +785,59 @@ impl App {
         self.state.position_ms = target;
     }
 
+    /// 搜索结果「加载更多」：追加下一页。
+    ///
+    /// 之所以分页而不是一次取全：酷狗搜索只有第 1 页是精确匹配，
+    /// 深页塞的是兜底内容（实测搜「黑色幽默」第 2 页起变成有声书）。
+    /// 全量合并会把相关结果淹没，所以让用户主动一页页要看。
+    fn load_more_search(&mut self) {
+        let keyword = self.state.search.submitted.clone();
+        if keyword.is_empty() {
+            self.state.warn("请先搜索");
+            return;
+        }
+        if self.state.search.results.songs.is_empty() {
+            self.state.warn("当前没有搜索结果");
+            return;
+        }
+
+        let next_page = self.state.search.page + 1;
+        // 实测上限 16 页，再往后会返回 code=149 Out Page Range
+        if next_page > 16 {
+            self.state.info("已经到最后一页了");
+            return;
+        }
+
+        let api = self.api.clone();
+        let bus = self.bus.clone();
+        let page_size = self.state.config.page_size;
+        self.state.busy = Some(format!("加载「{keyword}」第 {next_page} 页"));
+
+        self.state.search.page = next_page;
+
+        self.runtime.spawn(async move {
+            match api.search_songs(&keyword, next_page, page_size).await {
+                Ok(songs) => bus.emit(Loaded::Search {
+                    keyword,
+                    songs,
+                    append: true,
+                }),
+                Err(error) => {
+                    // 越界就是没有更多了，不是故障
+                    if error.is_page_out_of_range() {
+                        bus.emit(Loaded::Search {
+                            keyword,
+                            songs: Vec::new(),
+                            append: true,
+                        });
+                    } else {
+                        bus.fail(format!("加载「{keyword}」更多结果失败"), error);
+                    }
+                }
+            }
+        });
+    }
+
     fn seek_by(&mut self, delta_ms: i64) {
         if self.state.current.is_none() {
             return;
@@ -947,8 +1001,19 @@ impl App {
         let page_size = self.state.config.page_size;
 
         self.runtime.spawn(async move {
+            // 刻意**只取第一页**，不做全量翻页。
+            //
+            // 实测：酷狗搜索只有第 1 页是精确匹配，深页塞的是兜底内容——
+            // 搜「黑色幽默」翻到第 2 页往后全是「卖花的惹不起」这类有声书，
+            // 全量合并会把相关结果淹没在垃圾里。MoeKoeMusic 也是分页浏览
+            // （`searchResults.value = response.data.lists` 只放当前页）。
+            // 想看更多按 `M` 一页页追加，顺序保持服务端的相关性。
             match api.search_songs(&keyword, 1, page_size).await {
-                Ok(songs) => bus.emit(Loaded::Search { keyword, songs }),
+                Ok(songs) => bus.emit(Loaded::Search {
+                    keyword,
+                    songs,
+                    append: false,
+                }),
                 Err(error) => bus.fail(format!("搜索「{keyword}」失败"), error),
             }
         });
@@ -1780,22 +1845,51 @@ impl App {
 
     fn handle_loaded(&mut self, loaded: Loaded) {
         match loaded {
-            Loaded::Search { keyword, songs } => {
+            Loaded::Search {
+                keyword,
+                songs,
+                append,
+            } => {
                 self.state.busy = None;
-                let descending = self.state.sort_descending;
-                let count = songs.len();
-                // 载入即按当前排列方向整理，队列与界面顺序天然一致
-                self.state.search.results.set_songs_sorted(
-                    format!("搜索「{keyword}」"),
-                    songs,
-                    descending,
-                );
-                if count == 0 {
-                    self.state.warn(format!("「{keyword}」没有找到结果"));
+
+                if append {
+                    // 追加：保持服务端给的相关性顺序，**不重排**。
+                    // 重排会把新一页的相关结果搅进旧结果里，破坏"越靠前越相关"。
+                    let pane = &mut self.state.search.results;
+                    let mut all = std::mem::take(&mut pane.songs);
+                    let added = songs.len();
+                    all.extend(songs);
+                    let total = all.len();
+                    pane.set_songs_sorted(format!("搜索「{keyword}」· {total} 首"), all, false);
+                    if added == 0 {
+                        self.state.info("没有更多结果了");
+                    } else {
+                        self.state
+                            .success(format!("又加载了 {added} 首（共 {total} 首）"));
+                    }
                 } else {
-                    self.state.success(format!("「{keyword}」找到 {count} 首"));
-                    // 结果到手后把焦点交给列表，方便直接按 Enter 播放
-                    self.state.focus = Focus::Secondary;
+                    let count = songs.len();
+                    // 标题带上条数：只写「搜索「XX」」会让人以结果就列表里这几条，
+                    // 实际接口 total 常有好几百，按 M 可以继续加载。
+                    self.state.search.page = 1;
+                    //
+                    // 这里**刻意不**跟随 `sort_descending`。
+                    // 那个开关是给歌单用的（新歌在最上），但搜索结果的价值全在
+                    // 服务端给的相关性排序上：默认倒序会把最相关的翻到最后，
+                    // 实测搜「黑色幽默」原本周杰伦排第一，倒序后前排变成
+                    // 「潜水不会游」「科野」这类，等于搜不到想要的东西。
+                    self.state.search.results.set_songs_sorted(
+                        format!("搜索「{keyword}」· {count} 首"),
+                        songs,
+                        false,
+                    );
+                    if count == 0 {
+                        self.state.warn(format!("「{keyword}」没有找到结果"));
+                    } else {
+                        self.state.success(format!("「{keyword}」找到 {count} 首"));
+                        // 结果到手后把焦点交给列表，方便直接按 Enter 播放
+                        self.state.focus = Focus::Secondary;
+                    }
                 }
             }
 

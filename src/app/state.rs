@@ -452,6 +452,11 @@ pub struct SearchPane {
     /// 上次真正提交搜索的关键词，用于提示「结果对应的是哪个词」。
     pub submitted: String,
     pub results: SongList,
+    /// 已加载到第几页。「加载更多」在此基础上 +1。
+    ///
+    /// 搜索刻意分页：酷狗只有第 1 页是精确匹配，深页是兜底内容，
+    /// 一次取全会把相关结果淹没。想要更多就一页页追加。
+    pub page: u32,
 }
 
 #[derive(Debug, Default)]

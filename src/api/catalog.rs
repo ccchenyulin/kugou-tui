@@ -290,7 +290,16 @@ impl ApiClient {
                         }
                         all.extend(songs);
                     }
-                    Ok(Err(error)) => return Err(error),
+                    Ok(Err(error)) => {
+                        // 页码越界 = 后面没有了，属正常终止，保留已取到的内容。
+                        // 不这样做的话，搜「周杰伦」（上限 16 页）会整次失败，
+                        // 界面只剩首屏那 30 条。
+                        if error.is_page_out_of_range() {
+                            stop = true;
+                            continue;
+                        }
+                        return Err(error);
+                    }
                     Err(error) => {
                         // 任务本身panic/取消。不该发生，报出来而不是静默丢页
                         crate::logger::tlog!(crate::logger::LEVEL_WARN, "翻页任务失败：{error}");

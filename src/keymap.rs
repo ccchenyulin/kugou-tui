@@ -60,6 +60,8 @@ pub enum Action {
     Prev,
     SeekForward,
     SeekBackward,
+    /// 搜索结果「加载更多」：追加下一页。
+    LoadMoreSearch,
     /// 绝对定位到指定毫秒。MPRIS 的 SetPosition 需要它——桌面组件拖进度条是"跳到某处"，
     /// 不是"前进/后退几秒"，只有 SeekForward/Backward 是做不到的。
     SeekTo(u64),
@@ -204,6 +206,7 @@ fn resolve_normal(key: KeyEvent) -> Action {
         KeyCode::Char('x') => Action::RemoveFromQueue,
         KeyCode::Char('X') => Action::ClearQueue,
         KeyCode::Char('C') => Action::ClearCache,
+        KeyCode::Char('M') => Action::LoadMoreSearch,
         KeyCode::Char('o') => Action::ToggleSortOrder,
         KeyCode::Char('b') => Action::OpenRanks,
         KeyCode::Char('c') => Action::OpenCloud,
