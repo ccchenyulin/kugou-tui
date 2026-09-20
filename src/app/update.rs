@@ -403,12 +403,15 @@ impl App {
             return;
         }
 
-        // 设置页：← → 是「改值」而不是「移动光标」——这一页没有输入框，
-        // 用左右键表达增减档位比用 Enter 更顺手，也和其它设置界面一致。
+        // 设置页：← → 是「改值」。这一页没有输入框也没有播放进度，
+        // 让方向键去快进/快退的话，用户在这一页就只剩 Enter 能用，很别扭。
+        //
+        // 方向键在别处映射成 SeekForward / SeekBackward（快进快退），
+        // CursorLeft / CursorRight 才是文本光标，所以两种都要接。
         if self.state.tab == Tab::Settings {
             match action {
-                Action::CursorLeft => return self.adjust_setting(-1),
-                Action::CursorRight => return self.adjust_setting(1),
+                Action::CursorLeft | Action::SeekBackward => return self.adjust_setting(-1),
+                Action::CursorRight | Action::SeekForward => return self.adjust_setting(1),
                 _ => {}
             }
         }
