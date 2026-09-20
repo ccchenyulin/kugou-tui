@@ -72,6 +72,13 @@ pub struct App {
 
     /// MPRIS 句柄。没有 D-Bus 时为 `None`（不影响播放，只是桌面集成不可用）。
     mpris: Option<crate::mpris::MprisHandle>,
+
+    /// 已经画到终端上的封面：(歌曲 hash, 区域)。
+    ///
+    /// 用来避免每帧重发——kitty 的图片会自己留在屏幕上（ratatui 的重绘擦不到
+    /// 它），每帧删掉重画反而会让终端反复擦除+绘制，看起来就是整屏乱闪。
+    /// 只有内容或位置真的变了才需要动它。
+    cover_painted: Option<(String, ratatui::layout::Rect)>,
 }
 
 impl App {
@@ -120,6 +127,7 @@ impl App {
             runtime,
             last_frame_at: Instant::now(),
             mpris,
+            cover_painted: None,
         };
 
         app.announce_readiness();
@@ -232,26 +240,51 @@ impl App {
             return Ok(());
         }
 
+        // 本帧**想要**显示什么。三者缺一就是「不该有封面」。
+        let wanted = match (
+            self.state.cover_area,
+            self.state.cover.png.as_deref(),
+            self.state.cover.hash.as_deref(),
+        ) {
+            (Some(area), Some(png), Some(hash)) if area.width > 0 && area.height > 0 => {
+                Some((hash.to_string(), area, png))
+            }
+            _ => None,
+        };
+
+        // 与上一帧完全相同就**什么都不做**。
+        //
+        // 图片在字符之上，ratatui 的重绘擦不到它，所以它会一直留在屏幕上；
+        // 反过来，每帧删掉重发会让终端反复「擦除 + 绘制」——那就是用户看到的
+        // 整屏乱闪。只在内容或位置真的变了时才动手。
+        if let (Some((hash, area, _)), Some((last_hash, last_area))) =
+            (&wanted, &self.cover_painted)
+        {
+            if hash == last_hash && area == last_area {
+                return Ok(());
+            }
+        }
+
         use std::io::Write;
         let mut stdout = std::io::stdout();
 
-        // **先删掉上一帧的图**。kitty 的图片是终端浮层、显示在字符之上，
-        // ratatui 的整屏重绘擦不掉它——只发不删的话，切到别的页面后旧封面
-        // 会留在原地，切几次就叠出好几张（用户实测踩到）。
-        stdout.write_all(crate::ui::kitty::delete_image(COVER_IMAGE_ID).as_bytes())?;
+        // 先清掉旧图：换歌、换位置、或本帧不再需要封面（切到别的页）。
+        // 不删的话旧图会留在原地，切几次就叠出好几张（用户实测踩到过）。
+        if self.cover_painted.is_some() {
+            stdout.write_all(crate::ui::kitty::delete_image(COVER_IMAGE_ID).as_bytes())?;
+            self.cover_painted = None;
+        }
 
-        // 本帧不需要封面（切到了别的页、或这首歌没有封面）时，删掉即可
-        if let (Some(area), Some(png)) = (self.state.cover_area, self.state.cover.png.as_deref()) {
-            if area.width > 0 && area.height > 0 {
-                // 移到区域左上角再放图（MoveTo 是 0 基坐标）
-                ratatui::crossterm::execute!(
-                    stdout,
-                    ratatui::crossterm::cursor::MoveTo(area.x, area.y)
-                )?;
-                stdout.write_all(
-                    crate::ui::kitty::display_png(png, area.width, COVER_IMAGE_ID).as_bytes(),
-                )?;
-            }
+        if let Some((hash, area, png)) = wanted {
+            // 移到区域左上角再放图（MoveTo 是 0 基坐标）
+            ratatui::crossterm::execute!(
+                stdout,
+                ratatui::crossterm::cursor::MoveTo(area.x, area.y)
+            )?;
+            stdout.write_all(
+                crate::ui::kitty::display_png(png, area.width, COVER_IMAGE_ID).as_bytes(),
+            )?;
+            self.cover_painted = Some((hash, area));
         }
 
         stdout.flush()?;
