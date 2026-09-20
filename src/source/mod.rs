@@ -42,6 +42,7 @@
 //!
 
 mod netease;
+mod qqmusic;
 
 use serde::{Deserialize, Serialize};
 
@@ -313,7 +314,7 @@ impl SourceKind {
         match self {
             Self::Kugou | Self::KugouConcept => client.search_songs(keyword, page, page_size).await,
             Self::Netease => netease::search_songs(client, keyword, page, page_size).await,
-            Self::QqMusic => Err(unsupported("搜索")),
+            Self::QqMusic => qqmusic::search_songs(client, keyword, page, page_size).await,
         }
     }
 
@@ -327,7 +328,7 @@ impl SourceKind {
         match self {
             Self::Kugou | Self::KugouConcept => client.song_stream_url(song, quality).await,
             Self::Netease => netease::song_stream_url(client, song, quality).await,
-            Self::QqMusic => Err(unsupported("播放")),
+            Self::QqMusic => qqmusic::song_stream_url(client, song, quality).await,
         }
     }
 
@@ -336,7 +337,7 @@ impl SourceKind {
         match self {
             Self::Kugou | Self::KugouConcept => client.fetch_lyric(song).await,
             Self::Netease => netease::fetch_lyric(client, song).await,
-            Self::QqMusic => Err(unsupported("歌词")),
+            Self::QqMusic => qqmusic::fetch_lyric(client, song).await,
         }
     }
 
