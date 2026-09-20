@@ -51,6 +51,17 @@ pub struct Song {
     pub privilege: Option<i64>,
     /// 歌单条目 id，仅从歌单接口返回，云端删歌时需要。
     pub file_id: Option<i64>,
+    /// 同一首歌在不同接口里给出的**多个 hash**。
+    ///
+    /// 酷狗在搜索和歌单接口里给的 `FileHash`/`hash` 可能指向"已下架"的版本，
+    /// 但同一首歌在 `audio_info.hash_128`/`hash_320`/... 里还有别的 hash——
+    /// 那些 hash 调 `/song/url` 才能拿到链接。**把这一首**歌的每一个 hash 都
+    /// 喂给 `/privilege/lite`，由它逐个回 variant 试，是唯一能绕开"搜索时给
+    /// 的 hash 拿不到资源"的修复路径。
+    ///
+    /// 留空是合法状态：很多接口根本不返回 `audio_info`，搜不到就是空。
+    #[serde(default)]
+    pub extra_hashes: std::collections::BTreeMap<String, String>,
     /// 这首歌是从哪个音源取来的。
     ///
     /// **取播放链接时必须用它，而不是「当前音源」**：队列是可以跨音源的——
@@ -364,6 +375,9 @@ pub fn song_from_json(value: &Value) -> Option<Song> {
     // 而列表里歌手本来就是单独一列，不去掉前缀就会显示两遍
     let name = strip_singer_prefix(&name, &singers);
 
+    // `audio_info.hash_xxx` 一并收下——先收，后面的 Song 构造才能引用
+    let extra_hashes = parse_extra_hashes(value, &hash);
+
     let duration_ms = pick_u64(value, &["Duration", "duration", "timelength", "timelen"])
         .map(normalize_duration)
         .or_else(|| pick_audio_duration(value))
@@ -407,6 +421,7 @@ pub fn song_from_json(value: &Value) -> Option<Song> {
         // 缺失即「未知」，交给 looks_playable 决定要不要预警
         privilege: pick_i64(value, &["Privilege", "privilege", "pay_type"]),
         file_id: pick_i64(value, &["Fileid", "FileId", "fileid", "file_id"]),
+        extra_hashes,
         // 标准版与概念版共用这套解析，具体来源由分派层盖章覆盖
         source: crate::source::SourceKind::Kugou,
     })
@@ -429,6 +444,32 @@ fn pick_audio_hash(value: &Value) -> Option<String> {
             "hash_super",
         ],
     )
+}
+
+/// 把 `audio_info` 里所有 hash_xxx 都收下，按音质映射成 BTreeMap。
+///
+/// 同一首歌在不同接口里给出的 `hash` 字段（`FileHash` / `hash`）可能指向
+/// **已经下架**的版本，但 `audio_info.hash_128`、`hash_320` 等里通常还会给
+/// 一组别的 hash——它们各自对应一个可播放的资源。**只有把这些都收下，**/
+/// `privilege/lite` **才知道该问哪些 hash**。
+///
+/// 与顶层 hash 重复的项跳过，避免无意义地重发同一份请求。
+fn parse_extra_hashes(value: &Value, primary: &str) -> std::collections::BTreeMap<String, String> {
+    let mut map = std::collections::BTreeMap::new();
+    let Some(info) = value.get("audio_info") else {
+        return map;
+    };
+    for quality in ["128", "320", "flac", "high", "super"] {
+        let key = format!("hash_{quality}");
+        let Some(hash) = info.get(&key).and_then(Value::as_str) else {
+            continue;
+        };
+        if hash == primary {
+            continue;
+        }
+        map.insert(quality.to_string(), hash.to_string());
+    }
+    map
 }
 
 /// 从 `audio_info` 里取时长。单位同样走 [`normalize_duration`] 归一。
@@ -826,6 +867,19 @@ mod tests {
         assert!(song.cover.is_some());
         // privilege 缺失 → 按可播处理，否则会对整页正常歌曲误报版权受限
         assert!(song.looks_playable());
+        // 排行榜条目也照 `audio_info` 的多档 hash 收下——这是「同一首歌在
+        // 某些接口的 hash 拿不到资源、其它接口的能拿到」的根本修复
+        assert_eq!(
+            song.extra_hashes.get("320").map(String::as_str),
+            Some("B7AC734C6806EFF90C22C74F1AFFA156")
+        );
+        assert_eq!(
+            song.extra_hashes.get("flac").map(String::as_str),
+            Some("85479C21FADC65A7C495989D6FE9396D")
+        );
+        // 主 hash 与 `hash_128` 相同 —— 这种重复项必须跳过，否则 `/privilege/lite`
+        // 会收到一堆 `resource`，白白浪费服务端资源
+        assert!(!song.extra_hashes.contains_key("128"));
     }
 
     #[test]
@@ -880,6 +934,56 @@ mod tests {
         let blocked = song_from_json(&json!({"FileHash": "H", "Privilege": 0})).expect("应能解析");
         assert_eq!(blocked.privilege, Some(0));
         assert!(!blocked.looks_playable());
+    }
+
+    /// 同一首歌在搜索结果里拿不到 URL、歌单里能拿到——根因是顶层 `FileHash`
+    /// 指向的是已下架版本，`audio_info.hash_320/128` 才是当前还在用的。
+    /// 这个测试**直接锁死**「多档 hash 必须收下、且不能与主 hash 重复」。
+    #[test]
+    fn collects_extra_hashes_from_audio_info() {
+        let raw = json!({
+            "SongName": "测试曲",
+            "FileHash": "PRIMARY_HASH",
+            "audio_info": {
+                "hash_128": "PRIMARY_HASH",    // 与主 hash 重复 → 必须跳过
+                "hash_320": "HASH_320",
+                "hash_flac": "HASH_FLAC",
+                "hash_high": "HASH_HIGH",
+                "hash_super": "HASH_SUPER",
+                "duration_320": 200000,        // duration_xxx 不是 hash → 忽略
+            },
+        });
+        let song = song_from_json(&raw).expect("应能解析");
+        assert_eq!(song.hash, "PRIMARY_HASH");
+        assert_eq!(
+            song.extra_hashes.get("320").map(String::as_str),
+            Some("HASH_320")
+        );
+        assert_eq!(
+            song.extra_hashes.get("flac").map(String::as_str),
+            Some("HASH_FLAC")
+        );
+        assert_eq!(
+            song.extra_hashes.get("high").map(String::as_str),
+            Some("HASH_HIGH")
+        );
+        assert_eq!(
+            song.extra_hashes.get("super").map(String::as_str),
+            Some("HASH_SUPER")
+        );
+        assert!(
+            !song.extra_hashes.contains_key("128"),
+            "与主 hash 重复的 128 必须跳过"
+        );
+        assert_eq!(song.extra_hashes.len(), 4);
+    }
+
+    /// 没有 `audio_info` 时 `extra_hashes` 留空——大多数接口都不返回。
+    #[test]
+    fn extra_hashes_is_empty_when_audio_info_absent() {
+        let raw = json!({"SongName": "测试曲", "FileHash": "H"});
+        let song = song_from_json(&raw).expect("应能解析");
+        assert!(song.extra_hashes.is_empty());
     }
 
     #[test]

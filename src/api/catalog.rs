@@ -500,23 +500,49 @@ impl ApiClient {
         }
     }
 
-    /// 问服务端「这个 hash 在登录账号下能听哪几档音质」。
+    /// 问服务端「这些 hash 在登录账号下能听哪几档音质」。
     ///
     /// 酷狗为每档音质维护**独立的文件指纹（hash）**——VIP 用户拿到的 flac hash
     /// 和 128 hash 是完全不同的两个串。直接拿歌单里查到的 hash 去试 320 / flac
     /// 全是空，所以这里必须先查一次。
+    ///
+    /// **重要**：服务端 `privilege_lite.js` 接受 `resource` 数组，可以**一次问
+    /// 多首歌或同一首歌的多个 hash**。我们把同一首歌**所有** hash 都喂进去——
+    /// 搜索接口给的顶层 `hash` 可能指向已下架的版本，但 `audio_info.hash_xxx`
+    /// 里的 hash 可能还能用，跨接口数据合并在这里完成。
     async fn request_privilege_lite(&self, song: &Song) -> Result<Value> {
-        // 响应格式见 `KuGouMusicApi/module/privilege_lite.js`：POST body 包含
+        // 收集这一首歌的所有 hash：顶层 hash 优先 + audio_info 里散落的多档音质 hash。
+        // 服务端会对每个 hash 都返回 variant，最后我们统一排重挑最佳。
+        let album_id = song.album_id.parse::<u64>().unwrap_or(0);
+        let mut seen = std::collections::HashSet::new();
+        let mut hashes = Vec::new();
+        if seen.insert(song.hash.clone()) {
+            hashes.push(song.hash.clone());
+        }
+        for hash in song.extra_hashes.values() {
+            if seen.insert(hash.clone()) {
+                hashes.push(hash.clone());
+            }
+        }
+
+        let resources: Vec<Value> = hashes
+            .iter()
+            .map(|hash| {
+                serde_json::json!({
+                    "type": "audio",
+                    "page_id": 0,
+                    "hash": hash,
+                    "album_id": album_id,
+                })
+            })
+            .collect();
+
+        // 响应格式见 `KuGouMusicApi/module/privilege_lite.js`：body 包含
         // 一个 `resource` 数组（每首歌一个 `{type, hash, album_id}`）+ qualities 列表。
         // 服务端对每档音质分别返回 `{hash, quality, level}`，`level == 0` 表示没权限。
         let body = serde_json::json!({
             "area_code": 1,
-            "resource": [{
-                "type": "audio",
-                "page_id": 0,
-                "hash": song.hash,
-                "album_id": song.album_id.parse::<u64>().unwrap_or(0),
-            }],
+            "resource": resources,
             "qualities": SUPPORTED_PRIVILEGE_QUALITIES,
         });
         self.post_json("/privilege/lite", &body).await
