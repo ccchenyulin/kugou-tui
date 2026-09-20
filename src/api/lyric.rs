@@ -146,6 +146,7 @@ pub fn parse_lrc(text: &str) -> Lyric {
                 time_ms,
                 text: content.clone(),
                 translation: None,
+                romanization: None,
             });
         }
     }
@@ -258,8 +259,7 @@ fn clean_krc_markup(text: &str) -> String {
 /// {"content":[{"type":1,"lyricContent":["译文1","译文2"]},{"type":0,"lyricContent":["音译1"]}]}
 /// ```
 ///
-/// `type` 为 1 是翻译、0 是音译。优先用翻译，没有再退回音译——实测不少外文歌
-/// 只填了 type 0，但内容其实是中文译文。
+/// `type` 为 1 是翻译、0 是音译，两条轨各自填写、互不影响。
 fn attach_translations(lyric: &mut Lyric, krc_text: &str) {
     let Some(payload) = extract_language_payload(krc_text) else {
         return;
@@ -268,31 +268,42 @@ fn attach_translations(lyric: &mut Lyric, krc_text: &str) {
         return;
     };
 
-    // 先找翻译(type 1)，没有再用音译(type 0)
-    let lines = content
-        .iter()
-        .find(|section| section.get("type").and_then(serde_json::Value::as_i64) == Some(1))
-        .or_else(|| {
-            content
-                .iter()
-                .find(|section| section.get("type").and_then(serde_json::Value::as_i64) == Some(0))
-        })
-        .and_then(|section| section.get("lyricContent"))
-        .and_then(|value| value.as_array());
-
-    let Some(lines) = lines else {
-        return;
+    // 按 `type` 取轨道：1 = 翻译，0 = 音译。
+    //
+    // 注意**不能**用 `language` 区分：实测同一首歌里两个轨道的 `language` 都是 0，
+    // 只有 `type` 不同（Bad Apple!! 就是这样）。按 `language` 找会两条都指向音译，
+    // 译文永远取不到——这个坑踩过一次，下面的用例锁着它。
+    let track = |kind: i64| -> Option<Vec<String>> {
+        content
+            .iter()
+            .find(|section| section.get("type").and_then(serde_json::Value::as_i64) == Some(kind))
+            .and_then(|section| section.get("lyricContent"))
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(flatten_lyric_content)
+                    .collect::<Vec<_>>()
+            })
     };
 
-    for (index, entry) in lines.iter().enumerate() {
-        let Some(text) = flatten_lyric_content(entry) else {
-            continue;
-        };
-        if text.trim().is_empty() {
-            continue;
+    let translation = track(1);
+    let romanization = track(0);
+
+    for (index, line) in lyric.lines.iter_mut().enumerate() {
+        if let Some(items) = translation.as_ref() {
+            if let Some(text) = items.get(index) {
+                if !text.trim().is_empty() {
+                    line.translation = Some(text.clone());
+                }
+            }
         }
-        if let Some(line) = lyric.lines.get_mut(index) {
-            line.translation = Some(text);
+        if let Some(items) = romanization.as_ref() {
+            if let Some(text) = items.get(index) {
+                if !text.trim().is_empty() {
+                    line.romanization = Some(text.clone());
+                }
+            }
         }
     }
 }
@@ -335,6 +346,40 @@ fn flatten_lyric_content(entry: &serde_json::Value) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 译文与音译的提取。
+    ///
+    /// 锁住两个坑：
+    /// 1. 轨道靠 `type` 区分，不是 `language`（实测同一首歌两轨 language 都是 0）
+    /// 2. `lyricContent` 的元素是 `["原文","译文"]` 成对数组，取最后一个槽位
+    #[test]
+    fn attaches_translation_and_romanization() {
+        use base64::Engine;
+
+        let payload = r#"{"content":[
+            {"language":0,"type":0,"lyricContent":[["","mo "]]},
+            {"language":0,"type":1,"lyricContent":[["","就算身处流逝的时光里"]]}
+        ]}"#;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(payload);
+        // 一行 KRC：时间标签形如 [起始毫秒,持续毫秒]
+        let krc = format!("[id:1]\n[language:{encoded}]\n[0,1000]日文原文\n");
+
+        let mut lyric = parse_lrc(&krc);
+        attach_translations(&mut lyric, &krc);
+
+        assert_eq!(lyric.lines.len(), 1, "应解析出 1 行");
+        assert_eq!(lyric.lines[0].text, "日文原文");
+        assert_eq!(
+            lyric.lines[0].translation.as_deref(),
+            Some("就算身处流逝的时光里"),
+            "type=1 应填进 translation"
+        );
+        assert_eq!(
+            lyric.lines[0].romanization.as_deref(),
+            Some("mo "),
+            "type=0 应填进 romanization"
+        );
+    }
 
     #[test]
     fn parses_plain_lrc() {

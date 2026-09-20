@@ -156,11 +156,19 @@ pub fn render_lyric(frame: &mut Frame, area: Rect, state: &AppState, theme: &The
     let mut display: Vec<(usize, bool, String)> = Vec::with_capacity(total * 2);
     for (index, line) in state.lyric.lyric.lines.iter().enumerate() {
         display.push((index, false, line.text.clone()));
-        if let Some(translation) = line.translation.as_deref() {
-            // 空白行不要占第二行，否则歌词稀疏的歌会突然多一截空白
-            if !translation.trim().is_empty() {
-                display.push((index, true, translation.to_string()));
-            }
+        // 译文优先；没有译文时退而显示音译（罗马音），
+        // 这样外文歌至少能跟着哼，不至于完全看不懂
+        let extra = line
+            .translation
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+            .or_else(|| {
+                line.romanization
+                    .as_deref()
+                    .filter(|text| !text.trim().is_empty())
+            });
+        if let Some(extra) = extra {
+            display.push((index, true, extra.to_string()));
         }
     }
 

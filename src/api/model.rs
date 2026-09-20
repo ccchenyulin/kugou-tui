@@ -153,7 +153,12 @@ pub struct LyricLine {
     /// 酷狗把翻译/音译放在 KRC 的 `[language:base64]` 标签里（文档未记载）：
     /// base64 解开是 JSON，`content[].type` 为 1 是翻译、0 是音译，
     /// `lyricContent` 按行与主歌词一一对应。
+    ///
+    /// 注意区分翻译与音译的是 **`type`** 而不是 `language`——实测同一首歌里
+    /// 两个轨道的 `language` 都是 0，只有 `type` 不同。
     pub translation: Option<String>,
+    /// 该行的音译（罗马音，若有）。来自 `type == 0` 的轨道。
+    pub romanization: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -860,16 +865,19 @@ mod tests {
                     time_ms: 1_000,
                     text: "第一句".into(),
                     translation: None,
+                    romanization: None,
                 },
                 LyricLine {
                     time_ms: 5_000,
                     text: "第二句".into(),
                     translation: None,
+                    romanization: None,
                 },
                 LyricLine {
                     time_ms: 9_000,
                     text: "第三句".into(),
                     translation: None,
+                    romanization: None,
                 },
             ],
         };
