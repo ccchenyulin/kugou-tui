@@ -405,7 +405,18 @@ impl ApiClient {
         //
         // 未登录或 `/privilege/lite` 失败时回退到「原 hash + 用户选的音质」——
         // 不能因为这个查询挂了就完全走不通。
-        let candidates = self.privilege_candidates(song, quality).await;
+        let mut candidates = self.privilege_candidates(song, quality).await;
+
+        // 蝰蛇系列（viper_clear / viper_atmos / viper_tape）是酷狗的**付费加项**，
+        // 需要独立的「蝰蛇 VIP」——普通 VIP / TVIP 账号设了它，上游会直接拒绝
+        // （实测 error_code 31863），表现为「所有歌都播不了」。用户会把播放器坏掉，
+        // 实际只是这一档没权限。
+        //
+        // 兜底：把标准 128 也塞进候选——viper 系列没权限时降到 128，**宁可音质
+        // 差一点也不能一首都听不了**。
+        if VIPER_QUALITIES.contains(&quality) {
+            candidates.push((song.hash.clone(), VIPER_FALLBACK_QUALITY.to_string()));
+        }
 
         let mut last_full = None;
         for (hash, q) in &candidates {
@@ -413,10 +424,12 @@ impl ApiClient {
                 .request_song_url_with_hash(song, hash, q, false)
                 .await?;
             if let Some(url) = extract_stream_url(&response) {
+                let degraded = q != quality && VIPER_QUALITIES.contains(&quality);
                 return Ok(StreamUrl {
                     url,
                     is_trial: false,
-                    reason: None,
+                    reason: degraded
+                        .then(|| format!("{quality} 不可用（需要蝰蛇 VIP），已降级到标准 {q}")),
                 });
             }
             last_full = Some(response);
@@ -642,6 +655,17 @@ const SUPPORTED_PRIVILEGE_QUALITIES: &[&str] = &[
     "viper_clear",
     "viper_tape",
 ];
+
+/// 「蝰蛇音效」系列的音质名——这些是酷狗的**付费加项**，需要独立的蝰蛇 VIP，
+/// 不是普通 TVIP 能拿到的。账号没蝰蛇权限时上游直接给 \`error_code 31863\`
+/// 不在这一层加兜底的话用户会「所有歌都听不了」还以为是播放器坏了。
+///
+/// \`viper_clear\` 是蝰蛇母带（最高音质），\`viper_atmos\` 全景声，\`viper_tape\`
+/// 母带修复。普通用户 / 标准 VIP 别选这几个——优先选 128 / 320 / flac。
+const VIPER_QUALITIES: &[&str] = &["viper_clear", "viper_atmos", "viper_tape"];
+
+/// 蝰蛇音质没权限时的兜底音质。128 是酷狗默认音质，**不需要任何 VIP**。
+const VIPER_FALLBACK_QUALITY: &str = "128";
 
 /// 音质降级链：用户选的那档在最前，逐级降到 128 kbps。
 ///
@@ -997,5 +1021,19 @@ mod tests {
 
         let candidates = parse_quality_candidates(&json!({"data": "garbage"}), "flac");
         assert!(candidates.is_empty());
+    }
+
+    /// 蝰蛇音质 vs 标准音质的分类不能错——否则降级逻辑会把标准 128 当蝰蛇
+    /// 走兜底（用户根本没要求降级就被偷偷降级），或者反过来。
+    #[test]
+    fn viper_quality_classification() {
+        assert!(VIPER_QUALITIES.contains(&"viper_clear"));
+        assert!(VIPER_QUALITIES.contains(&"viper_atmos"));
+        assert!(VIPER_QUALITIES.contains(&"viper_tape"));
+        // 标准音质 / flac / high 不是蝰蛇——别误判
+        assert!(!VIPER_QUALITIES.contains(&"flac"));
+        assert!(!VIPER_QUALITIES.contains(&"high"));
+        assert!(!VIPER_QUALITIES.contains(&"128"));
+        assert!(!VIPER_QUALITIES.contains(&"320"));
     }
 }
