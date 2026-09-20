@@ -29,6 +29,12 @@
 //! 时再套，改动才划算。
 //!
 //! 所以本文件**只保留数据模型**（[`SourceKind`] / [`SourceProfile`] / [`SourceSet`]）：
+//! 地址、登录态、设备指纹这三样差异就是全部，已由 `Config::switch_source` 统一切换。
+//! 曾有一个 `Source` 行为包装（转发 search / playlist_tracks / stream_url），但两个平台
+//! 接口语义完全一致，它只会多一层无意义转发，且从未被调用——按死代码删除。
+//! 将来接入**非酷狗**音源时，再按 [`SourceKind`] 分派各自的请求与解析实现。
+//!
+//! 所以本文件**只保留数据模型**（[`SourceKind`] / [`SourceProfile`] / [`SourceSet`]）：
 //! 地址、登录态、设备指纹这三样差异就是全部，且已由 `Config::switch_source` 统一切换。
 //! 曾有一个 `Source` 行为包装（转发 search / playlist_tracks / stream_url），但因为
 //! 两个平台接口语义完全一致，它只会多一层无意义转发，且从未被使用——已按死代码删除。

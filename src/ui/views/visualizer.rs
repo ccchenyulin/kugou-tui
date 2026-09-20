@@ -14,7 +14,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::app::state::AppState;
@@ -209,19 +209,4 @@ fn render_track_info(frame: &mut Frame, area: Rect, state: &AppState, theme: &Th
         .alignment(Alignment::Center),
         area,
     );
-}
-
-/// 把颜色按 `ratio` 压暗。保留给需要连续渐变的场景。
-#[allow(dead_code)]
-fn dim(color: Color, ratio: f32) -> Color {
-    let (r, g, b) = match color {
-        Color::Rgb(r, g, b) => (r, g, b),
-        other => return other,
-    };
-    let factor = (0.45 + 0.55 * ratio.clamp(0.0, 1.0)).clamp(0.0, 1.0);
-    Color::Rgb(
-        (r as f32 * factor) as u8,
-        (g as f32 * factor) as u8,
-        (b as f32 * factor) as u8,
-    )
 }

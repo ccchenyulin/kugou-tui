@@ -239,11 +239,22 @@ impl ApiClient {
     // 取全（翻页）
     // ------------------------------------------------------------------
 
-    /// 歌单内**全部**歌曲（公开歌单）。
-    pub async fn playlist_tracks_all(&self, global_id: &str) -> Result<Vec<Song>> {
+    /// 逐页取全量歌曲的通用实现。
+    ///
+    /// 四个「取全部」接口长得一模一样，早先各抄一遍（48 行重复）。收敛成一处后，
+    /// 翻页上限与「不足一页即停止」的判断只有一份，不会漏改。
+    ///
+    /// 目前是**顺序**翻页：歌单接口硬限每页 30 条，400 首歌就是 14 次串行往返，
+    /// 这是大歌单加载慢的主因。改成并发能明显提速，但涉及错误传播与页码顺序还原，
+    /// 单独做，不混在这次去重里。
+    async fn collect_all_pages<F, Fut>(&self, mut fetch_page: F) -> Result<Vec<Song>>
+    where
+        F: FnMut(u32) -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<Song>>>,
+    {
         let mut all = Vec::new();
         for page in 1..=MAX_PAGES {
-            let songs = self.playlist_tracks(global_id, page, PAGE_LIMIT).await?;
+            let songs = fetch_page(page).await?;
             let got = songs.len();
             all.extend(songs);
             if got < PAGE_LIMIT as usize {
@@ -251,36 +262,24 @@ impl ApiClient {
             }
         }
         Ok(all)
+    }
+
+    /// 歌单内**全部**歌曲（公开歌单）。
+    pub async fn playlist_tracks_all(&self, global_id: &str) -> Result<Vec<Song>> {
+        self.collect_all_pages(|page| self.playlist_tracks(global_id, page, PAGE_LIMIT))
+            .await
     }
 
     /// 用户歌单内**全部**歌曲（自建/收藏，按数字 `listid`）。
     pub async fn user_playlist_tracks_all(&self, list_id: i64) -> Result<Vec<Song>> {
-        let mut all = Vec::new();
-        for page in 1..=MAX_PAGES {
-            let songs = self.user_playlist_tracks(list_id, page, PAGE_LIMIT).await?;
-            let got = songs.len();
-            all.extend(songs);
-            if got < PAGE_LIMIT as usize {
-                break;
-            }
-        }
-        Ok(all)
+        self.collect_all_pages(|page| self.user_playlist_tracks(list_id, page, PAGE_LIMIT))
+            .await
     }
 
     /// 歌手**全部**歌曲。`sort` 同 [`Self::artist_tracks`]。
     pub async fn artist_tracks_all(&self, artist_id: i64, sort: &str) -> Result<Vec<Song>> {
-        let mut all = Vec::new();
-        for page in 1..=MAX_PAGES {
-            let songs = self
-                .artist_tracks(artist_id, sort, page, PAGE_LIMIT)
-                .await?;
-            let got = songs.len();
-            all.extend(songs);
-            if got < PAGE_LIMIT as usize {
-                break;
-            }
-        }
-        Ok(all)
+        self.collect_all_pages(|page| self.artist_tracks(artist_id, sort, page, PAGE_LIMIT))
+            .await
     }
 
     /// 榜单**全部**歌曲。
@@ -288,16 +287,8 @@ impl ApiClient {
     /// `/rank/audio` 不像歌单那样硬限 30（传 100 能回 100），但统一按页取更省心，
     /// 也避免榜单扩容后要回头改。
     pub async fn rank_tracks_all(&self, rank_id: i64) -> Result<Vec<Song>> {
-        let mut all = Vec::new();
-        for page in 1..=MAX_PAGES {
-            let songs = self.rank_tracks(rank_id, page, PAGE_LIMIT).await?;
-            let got = songs.len();
-            all.extend(songs);
-            if got < PAGE_LIMIT as usize {
-                break;
-            }
-        }
-        Ok(all)
+        self.collect_all_pages(|page| self.rank_tracks(rank_id, page, PAGE_LIMIT))
+            .await
     }
 
     // ------------------------------------------------------------------
