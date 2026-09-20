@@ -155,7 +155,7 @@ fn render_main(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Them
             return;
         }
         Tab::Lyrics => {
-            views::render_lyric(frame, area, state, theme);
+            views::render_lyrics_page(frame, area, state, theme);
             return;
         }
         Tab::Cover => {

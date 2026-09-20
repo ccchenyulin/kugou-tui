@@ -267,6 +267,10 @@ impl App {
             (&wanted, &self.cover_painted)
         {
             if hash == last_hash && area == last_area {
+                // 正常情况每帧都走到这里：图片在字符之上，ratatui 的重绘擦不掉它，
+                // 不需要重发。（这里刻意不记日志——每帧都发生，记了会刷屏。）
+                // 排查卡顿时看的是**发送**那条：它应当只在换歌/换页时出现，
+                // 若成片出现就说明区域每帧都在变。
                 return Ok(());
             }
         }
@@ -290,6 +294,13 @@ impl App {
             stdout.write_all(
                 crate::ui::kitty::display_png(png, area.width, COVER_IMAGE_ID).as_bytes(),
             )?;
+            crate::logger::tlog!(
+                crate::logger::LEVEL_DEBUG,
+                "封面：发送 {} 字节到 {}x{}",
+                png.len(),
+                area.width,
+                area.height
+            );
             self.cover_painted = Some((hash, area));
         }
 

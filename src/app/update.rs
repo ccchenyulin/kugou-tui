@@ -79,7 +79,16 @@ fn encode_png(image: &image::DynamicImage) -> Option<Vec<u8>> {
 /// 封面字符画取用的原图像素尺寸。
 ///
 /// 比字符数大得多：字符画每个字符要采上下两个像素，放大源图能保留更多细节。
-const COVER_PIXEL_SIZE: u32 = 512;
+/// 封面转 PNG 时的边长（像素）。
+///
+/// **不是越大越好**：这张图会以 base64 塞进 kitty 图形协议的转义序列里写进终端，
+/// 尺寸直接决定每次写入的字节数。实测 512×512 的 PNG 是 355KB，base64 后 474KB；
+/// 一旦每帧重发就是 2.3MB/s，终端消费不过来会阻塞 stdout 写入——主线程卡在
+/// write_all 上，表现为「听歌时按键、音量、切页全部无响应」。
+///
+/// 而封面实际只显示在约 20 列 × 10 行的字符区域（≈200×400 像素），256 已经
+/// 覆盖得了，数据量降到约 1/4。
+const COVER_PIXEL_SIZE: u32 = 256;
 
 /// 展开封面 URL 里的 \`{size}\` 占位符。
 fn expand_cover_size(url: &str, size: u32) -> String {

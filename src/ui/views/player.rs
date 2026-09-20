@@ -130,50 +130,9 @@ pub fn render_lyric(frame: &mut Frame, area: Rect, state: &mut AppState, theme: 
         return;
     }
 
-    // 封面画在歌词上方：两者都属于「当前这首歌」的信息，放一起语义最顺。
-    //
-    // 区域尺寸按**可用空间**算，而不是跟着字符画的尺寸走——kitty 终端要在这里
-    // 放真图，图能比字符画大得多。区域先记进 state，等 ratatui 画完再由图形协议
-    // 把图片铺上去（图片是终端浮层，绘制中途放会被随后的差分重绘擦掉）。
-
-    let lyric_area = if state.cover.lines.is_empty() || inner.width < 12 {
-        inner
-    } else {
-        // 字符宽高比约 1:2，所以方形区域的列数是行数的两倍。
-        // 最多占面板一半高，给歌词留位置；再留一行间距，别贴着歌词。
-        let rows = (inner.height / 2).clamp(6, 24);
-        let columns = (rows * 2).min(inner.width);
-        let [cover_area, rest] = ratatui::layout::Layout::vertical([
-            ratatui::layout::Constraint::Length(rows + 1),
-            ratatui::layout::Constraint::Min(1),
-        ])
-        .areas(inner);
-
-        let x = cover_area.x + cover_area.width.saturating_sub(columns) / 2;
-        state.cover_area = Some(Rect::new(x, cover_area.y, columns, rows));
-
-        // kitty 终端会把真图铺满这个区域；此时再画一遍字符画只会盖住图片。
-        // 其它终端没有图形协议，只能退回字符画。
-        if !crate::ui::kitty::is_supported() {
-            let lines: Vec<ratatui::text::Line> = state
-                .cover
-                .lines
-                .iter()
-                .map(|line| {
-                    ratatui::text::Line::from(ratatui::text::Span::styled(
-                        line.clone(),
-                        theme.now_playing(),
-                    ))
-                })
-                .collect();
-            frame.render_widget(
-                ratatui::widgets::Paragraph::new(lines)
-                    .alignment(ratatui::layout::Alignment::Center),
-                cover_area,
-            );
-        }
-        rest
-    };
+    // 封面不在这里画：`cover_area` 只能有一个写入点（见 draw_cover_block），
+    // 多个渲染函数抢着写会让区域被覆盖、进而让图片每帧重发。
+    let lyric_area = inner;
 
     if state.lyric.loading && state.lyric.lyric.is_empty() {
         frame.render_widget(loading_placeholder(theme), lyric_area);
@@ -340,6 +299,23 @@ fn draw_cover_block(frame: &mut Frame, inner: Rect, state: &mut AppState, theme:
         );
     }
     rest
+}
+
+/// 歌词页：上方封面、下方歌词。
+///
+/// 封面与歌词都是「当前这首歌」的信息，放一起语义最顺。组合方式与首页一致，
+/// 都走 `draw_cover_block` —— 保证 `cover_area` 只有一个写入点。
+pub fn render_lyrics_page(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
+    let block = panel("歌词", false, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height < 4 || inner.width < 8 {
+        return;
+    }
+
+    let rest = draw_cover_block(frame, inner, state, theme);
+    render_lyric(frame, rest, state, theme);
 }
 
 /// 封面页：整块主区只放封面，配上曲名与歌手。
