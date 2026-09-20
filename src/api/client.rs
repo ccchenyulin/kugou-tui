@@ -94,50 +94,6 @@ impl ApiClient {
         Ok((status.as_u16(), body))
     }
 
-    /// 发送 POST（JSON body）并解析响应。`/privilege/lite` 这种「按歌曲问『这账号
-    /// 能听哪几档音质』」的查询都是 POST + JSON body——GET + query 装不下这种结构。
-    ///
-    /// 复用 `get_json` 的错误处理：先解析 JSON、再看业务错误码、最后才看 HTTP 状态码。
-    pub async fn post_json(&self, path: &str, body: &Value) -> Result<Value> {
-        let url = format!("{}{}", self.base, path);
-        let mut request = self.http.post(&url).json(body);
-
-        if let Some(cookie) = self.cookie.as_ref() {
-            request = request.header(COOKIE, cookie.as_ref());
-        }
-
-        let response = request.send().await?;
-        let status = response.status().as_u16();
-        let body = response.text().await?;
-
-        match serde_json::from_str::<Value>(&body) {
-            Ok(value) => {
-                check_error_code(path, &value)?;
-                if !(200..300).contains(&status) {
-                    return Err(AppError::HttpStatus {
-                        path: path.to_string(),
-                        status,
-                    });
-                }
-                Ok(value)
-            }
-            Err(error) => {
-                tlog!(
-                    crate::logger::LEVEL_WARN,
-                    "接口 {path} 返回了非 JSON 内容（HTTP {status}，前 200 字节）：{}",
-                    body.chars().take(200).collect::<String>()
-                );
-                if !(200..300).contains(&status) {
-                    return Err(AppError::HttpStatus {
-                        path: path.to_string(),
-                        status,
-                    });
-                }
-                Err(AppError::Json(error))
-            }
-        }
-    }
-
     /// 发送 GET 并解析 JSON，同时校验业务错误码。
     ///
     /// # 为什么先解析、后判状态码

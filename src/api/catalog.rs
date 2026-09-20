@@ -418,17 +418,17 @@ impl ApiClient {
         if VIPER_QUALITIES.contains(&quality) {
             let fallback = candidates
                 .iter()
-                .map(|(_, candidate_quality)| candidate_quality)
+                .map(|(_, candidate_quality, _)| candidate_quality)
                 .find(|candidate_quality| !VIPER_QUALITIES.contains(&candidate_quality.as_str()))
                 .cloned()
                 .unwrap_or_else(|| VIPER_FALLBACK_QUALITY.to_string());
-            candidates.push((song.hash.clone(), fallback));
+            candidates.push((song.hash.clone(), fallback, song.album_audio_id.to_string()));
         }
 
         let mut last_full = None;
-        for (hash, q) in &candidates {
+        for (hash, q, album_audio_id) in &candidates {
             let response = self
-                .request_song_url_with_hash(song, hash, q, false)
+                .request_song_url_with_hash(song, hash, q, album_audio_id, false)
                 .await?;
             if let Some(url) = extract_stream_url(&response) {
                 let degraded = q != quality && VIPER_QUALITIES.contains(&quality);
@@ -446,7 +446,13 @@ impl ApiClient {
         let reason = last_full.as_ref().and_then(|root| self.fail_reason(root));
 
         let trial = self
-            .request_song_url_with_hash(song, &song.hash, quality, true)
+            .request_song_url_with_hash(
+                song,
+                &song.hash,
+                quality,
+                &song.album_audio_id.to_string(),
+                true,
+            )
             .await?;
         if let Some(url) = extract_stream_url(&trial) {
             return Ok(StreamUrl {
@@ -505,11 +511,16 @@ impl ApiClient {
     ///
     /// 所以 `/privilege/lite` 查不到、或者服务端根本没有这个接口（旧版
     /// KuGouMusicApi）时，把整组 hash 挨个试一遍，而不是只抱着失效的那个不放。
-    fn fallback_candidates(song: &Song, quality: &str) -> Vec<(String, String)> {
-        let mut candidates = vec![(song.hash.clone(), quality.to_string())];
+    fn fallback_candidates(song: &Song, quality: &str) -> Vec<(String, String, String)> {
+        let album_audio_id = song.album_audio_id.to_string();
+        let mut candidates = vec![(
+            song.hash.clone(),
+            quality.to_string(),
+            album_audio_id.clone(),
+        )];
         for hash in song.extra_hashes.values() {
             if *hash != song.hash {
-                candidates.push((hash.clone(), quality.to_string()));
+                candidates.push((hash.clone(), quality.to_string(), album_audio_id.clone()));
             }
         }
         candidates
@@ -519,7 +530,11 @@ impl ApiClient {
     ///
     /// 没拿到响应或解析不出候选时，回退到 `fallback_candidates`——这一首歌的所有
     /// hash 挨个试。走老路不一定能拿到，但至少不会因为这个查询失败就整条堵死。
-    async fn privilege_candidates(&self, song: &Song, quality: &str) -> Vec<(String, String)> {
+    async fn privilege_candidates(
+        &self,
+        song: &Song,
+        quality: &str,
+    ) -> Vec<(String, String, String)> {
         let response = match self.request_privilege_lite(song).await {
             Ok(value) => value,
             Err(error) => {
@@ -539,57 +554,44 @@ impl ApiClient {
         } else {
             candidates
                 .into_iter()
-                .map(|candidate| (candidate.hash, candidate.quality))
+                .map(|candidate| (candidate.hash, candidate.quality, candidate.album_audio_id))
                 .collect()
         }
     }
 
-    /// 问服务端「这些 hash 在登录账号下能听哪几档音质」。
+    /// 问服务端「这个 hash 在登录账号下能听哪几档音质」。
     ///
     /// 酷狗为每档音质维护**独立的文件指纹（hash）**——VIP 用户拿到的 flac hash
     /// 和 128 hash 是完全不同的两个串。直接拿歌单里查到的 hash 去试 320 / flac
     /// 全是空，所以这里必须先查一次。
     ///
-    /// **重要**：服务端 `privilege_lite.js` 接受 `resource` 数组，可以**一次问
-    /// 多首歌或同一首歌的多个 hash**。我们把同一首歌**所有** hash 都喂进去——
-    /// 搜索接口给的顶层 `hash` 可能指向已下架的版本，但 `audio_info.hash_xxx`
-    /// 里的 hash 可能还能用，跨接口数据合并在这里完成。
+    /// # 必须是 GET + `hash` 参数（踩过的坑）
+    ///
+    /// 服务端 `privilege_lite.js` 是这样读参数的：
+    /// ```js
+    /// const resource = (params?.hash || '').split(',').map((s) => ({...}));
+    /// ```
+    /// 它读的是**顶层 `hash` 参数**（逗号分隔可传多个），不是 `resource` 数组。
+    /// 早先我用 POST + `resource` 数组的写法，服务端拿不到 hash，返回
+    /// `error_code 20010 "param error, hash and AlbumAudioID is empty"`——
+    /// 而那个错误码被我们的客户端当成「需要登录」，于是整条 privilege 路径
+    /// 一直静默失效，用户只能拿到试听片段。
+    ///
+    /// MoeKoeMusic 就是 `get('/privilege/lite', { hash })`，照抄它的用法。
     async fn request_privilege_lite(&self, song: &Song) -> Result<Value> {
-        // 收集这一首歌的所有 hash：顶层 hash 优先 + audio_info 里散落的多档音质 hash。
-        // 服务端会对每个 hash 都返回 variant，最后我们统一排重挑最佳。
-        let album_id = song.album_id.parse::<u64>().unwrap_or(0);
+        // 逗号分隔可一次问多个 hash：主 hash 在前，audio_info 里那些在后。
+        // 搜索给的顶层 hash 可能指向已下架版本，后者往往还能用。
         let mut seen = std::collections::HashSet::new();
-        let mut hashes = Vec::new();
-        if seen.insert(song.hash.clone()) {
-            hashes.push(song.hash.clone());
-        }
+        let mut hashes = vec![song.hash.clone()];
+        seen.insert(song.hash.clone());
         for hash in song.extra_hashes.values() {
             if seen.insert(hash.clone()) {
                 hashes.push(hash.clone());
             }
         }
 
-        let resources: Vec<Value> = hashes
-            .iter()
-            .map(|hash| {
-                serde_json::json!({
-                    "type": "audio",
-                    "page_id": 0,
-                    "hash": hash,
-                    "album_id": album_id,
-                })
-            })
-            .collect();
-
-        // 响应格式见 `KuGouMusicApi/module/privilege_lite.js`：body 包含
-        // 一个 `resource` 数组（每首歌一个 `{type, hash, album_id}`）+ qualities 列表。
-        // 服务端对每档音质分别返回 `{hash, quality, level}`，`level == 0` 表示没权限。
-        let body = serde_json::json!({
-            "area_code": 1,
-            "resource": resources,
-            "qualities": SUPPORTED_PRIVILEGE_QUALITIES,
-        });
-        self.post_json("/privilege/lite", &body).await
+        let query = vec![("hash", hashes.join(","))];
+        self.get_json_uncached("/privilege/lite", &query).await
     }
 
     /// 从响应里读出「为什么给不了完整版」。
@@ -655,12 +657,13 @@ impl ApiClient {
         song: &Song,
         hash: &str,
         quality: &str,
+        album_audio_id: &str,
         free_part: bool,
     ) -> Result<Value> {
         let mut query = vec![
             ("hash", hash.to_string()),
             ("album_id", song.album_id.clone()),
-            ("album_audio_id", song.album_audio_id.to_string()),
+            ("album_audio_id", album_audio_id.to_string()),
             ("quality", quality.to_string()),
         ];
         if free_part {
@@ -670,22 +673,6 @@ impl ApiClient {
         self.get_json_uncached("/song/url", &query).await
     }
 }
-
-/// `/privilege/lite` 询问服务端「这账号能听哪几档音质」时一并查询的品质列表。
-///
-/// 来源：KuGouMusicApi 服务端 `module/privilege_lite.js` 里硬编码的同一份。
-/// 服务端会只返回**该账号有权限的**那些档位，所以列表给多了也是无害的。
-const SUPPORTED_PRIVILEGE_QUALITIES: &[&str] = &[
-    "128",
-    "320",
-    "flac",
-    "high",
-    "super",
-    "multitrack",
-    "viper_atmos",
-    "viper_clear",
-    "viper_tape",
-];
 
 /// 「蝰蛇音效」系列的音质名——这些是酷狗的**付费加项**，需要独立的蝰蛇 VIP，
 /// 不是普通 TVIP 能拿到的。账号没蝰蛇权限时上游直接给 \`error_code 31863\`
@@ -722,10 +709,15 @@ const PRIVILEGE_FALLBACK_CHAIN: &[&str] = &[
 ];
 
 /// 一个候选音质：账号在该音质下有权限时，服务端给的 hash + 品质名。
+///
+/// `album_audio_id` 是**服务端在这一档里返回的真实值**。它和搜索接口给的
+/// `MixSongID` 未必相同，而 `/song/url` 用它来定位"用户买的是哪个版本"——
+/// 实测同一首歌带上真实值就能拿到直链，带搜索给的那个只能拿试听。
 #[derive(Debug, Clone, PartialEq)]
 struct QualityCandidate {
     hash: String,
     quality: String,
+    album_audio_id: String,
 }
 
 /// 把 `/privilege/lite` 的响应整理成「按用户选的音质降级排序」的候选列表。
@@ -740,9 +732,14 @@ struct QualityCandidate {
 /// `level == 0` 表示没权限，跳过。每首歌可能有多个 variant（自己 + relate_goods），
 /// 每个 variant 是不同的 hash（同一首歌的 128 和 flac 完全是两个文件指纹）。
 fn parse_quality_candidates(response: &Value, requested: &str) -> Vec<QualityCandidate> {
-    // 先收集每个 quality 任意一个有权限的 hash（一首歌同 quality 的不同 variant
+    // 先收集每个 quality 任意一个有权限的 variant（一首歌同 quality 的不同 variant
     // 都给同一个 hash，取第一个就行）。
-    let mut available: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    //
+    // 顺带把服务端给的 `album_audio_id` 也捎上——它是"用户买的究竟是哪个版本"
+    // 的凭据，`/song/url` 认这个。实测同一首歌带上真实值就能拿到直链，
+    // 带搜索结果里那个 `MixSongID` 只能拿试听。
+    let mut available: std::collections::HashMap<&str, (&str, String)> =
+        std::collections::HashMap::new();
     if let Some(items) = response.get("data").and_then(Value::as_array) {
         for item in items {
             // 自己 + relate_goods 都是同一首歌的不同 variant
@@ -763,24 +760,31 @@ fn parse_quality_candidates(response: &Value, requested: &str) -> Vec<QualityCan
                 let Some(hash) = variant.get("hash").and_then(Value::as_str) else {
                     continue;
                 };
-                // 列表外的音质蝰蛇之类先不要，避免误判降级链
                 if !PRIVILEGE_FALLBACK_CHAIN.contains(&quality) {
                     continue;
                 }
-                available.entry(quality).or_insert(hash);
+                let album_audio_id = pick_string(variant, &["album_audio_id", "audio_id"])
+                    .or_else(|| {
+                        pick_i64(variant, &["album_audio_id", "audio_id"]).map(|id| id.to_string())
+                    })
+                    .unwrap_or_default();
+                available.entry(quality).or_insert((hash, album_audio_id));
             }
         }
     }
 
-    // 按降级链顺序取每个 quality 对应的 hash
+    // 按降级链顺序取每个 quality 对应的 variant
     let chain = fallback_chain(requested);
     chain
         .into_iter()
         .filter_map(|quality| {
-            available.get(quality).map(|hash| QualityCandidate {
-                hash: (*hash).to_string(),
-                quality: (*quality).to_string(),
-            })
+            available
+                .get(quality)
+                .map(|(hash, album_audio_id)| QualityCandidate {
+                    hash: (*hash).to_string(),
+                    quality: (*quality).to_string(),
+                    album_audio_id: album_audio_id.clone(),
+                })
         })
         .collect()
 }
@@ -1009,11 +1013,13 @@ mod tests {
             vec![
                 QualityCandidate {
                     quality: "320".to_string(),
-                    hash: "h_320".to_string()
+                    hash: "h_320".to_string(),
+                    album_audio_id: String::new(),
                 },
                 QualityCandidate {
                     quality: "128".to_string(),
-                    hash: "h_128".to_string()
+                    hash: "h_128".to_string(),
+                    album_audio_id: String::new(),
                 },
             ],
             "没权限的 flac 必须跳过；降级链先 320 再 128"
@@ -1038,7 +1044,8 @@ mod tests {
             candidates,
             vec![QualityCandidate {
                 quality: "128".to_string(),
-                hash: "h_128".to_string()
+                hash: "h_128".to_string(),
+                album_audio_id: String::new(),
             }],
             "选了 128 就只返 128，不会自动升级到 320"
         );
@@ -1098,10 +1105,14 @@ mod tests {
         assert_eq!(candidates.len(), 3);
         assert_eq!(
             candidates[0],
-            ("PRIMARY_HASH".to_string(), "128".to_string())
+            (
+                "PRIMARY_HASH".to_string(),
+                "128".to_string(),
+                "0".to_string()
+            )
         );
-        assert!(candidates.iter().any(|(h, _)| h == "HASH_320"));
-        assert!(candidates.iter().any(|(h, _)| h == "HASH_FLAC"));
+        assert!(candidates.iter().any(|(h, _, _)| h == "HASH_320"));
+        assert!(candidates.iter().any(|(h, _, _)| h == "HASH_FLAC"));
     }
 
     /// 没有 extra_hashes 时兜底就只有主 hash 一项，别凭空造数据。
@@ -1124,7 +1135,7 @@ mod tests {
         let candidates = ApiClient::fallback_candidates(&song, "320");
         assert_eq!(
             candidates,
-            vec![("ONLY_HASH".to_string(), "320".to_string())]
+            vec![("ONLY_HASH".to_string(), "320".to_string(), "0".to_string())]
         );
     }
 
