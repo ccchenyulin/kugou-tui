@@ -13,7 +13,6 @@
 #
 set -euo pipefail
 
-API_BASE="${KUGOU_API_BASE:-http://127.0.0.1:3000}"
 API_DIR="${KUGOU_API_DIR:-$HOME/KuGouMusicApi}"
 API_LOG="${KUGOU_API_LOG:-${XDG_CACHE_HOME:-$HOME/.cache}/kugou-tui/api.log}"
 
@@ -32,9 +31,27 @@ if [ ! -x "$BIN" ]; then
   exit 1
 fi
 
+# 健康检查用的地址。
+#
+# 关键：**不要**用它去覆盖客户端的地址。客户端自己会从配置里解析（含音源切换，
+# 概念版是 :3001），启动器强行传 --api-base 会让音源选择失效——用户就被迫每次
+# 手动按 v 切两次才回到概念版。所以下面只在显式设置了 KUGOU_API_BASE 时才传参。
+#
+# 这里解析出的地址仅供探测服务是否存活；解析不到就退回默认端口。
+config_file="${XDG_CONFIG_HOME:-$HOME/.config}/kugou-tui/config.toml"
+if [ -n "${KUGOU_API_BASE:-}" ]; then
+  CHECK_BASE="$KUGOU_API_BASE"
+elif [ -r "$config_file" ]; then
+  CHECK_BASE=$(sed -n 's/^[[:space:]]*api_base[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+    "$config_file" | head -n 1)
+  CHECK_BASE="${CHECK_BASE:-http://127.0.0.1:3000}"
+else
+  CHECK_BASE="http://127.0.0.1:3000"
+fi
+
 # 用本地静态页做健康检查：/register/dev 会真的去请求酷狗服务器（冷缓存时 1 秒以上），
 # 而 `/` 由 express.static 直接吐出来，是纯本地操作。顺手校验内容，确认监听的是本服务。
-api_alive() { curl -sf --max-time 2 "$API_BASE/" 2>/dev/null | grep -q '酷狗'; }
+api_alive() { curl -sf --max-time 2 "$CHECK_BASE/" 2>/dev/null | grep -q '酷狗'; }
 
 if ! api_alive; then
   if [ ! -d "$API_DIR" ]; then
@@ -63,7 +80,7 @@ if ! api_alive; then
     tail -n 15 "$API_LOG" >&2 || true
     exit 1
   fi
-  printf '\033[32m服务已就绪：%s\033[0m\n' "$API_BASE" >&2
+  printf '\033[32m服务已就绪：%s\033[0m\n' "$CHECK_BASE" >&2
 fi
 
 # 用户自己传了 --api-base 就完全尊重，不再叠加（否则 clap 会因重复参数报错）
@@ -73,4 +90,10 @@ for arg in "$@"; do
   esac
 done
 
-exec "$BIN" --api-base "$API_BASE" "$@"
+# 只有显式指定 KUGOU_API_BASE 才传给二进制，否则让它读配置——
+# 这样按 v 切换音源的选择才能真正持久化生效（见上方 CHECK_BASE 的说明）。
+if [ -n "${KUGOU_API_BASE:-}" ]; then
+  exec "$BIN" --api-base "$KUGOU_API_BASE" "$@"
+else
+  exec "$BIN" "$@"
+fi
