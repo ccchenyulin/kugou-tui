@@ -28,15 +28,14 @@
 //! 调用点，收益为零、风险不为零。等接入**非酷狗**音源（那时才需要按 kind 分派）
 //! 时再套，改动才划算。
 //!
-//! 因此本文件暂时 `allow(dead_code)`：它是预留的接入点，不是废弃代码。
-
-#![allow(dead_code)]
+//! 所以本文件**只保留数据模型**（[`SourceKind`] / [`SourceProfile`] / [`SourceSet`]）：
+//! 地址、登录态、设备指纹这三样差异就是全部，且已由 `Config::switch_source` 统一切换。
+//! 曾有一个 `Source` 行为包装（转发 search / playlist_tracks / stream_url），但因为
+//! 两个平台接口语义完全一致，它只会多一层无意义转发，且从未被使用——已按死代码删除。
+//! 将来接入**非酷狗**音源时，再按 [`SourceKind`] 分派各自的请求与解析实现，改动只在本文件与调用点。
+//!
 
 use serde::{Deserialize, Serialize};
-
-use crate::api::ApiClient;
-use crate::api::model::Song;
-use crate::error::{AppError, Result};
 
 /// 音源种类（酷狗的两个平台）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -141,57 +140,5 @@ impl SourceSet {
             SourceKind::Kugou => &mut self.kugou,
             SourceKind::KugouConcept => &mut self.kugou_concept,
         }
-    }
-}
-
-/// 一个已连接的音源。
-///
-/// 两个平台共用同一套接口语义，因此这里不需要按 kind 分派——差异已经在
-/// `api_base` / `cookie` / `device_id` 里了。新增一个**非酷狗**音源时，才需要
-/// 在这里按 kind 分派到各自的实现。
-pub struct Source {
-    pub kind: SourceKind,
-    client: ApiClient,
-}
-
-impl Source {
-    /// 按音源配置建立连接。
-    pub fn new(kind: SourceKind, profile: &SourceProfile, proxy: Option<&str>) -> Result<Self> {
-        if profile.api_base.trim().is_empty() {
-            return Err(AppError::Config(format!(
-                "「{}」音源还没有配置服务地址，请在配置文件里填 `api_base`",
-                kind.label()
-            )));
-        }
-
-        let client = ApiClient::new(&profile.api_base, profile.cookie.clone(), proxy)?;
-        Ok(Self { kind, client })
-    }
-
-    pub fn client(&self) -> &ApiClient {
-        &self.client
-    }
-
-    /// 取设备指纹（两个平台都需要，且各自的 dfid 不通用）。
-    pub async fn fetch_device_id(&self) -> Result<String> {
-        self.client.fetch_device_fingerprint().await
-    }
-
-    /// 搜索单曲。
-    pub async fn search(&self, keyword: &str, page: u32, page_size: u32) -> Result<Vec<Song>> {
-        self.client.search_songs(keyword, page, page_size).await
-    }
-
-    /// 取歌单内全部歌曲（内部自动翻页）。
-    pub async fn playlist_tracks(&self, playlist_id: &str) -> Result<Vec<Song>> {
-        self.client.playlist_tracks_all(playlist_id).await
-    }
-
-    /// 取播放直链（完整版优先，拿不到才退成试听片段）。
-    pub async fn stream_url(&self, song: &Song, quality: &str) -> Result<String> {
-        self.client
-            .song_stream_url(song, quality)
-            .await
-            .map(|stream| stream.url)
     }
 }

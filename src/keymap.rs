@@ -109,7 +109,7 @@ pub enum Action {
     NewCloudPlaylist,
     /// 切换左侧导航栏的可见性（小窗口下腾出空间）。
     ToggleSidebar,
-    /// 切换到下一个音源（酷狗 ↔ 网易云）。
+    /// 切换到下一个音源（酷狗 ↔ 酷狗概念版）。
     SwitchSource,
     /// 数字键切换顶层标签页。
     SwitchTab(u8),
