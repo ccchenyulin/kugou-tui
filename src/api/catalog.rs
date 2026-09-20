@@ -550,13 +550,31 @@ impl ApiClient {
         if candidates.is_empty() {
             // 服务端认这个 hash 但没给任何可用档位——多半是下架歌曲。
             // 换这一首歌的其它 hash 再试，别只咬着失效的那个。
-            Self::fallback_candidates(song, quality)
-        } else {
-            candidates
-                .into_iter()
-                .map(|candidate| (candidate.hash, candidate.quality, candidate.album_audio_id))
-                .collect()
+            return Self::fallback_candidates(song, quality);
         }
+
+        // 每个候选配**两个** `album_audio_id`，都试一遍。
+        //
+        // 实测（同一首歌，概念版服务端）：
+        //   - 歌单条目给的 `audio_id`（=116104796）→ /song/url 拿到直链 ✅
+        //   - /privilege/lite 返回的那个（=330978610，实为 mixsongid）
+        //     → /song/url 返回 status=3、空 url ❌
+        //
+        // 也就是说 privilege 给的这个字段和 /song/url 认的不是同一个东西，
+        // 光信它会把能播的歌判成下架。所以两个都放进候选，让服务端自己挑。
+        let own = song.album_audio_id.to_string();
+        let mut out = Vec::with_capacity(candidates.len() * 2);
+        for candidate in candidates {
+            out.push((
+                candidate.hash.clone(),
+                candidate.quality.clone(),
+                own.clone(),
+            ));
+            if !candidate.album_audio_id.is_empty() && candidate.album_audio_id != own {
+                out.push((candidate.hash, candidate.quality, candidate.album_audio_id));
+            }
+        }
+        out
     }
 
     /// 问服务端「这个 hash 在登录账号下能听哪几档音质」。
@@ -624,7 +642,10 @@ impl ApiClient {
         match status {
             0 => None,
             2 => Some("需要登录或重新登录后再试".to_string()),
-            3 => Some("该歌曲暂无版权（可能已下架或地区受限）".to_string()),
+            // 实测 `3` 不等于「无版权」：同一首歌带 `audio_id` 是 status=1 有直链，
+            // 带 `/privilege/lite` 返回的那个（mixsongid）就是 status=3、空 url。
+            // 所以它是「请求里的文件标识与账号权限对不上」，别再误导成下架。
+            3 => Some("服务端拒绝了这个请求（文件标识与账号权限不匹配）".to_string()),
             other => Some(format!("服务端返回 {other}")),
         }
     }
@@ -1136,6 +1157,50 @@ mod tests {
         assert_eq!(
             candidates,
             vec![("ONLY_HASH".to_string(), "320".to_string(), "0".to_string())]
+        );
+    }
+
+    /// 下架歌曲误判的修复点：同一个候选必须配**两个** album_audio_id 都试。
+    ///
+    /// 实测概念版服务端：歌单条目给的 audio_id 能拿直链，而 /privilege/lite
+    /// 返回的那个（mixsongid）会让 /song/url 返回 status=3、空 url。只信后者
+    /// 会把能播的歌判成下架。
+    #[test]
+    fn candidates_carry_both_album_audio_ids() {
+        // 构造一个 privilege 响应，variant 的 album_audio_id 与 Song 自己的不同
+        let response = json!({
+            "data": [{
+                "quality": "128",
+                "level": 2,
+                "hash": "h_128",
+                "album_audio_id": 330978610,
+                "relate_goods": [],
+            }]
+        });
+        let candidates = parse_quality_candidates(&response, "128");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].album_audio_id, "330978610");
+
+        // 上层会把 Song 自己的那个也并进来——这里直接验证 fallback 用的是 Song 的
+        let mut song = Song {
+            name: "x".to_string(),
+            hash: "h_128".to_string(),
+            album_id: String::new(),
+            album_audio_id: 116104796,
+            album_name: String::new(),
+            singers: vec![],
+            duration_ms: 0,
+            cover: None,
+            privilege: None,
+            file_id: None,
+            extra_hashes: Default::default(),
+            source: crate::source::SourceKind::Kugou,
+        };
+        let _ = &mut song;
+        assert_eq!(
+            ApiClient::fallback_candidates(&song, "128")[0].2,
+            "116104796",
+            "fallback 用的是 Song 自己的 album_audio_id"
         );
     }
 
