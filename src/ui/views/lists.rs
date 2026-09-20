@@ -304,7 +304,7 @@ fn render_scrollbar(frame: &mut Frame, area: Rect, total: usize, position: Optio
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::theme::Theme;
+    use crate::ui::theme::{Theme, ThemeName};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -352,7 +352,7 @@ mod tests {
                     &mut list,
                     "测试",
                     true,
-                    &Theme::truecolor(),
+                    &Theme::for_config(ThemeName::Default, false),
                     |_| "副标题".to_string(),
                 );
             })

@@ -240,6 +240,7 @@ fn render_track_info(frame: &mut Frame, area: Rect, state: &AppState, theme: &Th
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::theme::ThemeName;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
@@ -248,7 +249,7 @@ mod tests {
     fn bars_of(width: u16, height: u16, levels: &[f32]) -> Buffer {
         let area = Rect::new(0, 0, width, height);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("测试后端可用");
-        let theme = Theme::for_config(false);
+        let theme = Theme::for_config(ThemeName::Default, false);
         let drawn = terminal
             .draw(|frame| render_bars(frame, area, levels, levels, &theme))
             .expect("绘制成功");

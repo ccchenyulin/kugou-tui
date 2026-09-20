@@ -20,7 +20,8 @@ use crate::app::state::{
     ConfirmAction, CoverArt, EntryList, Focus, HitTarget, HitZone, LoginPicker, LoginState,
     PromptAction, PromptState, Tab, move_selection, select_first, select_last,
 };
-use crate::config::Config;
+use crate::audio::cache::AudioCache;
+use crate::config::{Config, SUPPORTED_QUALITIES};
 use crate::source::SourceKind;
 
 use crate::audio::download::Downloader;
@@ -29,6 +30,7 @@ use crate::audio::spectrum::BAND_COUNT;
 use crate::event::{Event, Loaded, PlaylistSource};
 use crate::keymap::{Action, KeyMode};
 use crate::logger::tlog;
+use crate::ui::theme::ThemeName;
 
 /// 翻页时跳过的行数。
 const PAGE_STEP: isize = 10;
@@ -173,6 +175,33 @@ impl App {
                 self.click_list_row(zone, mouse)
             }
             HitTarget::Progress => self.click_progress(zone, mouse),
+            HitTarget::Settings => self.click_setting(zone, mouse),
+        }
+    }
+
+    /// 设置页上下移动选中项。到头就停住，不回绕——设置项一共十来个，
+    /// 绕回去反而容易改错项。
+    fn move_settings(&mut self, delta: isize) {
+        let len = crate::app::settings::Setting::ALL.len() as isize;
+        let next = (self.state.settings_cursor as isize + delta).clamp(0, len - 1);
+        self.state.settings_cursor = next as usize;
+    }
+
+    /// 点击设置项：点一下选中，**再点一下**改值。
+    ///
+    /// 之所以不做「点一次就改」：设置行横跨整屏，用户更多时候只是想选中它，
+    /// 误触就改值会很难受。两次点击的语义和列表的「双击激活」一致。
+    fn click_setting(&mut self, zone: HitZone, mouse: &MouseEvent) {
+        let Some(index) = zone.index_at(mouse.row) else {
+            return;
+        };
+        let already_selected = self.state.settings_cursor == index;
+        self.state.settings_cursor = index;
+
+        let double = self.state.is_double_click(zone.target, Some(index));
+        self.state.set_last_click(zone.target, Some(index));
+        if already_selected || double {
+            self.adjust_setting(1);
         }
     }
 
@@ -192,7 +221,7 @@ impl App {
                 self.focus_hit_target(zone.target);
                 self.state.queue_cursor.select(Some(index));
             }
-            HitTarget::Tab(_) | HitTarget::Progress => return,
+            HitTarget::Tab(_) | HitTarget::Progress | HitTarget::Settings => return,
         }
 
         self.focus_hit_target(zone.target);
@@ -200,6 +229,97 @@ impl App {
 
         if double {
             self.activate();
+        }
+    }
+
+    /// 把设置页选中的那一项按 `delta` 调整一档（左为 -1、右为 +1），并落盘。
+    ///
+    /// 改完立刻 `save()`：设置页的价值就在于「改了就是改了」，退出时再保存
+    /// 的话，崩溃或强制退出会丢掉刚才那几下调整，用户会觉得没生效。
+    fn adjust_setting(&mut self, delta: isize) {
+        use crate::app::settings as s;
+
+        let Some(setting) = s::Setting::ALL.get(self.state.settings_cursor).copied() else {
+            return;
+        };
+        let config = &mut self.state.config;
+
+        match setting {
+            s::Setting::Theme => {
+                if let Some(next) = s::cycle(&ThemeName::ALL, config.theme, delta) {
+                    config.theme = next;
+                }
+            }
+            s::Setting::Quality => {
+                if let Some(next) = s::cycle_str(SUPPORTED_QUALITIES, &config.quality, delta) {
+                    config.quality = next.to_string();
+                }
+            }
+            s::Setting::PlaybackMode => {
+                if let Some(next) = s::cycle(&s::PLAYBACK_MODES, config.playback_mode, delta) {
+                    config.playback_mode = next;
+                }
+            }
+            s::Setting::RefreshMs => {
+                if let Some(next) = s::cycle(&s::REFRESH_MS_OPTIONS, config.tick_ms, delta) {
+                    config.tick_ms = next;
+                }
+            }
+            s::Setting::LyricOffsetMs => {
+                let next = config.lyric_offset_ms + delta as i64 * s::LYRIC_OFFSET_STEP;
+                config.lyric_offset_ms = next.clamp(-s::LYRIC_OFFSET_LIMIT, s::LYRIC_OFFSET_LIMIT);
+            }
+            s::Setting::PageSize => {
+                if let Some(next) = s::cycle(&s::PAGE_SIZE_OPTIONS, config.page_size, delta) {
+                    config.page_size = next;
+                }
+            }
+            s::Setting::CacheLimitMib => {
+                if let Some(next) = s::cycle(&s::CACHE_LIMIT_OPTIONS, config.cache_limit_mib, delta)
+                {
+                    config.cache_limit_mib = next;
+                    // AudioCache 只认构造时传进来的上限，改了要重建。
+                    // 它没有别的状态（就是目录 + 上限字节数），重建是安全的。
+                    self.cache = AudioCache::new(config.cache_dir.clone(), next);
+                    self.refresh_cache_usage();
+                }
+            }
+            // 这三项只影响界面，不进配置文件：它们是「这次会话想不想看」
+            // 而不是「以后都要这样」，持久化反而会在下次启动时让人困惑
+            s::Setting::BasicColor => {
+                if delta != 0 {
+                    config.basic_color = !config.basic_color;
+                }
+            }
+            s::Setting::LyricPanel => {
+                if delta != 0 {
+                    self.state.show_lyric_panel = !self.state.show_lyric_panel;
+                }
+            }
+            s::Setting::Sidebar => {
+                if delta != 0 {
+                    self.state.sidebar_visible = !self.state.sidebar_visible;
+                }
+            }
+        }
+
+        let label = setting.label();
+        let value = s::value_text(setting, &self.state);
+        // 这两项只改本次会话的界面，不进配置文件：它们是「现在想不想看」
+        // 而不是「以后都这样」，持久化反而会在下次启动时让人困惑
+        if matches!(setting, s::Setting::LyricPanel | s::Setting::Sidebar) {
+            self.state
+                .info(crate::ui::views::settings::change_notice(label, &value));
+            return;
+        }
+
+        match self.state.config.save() {
+            Ok(()) => self
+                .state
+                .info(crate::ui::views::settings::change_notice(label, &value)),
+            Err(error) => self
+                .state
+                .error(format!("保存设置失败：{}", error.user_hint())),
         }
     }
 
@@ -225,6 +345,7 @@ impl App {
             HitTarget::Entries => Focus::Primary,
             HitTarget::Songs => Focus::Secondary,
             HitTarget::Queue => Focus::Queue,
+            HitTarget::Settings => Focus::Primary,
             HitTarget::Tab(_) | HitTarget::Progress => return,
         };
 
@@ -280,6 +401,16 @@ impl App {
                 _ => {}
             }
             return;
+        }
+
+        // 设置页：← → 是「改值」而不是「移动光标」——这一页没有输入框，
+        // 用左右键表达增减档位比用 Enter 更顺手，也和其它设置界面一致。
+        if self.state.tab == Tab::Settings {
+            match action {
+                Action::CursorLeft => return self.adjust_setting(-1),
+                Action::CursorRight => return self.adjust_setting(1),
+                _ => {}
+            }
         }
 
         // 确认对话框优先于一切：有未决确认时其它按键一律拦截。
@@ -476,6 +607,10 @@ impl App {
                 self.state.focus = Focus::Primary;
                 self.state.search.editing = true;
             }
+            Action::OpenSettings => {
+                self.switch_tab(Tab::Settings);
+                self.state.focus = Focus::Primary;
+            }
             Action::Reload => self.reload_current_tab(),
             Action::QueueAppend => self.queue_focused_song(false),
             Action::AddAllToQueue => self.queue_all_songs(),
@@ -639,6 +774,8 @@ impl App {
                 let len = self.state.config.sources.ordered().len();
                 move_selection(&mut self.state.sources_cursor, len, delta);
             }
+            // 设置页是一列设置项，焦点在哪都归它——否则这一页方向键没反应
+            (Tab::Settings, _) => self.move_settings(delta),
             // Secondary 一律是当前标签页的歌曲列表。走 `songs_mut()` 而不是逐个
             // 枚举标签，新增标签页时这里不用跟着改。
             (_, Focus::Secondary) => {
@@ -670,6 +807,10 @@ impl App {
                 }
             }
             (Tab::Home | Tab::Lyrics | Tab::Cover, _) => self.select_sidebar_edge(to_first),
+            (Tab::Settings, _) => {
+                let last = crate::app::settings::Setting::ALL.len() - 1;
+                self.state.settings_cursor = if to_first { 0 } else { last };
+            }
             (Tab::Search, _) => {
                 if to_first {
                     self.state.search.results.select_first();
@@ -720,6 +861,8 @@ impl App {
             (Tab::Home | Tab::Lyrics | Tab::Cover, _) => {}
             // 音源页：Enter = 启用 / 禁用
             (Tab::Sources, _) => self.toggle_source_enabled(),
+            // 设置页：Enter = 把选中项往前调一档
+            (Tab::Settings, _) => self.adjust_setting(1),
             // 搜索框还没进入编辑态时，Enter 先聚焦输入框
             (Tab::Search, Focus::Primary) => {
                 if self.state.search.editing {
@@ -1456,6 +1599,7 @@ impl App {
             Tab::Home | Tab::Lyrics | Tab::Cover | Tab::Queue => self
                 .state
                 .info("这一页展示的是本地状态，没有需要刷新的列表"),
+            Tab::Settings => self.state.info("设置改完即生效并已保存，无需刷新"),
         }
     }
 

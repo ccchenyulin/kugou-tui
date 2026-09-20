@@ -41,15 +41,17 @@ pub enum Tab {
     Visualizer,
     /// 音源管理：启用/禁用、设默认、调优先级、查看可用状态。
     ///
-    /// 刻意排在最后：前面 6 个的顺序是从第一版就定下来的，老用户已经形成
+    /// 刻意排在后面：前面几个的顺序是从第一版就定下来的，老用户已经形成
     /// 肌肉记忆，插队会让所有数字键错位。
     Sources,
+    /// 设置：主题、音质、播放模式、缓存……集中改配置的地方。
+    Settings,
 }
 
 impl Tab {
     /// 全部标签页。**前 10 个对应数字键 1-9 与 0**；`Sources` 排最后不进数字键
     /// （由 `v` 打开）——常用页面放在能被数字键直接够到的位置。
-    pub const ALL: [Tab; 11] = [
+    pub const ALL: [Tab; 12] = [
         Tab::Home,
         Tab::Search,
         Tab::Playlists,
@@ -61,6 +63,7 @@ impl Tab {
         Tab::Cover,
         Tab::Visualizer,
         Tab::Sources,
+        Tab::Settings,
     ];
 
     /// 数字键能直接够到的标签页数量（1-9 加 0）。
@@ -79,6 +82,7 @@ impl Tab {
             Self::Lyrics => "歌词",
             Self::Cover => "封面",
             Self::Sources => "音源",
+            Self::Settings => "设置",
         }
     }
 
@@ -148,6 +152,8 @@ pub enum HitTarget {
     Queue,
     /// 播放条的进度条区域：点击可跳转进度。
     Progress,
+    /// 设置页的条目列表。
+    Settings,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -686,6 +692,8 @@ pub struct AppState {
     pub login_picker: Option<LoginPicker>,
     /// 文本输入弹窗；`None` 表示没有弹出的输入框。
     pub prompt: Option<PromptState>,
+    /// 设置页当前选中的条目下标。
+    pub settings_cursor: usize,
     /// 当前封面，以及它属于哪首歌（避免切歌后继续显示上一张）。
     pub cover: CoverArt,
     /// 当前账号的会员摘要（如「概念版 SVIP · 至 09-21」），未登录或未取到时为 None。
@@ -852,6 +860,7 @@ impl AppState {
             volume_before_mute: None,
             lyric: LyricPane::default(),
             cover: CoverArt::default(),
+            settings_cursor: 0,
             sync_target: None,
             status: "按 / 搜索，或按 2-5 浏览歌单/歌手/排行榜/云端".to_string(),
             status_level: StatusLevel::Info,
@@ -954,7 +963,13 @@ impl AppState {
                 }
             }
             // 其余页面没有条目列表
-            Tab::Search | Tab::Home | Tab::Queue | Tab::Lyrics | Tab::Cover | Tab::Visualizer => {}
+            Tab::Search
+            | Tab::Home
+            | Tab::Queue
+            | Tab::Lyrics
+            | Tab::Cover
+            | Tab::Visualizer
+            | Tab::Settings => {}
         }
     }
 
@@ -974,9 +989,13 @@ impl AppState {
             Tab::Artists => Some(&self.artists.songs),
             Tab::Ranks => Some(&self.ranks.songs),
             Tab::Cloud => Some(&self.cloud.songs),
-            Tab::Home | Tab::Queue | Tab::Lyrics | Tab::Cover | Tab::Visualizer | Tab::Sources => {
-                None
-            }
+            Tab::Home
+            | Tab::Queue
+            | Tab::Lyrics
+            | Tab::Cover
+            | Tab::Visualizer
+            | Tab::Sources
+            | Tab::Settings => None,
         }
     }
 
@@ -988,9 +1007,13 @@ impl AppState {
             Tab::Artists => Some(&mut self.artists.songs),
             Tab::Ranks => Some(&mut self.ranks.songs),
             Tab::Cloud => Some(&mut self.cloud.songs),
-            Tab::Home | Tab::Queue | Tab::Lyrics | Tab::Cover | Tab::Visualizer | Tab::Sources => {
-                None
-            }
+            Tab::Home
+            | Tab::Queue
+            | Tab::Lyrics
+            | Tab::Cover
+            | Tab::Visualizer
+            | Tab::Sources
+            | Tab::Settings => None,
         }
     }
 
@@ -1290,9 +1313,17 @@ mod tests {
                 "侧边栏第 {index} 项应当切到 {expected:?}"
             );
         }
-        // 最后一页正是数字键够不到、但鼠标必须够得到的那个
-        assert_eq!(Tab::ALL.len(), 11);
-        assert_eq!(Tab::from_sidebar_index(10), Some(Tab::Sources));
+        // 最后一页正是数字键够不到、但鼠标必须够得到的那个。
+        // 不写死下标：以后再加标签页时这条不用跟着改。
+        let last = Tab::ALL.len() - 1;
+        assert_eq!(
+            Tab::from_sidebar_index(last),
+            Some(*Tab::ALL.last().unwrap())
+        );
+        assert!(
+            Tab::from_number(Tab::ALL.len() as u8).is_none(),
+            "最后一页数字键够不到，才更要点得到"
+        );
         assert!(Tab::from_sidebar_index(Tab::ALL.len()).is_none());
     }
 

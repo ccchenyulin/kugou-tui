@@ -9,6 +9,7 @@
 
 pub mod lists;
 pub mod player;
+pub mod settings;
 pub mod sources;
 pub mod visualizer;
 
@@ -21,6 +22,7 @@ pub use player::{
     QueueView, render_cover_page, render_home, render_lyric_panel, render_lyrics_page,
     render_player, render_queue,
 };
+pub use settings::render_settings;
 pub use sources::{render_login_picker, render_sources};
 pub use visualizer::render_visualizer;
 

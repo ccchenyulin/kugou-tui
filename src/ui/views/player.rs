@@ -438,6 +438,7 @@ pub fn render_home(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::theme::ThemeName;
 
     /// 封面区是「列 = 行 × 2」的方形（字符宽高比 1:2），并水平居中。
     #[test]
@@ -508,7 +509,7 @@ mod tests {
         let mut rest = Rect::default();
         let drawn = terminal
             .draw(|frame| {
-                let theme = Theme::for_config(false);
+                let theme = Theme::for_config(ThemeName::Default, false);
                 rest = draw_cover_block(frame, area, &mut state, &theme);
             })
             .expect("绘制成功");

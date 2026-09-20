@@ -16,6 +16,7 @@ use crate::cli::Cli;
 use crate::error::{AppError, Result};
 use crate::logger::tlog;
 use crate::source::{SourceKind, SourceSet};
+use crate::ui::theme::ThemeName;
 
 /// KuGouMusicApi 的默认监听地址。
 pub const DEFAULT_API_BASE: &str = "http://127.0.0.1:3000";
@@ -88,6 +89,10 @@ pub struct Config {
     /// 是否强制使用 16 色板（适配老终端）。
     pub basic_color: bool,
 
+    /// 界面主题。存的是 [`crate::ui::theme::ThemeName::id`]，解析不出来时回落
+    /// 到默认主题——改坏配置文件不该让程序起不来。
+    pub theme: ThemeName,
+
     /// 自定义键位：`动作名 -> 按键`，例如 `quit = "Q"`、`open_sources = "s"`。
     ///
     /// 动作名是 [`crate::keymap::Action`] 变体的 snake_case（见 keymap.rs 的
@@ -118,6 +123,7 @@ impl Default for Config {
             proxy: None,
             quality: DEFAULT_QUALITY.to_string(),
             basic_color: false,
+            theme: ThemeName::default(),
             keymap: std::collections::BTreeMap::new(),
             sources: SourceSet::default(),
         }

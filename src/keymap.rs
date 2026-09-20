@@ -91,6 +91,8 @@ pub enum Action {
     // ---- 业务 ----
     /// 打开搜索输入框。
     OpenSearch,
+    /// 打开设置页（数字键够不到它，所以要有直达键）。
+    OpenSettings,
     /// 重新拉取当前视图数据。
     Reload,
     /// 把当前选中歌曲追加到播放队列。
@@ -241,6 +243,7 @@ pub fn action_from_name(name: &str) -> Option<Action> {
         "lyric_delay" => Action::LyricDelay,
         "lyric_advance" => Action::LyricAdvance,
         "open_search" => Action::OpenSearch,
+        "open_settings" => Action::OpenSettings,
         "reload" => Action::Reload,
         "queue_append" => Action::QueueAppend,
         "add_all_to_queue" => Action::AddAllToQueue,
@@ -408,6 +411,9 @@ fn resolve_normal(key: KeyEvent) -> Action {
 
         // ---- 业务 ----
         KeyCode::Char('/') => Action::OpenSearch,
+        // 设置页排在侧边栏最后，数字键（1-9 加 0）够不到，得给它一个直达键。
+        // 逗号在多数键盘上挨着 m/n 那一排，且不与任何现有键冲突。
+        KeyCode::Char(',') => Action::OpenSettings,
         KeyCode::Char('R') => Action::Reload,
         KeyCode::Char('a') => Action::QueueAppend,
         KeyCode::Char('A') => Action::AddAllToQueue,
@@ -459,6 +465,7 @@ pub const CHEATSHEET: &[(&str, &str, &str)] = &[
     ("Enter", "播放选中歌曲 / 进入", "导航"),
     ("Esc", "返回上一层", "导航"),
     ("/", "搜索", "业务"),
+    (",", "打开设置页", "业务"),
     ("R", "刷新当前列表", "业务"),
     ("M", "搜索结果加载下一页", "业务"),
     ("a / i", "加入队列 / 下一首播放", "业务"),

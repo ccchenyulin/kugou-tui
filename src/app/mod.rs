@@ -23,7 +23,35 @@
 //! 主循环是**唯一**修改 [`AppState`] 的地方，因此不需要任何锁来保护 UI 状态。
 //! 跨线程共享的只有「音频位置/音量」这类原子量与一条无锁通道。
 
+/// 猜终端支持哪种图形协议。
+///
+/// **刻意不用** `Picker::from_query_stdio()`。它向终端发一串查询序列再阻塞读
+/// stdin，而那个读**没有自己的超时**：终端一旦不回应（tmux、部分终端、某些 SSH
+/// 组合），读线程就永远卡在 `stdin().read()` 上，之后用户按的每一个键都被它
+/// 吞掉——实测表现是整个键盘失灵，`q` 都退不出去。它顺手开关的那次 raw mode
+/// 还会和 `ratatui::init()` 打架。
+///
+/// 改成只看环境变量：kitty 与 iTerm2 都会留下明确痕迹，猜不出就退回半块字符。
+/// 代价是自动检测不到 sixel（这类终端很少），换来的是绝不会抢走输入、也绝不会
+/// 让启动多等两秒。
+fn detect_image_picker() -> ratatui_image::picker::Picker {
+    use ratatui_image::picker::{Picker, ProtocolType};
+
+    let mut picker = Picker::halfblocks();
+    let is_kitty = std::env::var_os("KITTY_WINDOW_ID").is_some()
+        || std::env::var("TERM").is_ok_and(|term| term.contains("kitty"));
+    let is_iterm2 = std::env::var("TERM_PROGRAM").is_ok_and(|value| value == "iTerm.app");
+
+    if is_kitty {
+        picker.set_protocol_type(ProtocolType::Kitty);
+    } else if is_iterm2 {
+        picker.set_protocol_type(ProtocolType::Iterm2);
+    }
+    picker
+}
+
 pub mod queue;
+pub mod settings;
 pub mod state;
 pub mod update;
 
@@ -124,13 +152,7 @@ impl App {
             picker: None,
         };
 
-        // 探测终端支持哪种图形协议。失败只是没有真图，不影响使用。
-        //
-        // 必须在 `ratatui::init()` **之前**调用：探测内部会自己开关一次 raw mode，
-        // 放在 init 之后反而会把已打开的 raw mode 关掉，键盘输入就全废了。
-        // 终端不回答查询时要等满超时（默认 2 秒）才退回半块字符，这是启动
-        // 阶段唯一可能变慢的地方，之后不再重复探测。
-        app.picker = ratatui_image::picker::Picker::from_query_stdio().ok();
+        app.picker = Some(detect_image_picker());
 
         app.announce_readiness();
         // 放在 announce_readiness 之后：这种故障比「未登录」严重，提示不能被覆盖

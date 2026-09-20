@@ -48,7 +48,7 @@ const LYRIC_SIDE_BY_SIDE_WIDTH: u16 = 100;
 
 /// 渲染一帧。
 pub fn render(frame: &mut Frame, state: &mut AppState) {
-    let theme = Theme::for_config(state.config.basic_color);
+    let theme = Theme::for_config(state.config.theme, state.config.basic_color);
     let area = frame.area();
 
     // 命中区每帧重建，保证鼠标坐标换算始终对应当前布局
@@ -157,6 +157,13 @@ fn render_main(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Them
             views::render_cover_page(frame, area, state, theme);
             return;
         }
+        Tab::Settings => {
+            // 先把值算出来：下面要可变借用 state 去登记命中区
+            let values = crate::app::settings::values(state);
+            let focused = state.focus == Focus::Primary;
+            views::render_settings(frame, area, state, &values, focused, theme);
+            return;
+        }
         Tab::Queue => {
             let focused = state.focus == Focus::Primary;
             let playback = state.playback;
@@ -210,7 +217,13 @@ fn render_main(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Them
             // 鼠标命中区长度为 0，点上去不会有任何反应
             Tab::Sources => state.config.sources.ordered().len(),
             // 其余页面没有条目列表
-            Tab::Search | Tab::Home | Tab::Queue | Tab::Lyrics | Tab::Cover | Tab::Visualizer => 0,
+            Tab::Search
+            | Tab::Home
+            | Tab::Queue
+            | Tab::Lyrics
+            | Tab::Cover
+            | Tab::Visualizer
+            | Tab::Settings => 0,
         };
         state.add_hit_zone(
             Rect::new(
@@ -308,7 +321,8 @@ impl AppState {
             | Tab::Lyrics
             | Tab::Cover
             | Tab::Visualizer
-            | Tab::Sources => 0,
+            | Tab::Sources
+            | Tab::Settings => 0,
         }
     }
 
@@ -360,7 +374,7 @@ fn render_primary(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &T
         }
         Tab::Sources => views::render_sources(frame, area, state, focused, theme),
         // 这几页都由 render_main 整屏渲染，不会走到这里
-        Tab::Home | Tab::Queue | Tab::Lyrics | Tab::Cover | Tab::Visualizer => {}
+        Tab::Home | Tab::Queue | Tab::Lyrics | Tab::Cover | Tab::Visualizer | Tab::Settings => {}
     }
 }
 
@@ -386,7 +400,13 @@ fn render_song_pane(
         Tab::Ranks => Some(&mut state.ranks.songs),
         Tab::Cloud => Some(&mut state.cloud.songs),
         // 音源页没有歌曲列表
-        Tab::Home | Tab::Queue | Tab::Lyrics | Tab::Cover | Tab::Visualizer | Tab::Sources => None,
+        Tab::Home
+        | Tab::Queue
+        | Tab::Lyrics
+        | Tab::Cover
+        | Tab::Visualizer
+        | Tab::Sources
+        | Tab::Settings => None,
     }) else {
         return;
     };
