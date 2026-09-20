@@ -350,6 +350,7 @@ impl App {
             Action::Next => self.next_track(true),
             Action::Prev => self.previous_track(),
             Action::SeekForward => self.seek_by(SEEK_STEP_MS),
+            Action::SeekTo(position_ms) => self.seek_to(position_ms),
             Action::SeekBackward => self.seek_by(-SEEK_STEP_MS),
             Action::VolumeUp => self.adjust_volume(VOLUME_STEP),
             Action::VolumeDown => self.adjust_volume(-VOLUME_STEP),
@@ -760,6 +761,26 @@ impl App {
         };
 
         handle.update(info);
+    }
+
+    /// 绝对定位到 `position_ms`。
+    ///
+    /// 与 [`Self::seek_by`] 的区别：那个是相对步进，这个是"跳到某处"。
+    /// MPRIS 的 SetPosition（桌面组件拖进度条）需要后者。
+    fn seek_to(&mut self, position_ms: u64) {
+        if self.state.current.is_none() {
+            return;
+        }
+        // 夹在时长范围内，避免拖到尽头后位置越界
+        let target = if self.state.duration_ms > 0 {
+            position_ms.min(self.state.duration_ms.saturating_sub(1))
+        } else {
+            position_ms
+        };
+
+        self.audio.seek_to(target);
+        // 乐观更新，让进度条立刻响应；音频线程随后给出真实位置
+        self.state.position_ms = target;
     }
 
     fn seek_by(&mut self, delta_ms: i64) {

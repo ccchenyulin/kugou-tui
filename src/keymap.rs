@@ -60,6 +60,9 @@ pub enum Action {
     Prev,
     SeekForward,
     SeekBackward,
+    /// 绝对定位到指定毫秒。MPRIS 的 SetPosition 需要它——桌面组件拖进度条是"跳到某处"，
+    /// 不是"前进/后退几秒"，只有 SeekForward/Backward 是做不到的。
+    SeekTo(u64),
     VolumeUp,
     VolumeDown,
     ToggleMute,

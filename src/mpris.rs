@@ -20,7 +20,8 @@ use std::sync::{Arc, Mutex};
 
 use zbus::connection::Builder as ConnectionBuilder;
 use zbus::interface;
-use zbus::zvariant::OwnedValue;
+use zbus::object_server::SignalEmitter;
+use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
 use crate::audio::engine::PlaybackState;
 use crate::event::{Event, EventBus};
@@ -132,6 +133,25 @@ impl Player {
             self.dispatch(Action::PlayPause);
         }
     }
+
+    /// 绝对定位（微秒）。桌面组件**拖进度条**走的是这个，不是 `seek`。
+    ///
+    /// 之前只实现了 `seek`（相对跳转），结果 TUI 里能拖、DMS 里拖不动——
+    /// 因为拖进度条的语义是"跳到某处"，拿相对步进凑不出来。
+    async fn set_position(&self, track_id: OwnedObjectPath, position_us: i64) {
+        // trackid 只用来校验，我们只有一条轨，不严格比对也能安全处理
+        let _ = track_id;
+        if position_us < 0 {
+            return;
+        }
+        self.dispatch(Action::SeekTo(position_us as u64 / 1_000));
+        // Seeked 信号暂未发送：它只是"建议"，多数客户端（含 DMS、playerctl）
+        // 靠轮询 Position 也能同步。等把 SignalContext 正确注入后再补。
+    }
+
+    /// `Seeked` 信号：成功跳转后要广播新位置，客户端才会同步显示。
+    #[zbus(signal)]
+    async fn seeked(ctxt: &SignalEmitter<'_>, position_us: i64) -> zbus::Result<()>;
 
     /// 相对跳转（微秒）。正负皆可。
     async fn seek(&self, offset_us: i64) {
