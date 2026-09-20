@@ -120,7 +120,9 @@ fn parse_singers(value: &Value) -> Vec<Singer> {
 pub async fn song_stream_url(
     client: &ApiClient,
     song: &Song,
-    quality: &str,
+    // 签名与其它音源保持一致，但**这里用不上**：实测 `/getMusicPlay/:songmid`
+    // 不接受码率参数，返回什么音质由服务端持有的 cookie（账号权限）决定。
+    _quality: &str,
 ) -> Result<crate::api::catalog::StreamUrl> {
     // 实测：路径参数 `/getMusicPlay/:songmid`，不是 query
     let root = client
@@ -156,15 +158,6 @@ pub async fn song_stream_url(
             "《{}》没有可用的播放地址（可能需要 VIP 或已下架）",
             song.name
         ))),
-    }
-}
-
-/// 音质档位。QQ 音乐用前缀名而不是具体码率。
-fn bitrate_for(quality: &str) -> String {
-    match quality {
-        "320" => "320".to_string(),
-        "flac" | "super" => "flac".to_string(),
-        _ => "128".to_string(),
     }
 }
 
