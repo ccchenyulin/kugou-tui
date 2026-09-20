@@ -306,6 +306,10 @@ fn cover_layout(inner: Rect) -> Option<(Rect, Rect)> {
 /// 由框架的 diff 统一输出——不再自己往 stdout 写几百 KB 的转义序列（那会阻塞
 /// 写入并打乱光标跟踪），而且内容不变时一个字节都不会重发。探测不出终端能力
 /// 时才退回字符画。
+///
+/// 用的是默认的 `Resize::Fit`：等比缩到区域里，**不放大**。所以封面页把区域
+/// 给得再大，一张 256 见方的图也只按原始像素铺开，不会被拉成糊图；代价是换
+/// 到不同大小的区域（切页、改窗口）要重新编码一次——每页最多一次，不是每帧。
 fn draw_cover_block(frame: &mut Frame, inner: Rect, state: &mut AppState, theme: &Theme) -> Rect {
     if !state.cover.is_drawable() {
         return inner;
@@ -519,6 +523,62 @@ mod tests {
             .filter(|cell| cell.symbol() != " ")
             .count();
         assert!(painted > 0, "封面应当写进 Buffer，而不是 stdout");
+    }
+
+    /// 根治点：区域不变时**不会**重新编码。
+    ///
+    /// 之前的病根就是每帧重发——474KB 的转义序列堵死 stdout。这里直接断言
+    /// 「第二帧没有任何编码动作」：不编码就没有新的图片数据，ratatui 的 diff
+    /// 也就无从输出，自然不会阻塞写入、也不会闪。
+    /// 这里直接驱动 widget 而不是走 `draw_cover_block`：后者为了记日志会把
+    /// `last_encoding_result()` 取走（它是 `take()` 语义），读不到编码次数。
+    #[test]
+    fn cover_is_encoded_only_when_the_area_changes() {
+        use ratatui::buffer::Buffer;
+        use ratatui::widgets::StatefulWidget;
+
+        // 尺寸要贴近真实封面（256 见方）。`Resize::Fit` 不会把小图放大，
+        // 用一张装得下图会让「换区域要重新编码」这条永远成立不了。
+        let mut pixels = image::RgbImage::new(256, 256);
+        for (x, y, pixel) in pixels.enumerate_pixels_mut() {
+            *pixel = image::Rgb([x as u8, y as u8, 128]);
+        }
+        let mut protocol = ratatui_image::picker::Picker::halfblocks()
+            .new_resize_protocol(image::DynamicImage::ImageRgb8(pixels));
+
+        // 交给 widget 的区域由纯函数算出，因此连续两帧必然是同一个矩形——
+        // 区域稳定是「不重发」的前提
+        let (first_area, _) = cover_layout(Rect::new(0, 0, 60, 20)).expect("够放封面");
+        let (second_area, _) = cover_layout(Rect::new(0, 0, 60, 20)).expect("够放封面");
+        assert_eq!(first_area, second_area);
+
+        let mut first = Buffer::empty(first_area);
+        StatefulImage::default().render(first_area, &mut first, &mut protocol);
+        assert!(
+            protocol.last_encoding_result().is_some(),
+            "首帧必须编码一次"
+        );
+
+        let mut second = Buffer::empty(second_area);
+        StatefulImage::default().render(second_area, &mut second, &mut protocol);
+        assert!(
+            protocol.last_encoding_result().is_none(),
+            "区域没变就不该再编码——每帧编码正是之前卡死的原因"
+        );
+        assert_eq!(
+            first, second,
+            "两帧内容一致 → ratatui 的 diff 一个字节都不会输出"
+        );
+
+        // 换到更大的区域才重新编码一次：切页 / 改窗口大小走的就是这条路
+        let (bigger, _) = cover_layout(Rect::new(0, 0, 60, 40)).expect("够放封面");
+        assert_ne!(bigger.height, first_area.height);
+        let mut third = Buffer::empty(bigger);
+        StatefulImage::default().render(bigger, &mut third, &mut protocol);
+        assert!(
+            protocol.last_encoding_result().is_some(),
+            "区域变了应当重新编码一次"
+        );
     }
 
     /// 剩余区域紧接封面下方，且两者高度加起来仍是原区域高度。
