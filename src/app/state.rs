@@ -499,8 +499,11 @@ pub struct CloudPane {
 pub struct CoverArt {
     /// 封面属于哪首歌（用 hash 标识）。`None` 表示还没有封面。
     pub hash: Option<String>,
-    /// 半块字符画，每行等宽。空表示还没取到或该音源没有封面。
+    /// 半块字符画，每行等宽。**非 kitty 终端的兜底**。
     pub lines: Vec<String>,
+    /// 原图的 PNG 字节。kitty 终端用它按原样显示（1:1 还原），
+    /// 字符画只是画不出真图时的降级方案。
+    pub png: Option<Vec<u8>>,
 }
 
 impl CoverArt {
@@ -612,6 +615,9 @@ pub struct AppState {
     pub prompt: Option<PromptState>,
     /// 当前封面的字符画，以及它属于哪首歌（避免切歌后继续显示上一张）。
     pub cover: CoverArt,
+    /// 本帧封面占用的字符区域。渲染时记录，渲染**之后**由 kitty 协议把真图
+    /// 画上去——图片是终端浮层，必须在 ratatui 绘制完成后再放。
+    pub cover_area: Option<ratatui::layout::Rect>,
     /// 当前账号的会员摘要（如「概念版 SVIP · 至 09-21」），未登录或未取到时为 None。
     pub vip_label: Option<String>,
     /// 上次鼠标点击命中的（区域, 数据下标）。
@@ -775,6 +781,7 @@ impl AppState {
             volume_before_mute: None,
             lyric: LyricPane::default(),
             cover: CoverArt::default(),
+            cover_area: None,
             sync_target: None,
             status: "按 / 搜索，或按 2-5 浏览歌单/歌手/排行榜/云端".to_string(),
             status_level: StatusLevel::Info,

@@ -192,6 +192,10 @@ impl App {
                 .draw(|frame| crate::ui::render(frame, &mut self.state))
                 .context("渲染失败")?;
 
+            // 封面真图必须在 ratatui 绘制**之后**放：图片是终端浮层，
+            // 放在绘制中途会被随后的差分重绘擦掉。
+            self.paint_cover()?;
+
             match self.receiver.recv_timeout(self.frame_interval()) {
                 Ok(event) => self.handle_event(event),
                 // 没有事件时用一次心跳推进进度条与歌词
@@ -207,6 +211,36 @@ impl App {
             }
         }
 
+        Ok(())
+    }
+
+    /// 用终端图形协议把封面原图铺到本帧预留的区域上。
+    ///
+    /// 只在支持 kitty 协议的终端上做；其余终端由 `render_lyric` 里的字符画兜底。
+    /// 没有封面（或取不到 PNG）时什么都不做。
+    ///
+    /// 每帧都要重发：ratatui 是整屏差分重绘，只要它重写了图片所在的格子，
+    /// 图片就被擦掉了。PNG 字节缓存在 state 里，重发只是拼一次 base64。
+    fn paint_cover(&mut self) -> anyhow::Result<()> {
+        if !crate::ui::kitty::is_supported() {
+            return Ok(());
+        }
+        let Some(area) = self.state.cover_area else {
+            return Ok(());
+        };
+        let Some(png) = self.state.cover.png.as_deref() else {
+            return Ok(());
+        };
+        if area.width == 0 || area.height == 0 {
+            return Ok(());
+        }
+
+        use std::io::Write;
+        let mut stdout = std::io::stdout();
+        // 移到区域左上角再放图（MoveTo 是 0 基坐标）
+        ratatui::crossterm::execute!(stdout, ratatui::crossterm::cursor::MoveTo(area.x, area.y))?;
+        stdout.write_all(crate::ui::kitty::display_png(png, area.width, area.height).as_bytes())?;
+        stdout.flush()?;
         Ok(())
     }
 

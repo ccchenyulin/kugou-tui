@@ -122,6 +122,8 @@ pub enum Loaded {
     CoverReady {
         hash: String,
         lines: Vec<String>,
+        /// 原图 PNG，供 kitty 终端按原样显示。
+        png: Option<Vec<u8>>,
     },
     /// 当前账号的会员信息摘要（用于界面显示）。
     VipStatus {

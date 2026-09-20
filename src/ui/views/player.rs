@@ -112,7 +112,7 @@ fn render_player_header(frame: &mut Frame, area: Rect, state: &AppState, theme: 
 ///
 /// 当前行始终垂直居中——这是卡拉OK式滚动的关键：视线固定屏幕中央，
 /// 而不是跟着文字往下跑。
-pub fn render_lyric(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+pub fn render_lyric(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
     if area.height < 3 || area.width < 8 {
         return;
     }
@@ -130,33 +130,49 @@ pub fn render_lyric(frame: &mut Frame, area: Rect, state: &AppState, theme: &The
         return;
     }
 
-    // 封面画在歌词上方：两者都属于「当前这首歌」的信息，放一起语义最顺，
-    // 也不用另找地方挤（侧边栏和播放条都已经在高度上排满了）。
-    let lyric_area = if state.cover.lines.is_empty() || inner.width < 8 {
+    // 封面画在歌词上方：两者都属于「当前这首歌」的信息，放一起语义最顺。
+    //
+    // 区域尺寸按**可用空间**算，而不是跟着字符画的尺寸走——kitty 终端要在这里
+    // 放真图，图能比字符画大得多。区域先记进 state，等 ratatui 画完再由图形协议
+    // 把图片铺上去（图片是终端浮层，绘制中途放会被随后的差分重绘擦掉）。
+    state.cover_area = None;
+
+    let lyric_area = if state.cover.lines.is_empty() || inner.width < 12 {
         inner
     } else {
-        let cover_height = (state.cover.lines.len() as u16 + 2).min(inner.height / 2);
+        // 字符宽高比约 1:2，所以方形区域的列数是行数的两倍。
+        // 最多占面板一半高，给歌词留位置；再留一行间距，别贴着歌词。
+        let rows = (inner.height / 2).clamp(6, 24);
+        let columns = (rows * 2).min(inner.width);
         let [cover_area, rest] = ratatui::layout::Layout::vertical([
-            ratatui::layout::Constraint::Length(cover_height),
+            ratatui::layout::Constraint::Length(rows + 1),
             ratatui::layout::Constraint::Min(1),
         ])
         .areas(inner);
 
-        let lines: Vec<ratatui::text::Line> = state
-            .cover
-            .lines
-            .iter()
-            .map(|line| {
-                ratatui::text::Line::from(ratatui::text::Span::styled(
-                    line.clone(),
-                    theme.now_playing(),
-                ))
-            })
-            .collect();
-        frame.render_widget(
-            ratatui::widgets::Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center),
-            cover_area,
-        );
+        let x = cover_area.x + cover_area.width.saturating_sub(columns) / 2;
+        state.cover_area = Some(Rect::new(x, cover_area.y, columns, rows));
+
+        // kitty 终端会把真图铺满这个区域；此时再画一遍字符画只会盖住图片。
+        // 其它终端没有图形协议，只能退回字符画。
+        if !crate::ui::kitty::is_supported() {
+            let lines: Vec<ratatui::text::Line> = state
+                .cover
+                .lines
+                .iter()
+                .map(|line| {
+                    ratatui::text::Line::from(ratatui::text::Span::styled(
+                        line.clone(),
+                        theme.now_playing(),
+                    ))
+                })
+                .collect();
+            frame.render_widget(
+                ratatui::widgets::Paragraph::new(lines)
+                    .alignment(ratatui::layout::Alignment::Center),
+                cover_area,
+            );
+        }
         rest
     };
 

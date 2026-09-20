@@ -57,6 +57,25 @@ const SEARCH_MAX_PAGES: u32 = 16;
 /// 因此刻意不跟着 `config.page_size` 走。
 const ARTIST_LIST_SIZE: u32 = 60;
 
+/// 把图片编码成 PNG。失败只记日志，返回 `None` 让字符画兜底。
+fn encode_png(image: &image::DynamicImage) -> Option<Vec<u8>> {
+    // 缩到 512 见方再编码：原图往往 300~1000px，直接用会让每帧要发的
+    // base64 大出好几倍，而终端显示的尺寸远小于此。
+    let scaled = image.resize_exact(
+        COVER_PIXEL_SIZE,
+        COVER_PIXEL_SIZE,
+        image::imageops::FilterType::Triangle,
+    );
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    match scaled.write_to(&mut buffer, image::ImageFormat::Png) {
+        Ok(()) => Some(buffer.into_inner()),
+        Err(error) => {
+            crate::logger::tlog!(crate::logger::LEVEL_WARN, "封面转 PNG 失败：{error}");
+            None
+        }
+    }
+}
+
 /// 封面字符画取用的原图像素尺寸。
 ///
 /// 比字符数大得多：字符画每个字符要采上下两个像素，放大源图能保留更多细节。
@@ -2517,7 +2536,7 @@ impl App {
                 self.finish_login(false, message);
             }
 
-            Loaded::CoverReady { hash, lines } => {
+            Loaded::CoverReady { hash, lines, png } => {
                 // 结果回来时用户可能已经切歌，只认当前这首
                 if self
                     .state
@@ -2528,6 +2547,7 @@ impl App {
                     self.state.cover = CoverArt {
                         hash: Some(hash),
                         lines,
+                        png,
                     };
                 }
             }
@@ -2641,9 +2661,11 @@ impl App {
                     return;
                 }
             };
-            // 尺寸交给渲染层按实际面板大小决定，这里只把图带过去
+            // 字符画是兜底：非 kitty 终端只能用它
             let lines = crate::ui::cover::cover_lines(&image, COVER_WIDTH, COVER_HEIGHT);
-            bus.emit(Loaded::CoverReady { hash, lines });
+            // kitty 终端要的是原图 PNG，由终端自己缩放合成（1:1 还原）
+            let png = encode_png(&image);
+            bus.emit(Loaded::CoverReady { hash, lines, png });
         });
     }
 
