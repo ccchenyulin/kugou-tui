@@ -202,13 +202,19 @@ impl App {
 
     fn event_loop(&mut self, terminal: &mut ratatui::DefaultTerminal) -> anyhow::Result<()> {
         loop {
+            // 封面图片在 ratatui 绘制**之前**处理。
+            //
+            // 它会写 stdout 并移动光标，而 ratatui 内部维护着「光标现在在哪」的
+            // 假设；在 draw 之后动手会把那个假设打乱，下一帧的差分渲染就会错位
+            // （表现是画面乱闪）。放在 draw 之前，ratatui 随后的绘制会重新定位
+            // 光标，两不相扰。
+            //
+            // 图片在字符之上，ratatui 重绘它所在区域的空格也盖不住它。
+            self.paint_cover()?;
+
             terminal
                 .draw(|frame| crate::ui::render(frame, &mut self.state))
                 .context("渲染失败")?;
-
-            // 封面真图必须在 ratatui 绘制**之后**放：图片是终端浮层，
-            // 放在绘制中途会被随后的差分重绘擦掉。
-            self.paint_cover()?;
 
             match self.receiver.recv_timeout(self.frame_interval()) {
                 Ok(event) => self.handle_event(event),

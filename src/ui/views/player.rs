@@ -135,7 +135,6 @@ pub fn render_lyric(frame: &mut Frame, area: Rect, state: &mut AppState, theme: 
     // 区域尺寸按**可用空间**算，而不是跟着字符画的尺寸走——kitty 终端要在这里
     // 放真图，图能比字符画大得多。区域先记进 state，等 ratatui 画完再由图形协议
     // 把图片铺上去（图片是终端浮层，绘制中途放会被随后的差分重绘擦掉）。
-    state.cover_area = None;
 
     let lyric_area = if state.cover.lines.is_empty() || inner.width < 12 {
         inner
@@ -353,8 +352,7 @@ pub fn render_cover_page(frame: &mut Frame, area: Rect, state: &mut AppState, th
         return;
     }
 
-    state.cover_area = None;
-
+    // 同上：清空交给 ui::render 每帧统一做，这里只管设置
     let Some(song) = state.current.as_ref() else {
         frame.render_widget(empty_placeholder("播放歌曲后显示封面", theme), inner);
         return;
@@ -386,8 +384,6 @@ pub fn render_home(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &
     if inner.height < 4 || inner.width < 20 {
         return;
     }
-
-    state.cover_area = None;
 
     if state.current.is_none() {
         frame.render_widget(
