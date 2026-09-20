@@ -250,9 +250,9 @@ fn build_metadata(info: &TrackInfo) -> HashMap<String, OwnedValue> {
     map.insert("mpris:length".to_string(), owned(info.duration_us));
     map.insert(
         "mpris:artUrl".to_string(),
-        owned(zbus::zvariant::Str::from(expand_cover(
-            info.art_url.as_deref(),
-        ))),
+        owned(zbus::zvariant::Str::from(
+            info.art_url.clone().unwrap_or_default(),
+        )),
     );
     map.insert(
         "xesam:title".to_string(),
@@ -272,19 +272,6 @@ fn build_metadata(info: &TrackInfo) -> HashMap<String, OwnedValue> {
     });
 
     map
-}
-
-/// 展开封面 URL 里的 `{size}` 占位符。
-///
-/// 酷狗的 `sizable_cover` 形如：
-/// `http://imge.kugou.com/stdmusic/{size}/20200819/20200819143052763547.jpg`
-/// 不替换的话这就是个 404。取 400 像素：桌面控件一般显示得不大，没必要拉原图。
-fn expand_cover(url: Option<&str>) -> String {
-    match url {
-        Some(url) if url.contains("{size}") => url.replace("{size}", "400"),
-        Some(url) => url.to_string(),
-        None => String::new(),
-    }
 }
 
 /// 身份接口。桌面组件靠它显示播放器名字。

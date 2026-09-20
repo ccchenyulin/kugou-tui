@@ -54,6 +54,22 @@ pub struct Song {
 }
 
 impl Song {
+    /// 封面地址，并把 `{size}` 占位符展开成具体像素值。
+    ///
+    /// 酷狗返回的 `sizable_cover` 形如
+    /// `http://imge.kugou.com/stdmusic/{size}/20200819/xxx.jpg` ——
+    /// **不替换的话它就是个 404**。早先这段展开只写在 mpris 里（给桌面组件用），
+    /// 封面渲染那条路径漏了，结果封面永远加载不出来，界面只能一直显示占位。
+    /// 收进这里，谁用谁展开，不会再漏。
+    pub fn cover_url(&self, size: u32) -> Option<String> {
+        let url = self.cover.as_ref()?;
+        Some(if url.contains("{size}") {
+            url.replace("{size}", &size.to_string())
+        } else {
+            url.clone()
+        })
+    }
+
     /// 歌手名拼接，用于列表展示。
     pub fn singer_text(&self) -> String {
         if self.singers.is_empty() {
@@ -896,6 +912,36 @@ mod tests {
         assert_eq!(lyric.index_at(1_000), Some(0));
         assert_eq!(lyric.index_at(7_000), Some(1));
         assert_eq!(lyric.index_at(60_000), Some(2));
+    }
+
+    /// 锁住「封面模板 URL 必须展开 {size}」这条规则。
+    ///
+    /// 这个 bug 真实发生过：展开逻辑只写在 mpris 里，封面渲染那条路径漏了，
+    /// 于是封面永远是个 404，界面一直显示占位图，看起来像「没有封面功能」。
+    #[test]
+    fn expands_cover_size_placeholder() {
+        // 酷狗：模板 URL，必须替换
+        let song = Song {
+            cover: Some("http://imge.kugou.com/stdmusic/{size}/20200819/x.jpg".to_string()),
+            ..Song::default()
+        };
+        assert_eq!(
+            song.cover_url(400).as_deref(),
+            Some("http://imge.kugou.com/stdmusic/400/20200819/x.jpg")
+        );
+
+        // 网易云/QQ 音乐：本来就是完整地址，原样返回
+        let song = Song {
+            cover: Some("https://p3.music.126.net/abc/1.jpg".to_string()),
+            ..Song::default()
+        };
+        assert_eq!(
+            song.cover_url(400).as_deref(),
+            Some("https://p3.music.126.net/abc/1.jpg")
+        );
+
+        // 没有封面
+        assert_eq!(Song::default().cover_url(400), None);
     }
 
     #[test]

@@ -57,6 +57,23 @@ const SEARCH_MAX_PAGES: u32 = 16;
 /// 因此刻意不跟着 `config.page_size` 走。
 const ARTIST_LIST_SIZE: u32 = 60;
 
+/// 封面字符画取用的原图像素尺寸。
+///
+/// 比字符数大得多：字符画每个字符要采上下两个像素，放大源图能保留更多细节。
+const COVER_PIXEL_SIZE: u32 = 512;
+
+/// 展开封面 URL 里的 \`{size}\` 占位符。
+fn expand_cover_size(url: &str, size: u32) -> String {
+    if url.contains("{size}") {
+        url.replace("{size}", &size.to_string())
+    } else {
+        url.to_string()
+    }
+}
+
+/// 桌面组件（MPRIS）用的封面像素尺寸。控件显示得不大，没必要拉原图。
+const MPRIS_COVER_SIZE: u32 = 400;
+
 /// 封面的尺寸（列 x 行）。每个字符承载上下 2 个像素，所以实际是 24x24 像素。
 const COVER_WIDTH: usize = 24;
 const COVER_HEIGHT: usize = 12;
@@ -807,7 +824,9 @@ impl App {
                     .map(|singer| singer.name.clone())
                     .collect(),
                 album: song.album_name.clone(),
-                art_url: song.cover.clone(),
+                // 在这里展开 {size}：MprisSnapshot 只存最终可用的地址，
+                // 展开规则收敛到 Song::cover_url，避免各调用点各写一份
+                art_url: song.cover_url(MPRIS_COVER_SIZE),
                 position_us: (self.state.position_ms as i64) * 1_000,
                 duration_us: (self.state.duration_ms as i64) * 1_000,
                 status: self.state.playback,
@@ -2599,7 +2618,9 @@ impl App {
             // 封面地址由音源自己解析：多数音源在搜索结果里直接带 URL，
             // 网易云只有 picId，要再查一次 /song/detail。
             let url = match active_source.cover_url(&api, &song).await {
-                Ok(Some(url)) => url,
+                // 展开 {size}：酷狗的封面模板 URL 不替换就是个 404，
+                // 封面会永远加载不出来（这正是之前一直显示占位的原因）
+                Ok(Some(url)) => expand_cover_size(&url, COVER_PIXEL_SIZE),
                 Ok(None) => return,
                 Err(error) => {
                     crate::logger::tlog!(crate::logger::LEVEL_WARN, "取封面地址失败：{error}");
