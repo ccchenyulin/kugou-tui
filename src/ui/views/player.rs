@@ -150,22 +150,42 @@ pub fn render_lyric(frame: &mut Frame, area: Rect, state: &AppState, theme: &The
 
     // 让当前行居中，同时不允许滚出内容范围
     let focus_line = active.unwrap_or(0);
-    let max_offset = total.saturating_sub(viewport);
-    let offset = focus_line.saturating_sub(viewport / 2).min(max_offset);
 
-    let lines: Vec<Line> = state
-        .lyric
-        .lyric
-        .lines
+    // 把每一行歌词展平为「原文 + 译文（若有）」的若干个显示单元。
+    // 滚动定位按歌词原文行号找显示位置，所以译文不会破坏对齐。
+    let mut display: Vec<(usize, bool, String)> = Vec::with_capacity(total * 2);
+    for (index, line) in state.lyric.lyric.lines.iter().enumerate() {
+        display.push((index, false, line.text.clone()));
+        if let Some(translation) = line.translation.as_deref() {
+            // 空白行不要占第二行，否则歌词稀疏的歌会突然多一截空白
+            if !translation.trim().is_empty() {
+                display.push((index, true, translation.to_string()));
+            }
+        }
+    }
+
+    let focus_display = display
         .iter()
-        .enumerate()
-        .map(|(index, line)| {
-            let style = if Some(index) == active {
+        .position(|(index, _, _)| *index == focus_line)
+        .unwrap_or(0);
+    let max_offset = display.len().saturating_sub(viewport);
+    let offset = focus_display.saturating_sub(viewport / 2).min(max_offset);
+
+    let lines: Vec<Line> = display
+        .iter()
+        .skip(offset)
+        .take(viewport)
+        .map(|(index, is_translation, text)| {
+            // 译文始终暗一档（包括"当前行"的译文），只有原文才有活动态高亮，
+            // 这样一眼能看出「上面那行亮的是原文，下面那行是它的译文」。
+            let style = if *is_translation {
+                theme.dim()
+            } else if Some(*index) == active {
                 theme.lyric_active()
             } else {
                 theme.lyric_idle()
             };
-            Line::from(Span::styled(line.text.clone(), style))
+            Line::from(Span::styled(text.clone(), style))
         })
         .collect();
 
