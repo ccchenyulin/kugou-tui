@@ -114,27 +114,6 @@ pub(crate) fn extract_list<T>(
     Vec::new()
 }
 
-/// 从响应里提取单个对象，用于详情类接口。
-pub(crate) fn extract_first<T>(root: &Value, parse: impl Fn(&Value) -> Option<T>) -> Option<T> {
-    // `data` 是数组时取第一个能解析的元素
-    if let Some(items) = root.get("data").and_then(Value::as_array) {
-        if let Some(found) = items.iter().find_map(&parse) {
-            return Some(found);
-        }
-    }
-
-    let mut arrays = Vec::new();
-    collect_object_arrays(root, &mut arrays, 0);
-    for array in arrays {
-        if let Some(found) = array.iter().find_map(&parse) {
-            return Some(found);
-        }
-    }
-
-    // 最后把 `data` 本身当作对象试一次
-    root.get("data").and_then(&parse)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,13 +147,6 @@ mod tests {
             value.get("name")?.as_str().map(str::to_string)
         });
         assert_eq!(names, vec!["歌单B"]);
-    }
-
-    #[test]
-    fn extract_first_handles_array_payload() {
-        let root = json!({"data": [{"id": 1, "name": "x"}, {"id": 2, "name": "y"}]});
-        let first = extract_first(&root, |value| value.get("id")?.as_i64());
-        assert_eq!(first, Some(1));
     }
 
     #[test]

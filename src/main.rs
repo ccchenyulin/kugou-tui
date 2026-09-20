@@ -52,6 +52,7 @@ mod error;
 mod event;
 mod keymap;
 mod logger;
+mod mpris;
 mod source;
 mod ui;
 mod util;

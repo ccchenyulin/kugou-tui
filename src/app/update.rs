@@ -75,6 +75,8 @@ impl App {
             Event::Loaded(loaded) => self.handle_loaded(*loaded),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::Tick => self.tick(),
+            // 来自 MPRIS（桌面媒体控件）的语义动作，已经是明确意图，直接执行
+            Event::Action(action) => self.handle_action(action),
         }
     }
 
@@ -726,6 +728,38 @@ impl App {
         if let Some(song) = self.state.queue.current().cloned() {
             self.start_playback(song, 0);
         }
+    }
+
+    /// 把当前播放信息推给 MPRIS，供桌面组件显示。
+    ///
+    /// 每次 tick 调一次。开销就是一次互斥锁写入，可忽略；桌面组件的轮询
+    /// 频率远低于此，没必要更高频。
+    fn sync_mpris(&mut self) {
+        let Some(handle) = self.mpris.as_ref() else {
+            return;
+        };
+
+        let info = match self.state.current.as_ref() {
+            Some(song) => crate::mpris::TrackInfo {
+                title: song.name.clone(),
+                artists: song
+                    .singers
+                    .iter()
+                    .map(|singer| singer.name.clone())
+                    .collect(),
+                album: song.album_name.clone(),
+                art_url: song.cover.clone(),
+                position_us: (self.state.position_ms as i64) * 1_000,
+                duration_us: (self.state.duration_ms as i64) * 1_000,
+                status: self.state.playback,
+            },
+            None => crate::mpris::TrackInfo {
+                status: self.state.playback,
+                ..Default::default()
+            },
+        };
+
+        handle.update(info);
     }
 
     fn seek_by(&mut self, delta_ms: i64) {
@@ -2060,6 +2094,8 @@ impl App {
         // 电平每帧刷新（audio 那一侧只是读原子量，开销可忽略）
         self.state.levels = self.audio.levels();
         self.state.advance_visualizer(elapsed);
+
+        self.sync_mpris();
 
         if self.state.playback == PlaybackState::Playing {
             self.update_active_lyric();

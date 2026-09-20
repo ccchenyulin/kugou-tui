@@ -20,8 +20,8 @@ use base64::Engine;
 use serde_json::Value;
 
 use crate::api::client::ApiClient;
+use crate::api::data_of;
 use crate::api::model::{Lyric, LyricLine, Song, pick_string};
-use crate::api::{data_of, extract_first};
 use crate::error::{AppError, Result};
 
 impl ApiClient {

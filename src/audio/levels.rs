@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use rodio::Source;
+use rodio::source::SeekError;
 
 /// 保留多少个电平格子。侧边栏宽度有限，28 格刚好铺满一行。
 pub const LEVEL_BUCKETS: usize = 28;
@@ -138,5 +139,14 @@ where
 
     fn total_duration(&self) -> Option<Duration> {
         self.inner.total_duration()
+    }
+
+    /// 必须转发，否则进度条会完全失效。
+    ///
+    /// `Source::try_seek` 的**默认实现直接返回 `NotSupported`**。这个包装器如果漏掉它，
+    /// rodio 就会认为整条音频不可跳转——点进度条、方向键 seek 全部变成静默失败，
+    /// 而播放本身完全正常，极难察觉是这个包装层吞掉的。
+    fn try_seek(&mut self, position: Duration) -> Result<(), SeekError> {
+        self.inner.try_seek(position)
     }
 }

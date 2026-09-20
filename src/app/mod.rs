@@ -63,6 +63,9 @@ pub struct App {
 
     /// 上一帧的时间戳，用来算出真实经过时长（dt），供动画做时间无关的缓动。
     last_frame_at: Instant,
+
+    /// MPRIS 句柄。没有 D-Bus 时为 `None`（不影响播放，只是桌面集成不可用）。
+    mpris: Option<crate::mpris::MprisHandle>,
 }
 
 impl App {
@@ -91,6 +94,9 @@ impl App {
         let cache = AudioCache::new(config.cache_dir.clone(), config.cache_limit_mib);
         let downloader = Downloader::new(config.proxy.as_deref()).context("初始化下载器失败")?;
 
+        // 先取一份克隆给 MPRIS：bus 随后会被 move 进 App，之后就借不到了
+        let mpris = crate::mpris::spawn(bus.clone());
+
         let state = AppState::new(config);
 
         let mut app = Self {
@@ -103,6 +109,7 @@ impl App {
             downloader,
             runtime,
             last_frame_at: Instant::now(),
+            mpris,
         };
 
         app.announce_readiness();
