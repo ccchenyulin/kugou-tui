@@ -143,8 +143,26 @@ pub fn render_sidebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &T
     };
     lines.push(kv("已用", &human_bytes(state.cache_bytes), theme));
     lines.push(kv("上限", &limit, theme));
+    // 缓存目录与清理按键挤在一行：侧边栏只有 19 列，而且高度已经占满
+    // （实测再单独加一行会被裁掉），完整路径用 `--print-config` 看。
+    // 这里只显示目录最后一段，指个方向就够。
+    let dir = dir_basename(&state.config.cache_dir);
+    lines.push(Line::from(vec![
+        Span::styled("  C清理 ", theme.dim()),
+        Span::styled(dir, theme.body()),
+    ]));
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+/// 取路径的最后一段（目录名），用于在窄侧边栏里指代缓存目录。
+///
+/// 取不到（比如路径以 `..` 结尾）就退回完整路径——宁可让它被侧边栏裁掉，
+/// 也不要显示一个认不出来的空值。
+fn dir_basename(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|name| name.display().to_string())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 fn section(title: &str, theme: &Theme) -> Line<'static> {

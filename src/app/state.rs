@@ -628,6 +628,8 @@ pub enum ConfirmAction {
     ClearQueue,
     /// 删除（取消收藏）一个云端歌单。
     DeleteCloudPlaylist,
+    /// 清空音频缓存目录。
+    ClearCache,
 }
 
 impl ConfirmAction {
@@ -635,6 +637,7 @@ impl ConfirmAction {
         match self {
             Self::ClearQueue => "清空整个播放队列并停止播放？",
             Self::DeleteCloudPlaylist => "删除这个云端歌单？该操作会取消收藏它。",
+            Self::ClearCache => "清空音频缓存？已缓存的歌曲需要重新下载。",
         }
     }
 

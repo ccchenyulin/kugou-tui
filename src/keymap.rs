@@ -87,6 +87,8 @@ pub enum Action {
     RemoveFromQueue,
     /// 清空整个播放队列（需二次确认）。
     ClearQueue,
+    /// 清空音频缓存目录。
+    ClearCache,
     /// 切换歌曲列表的排列方向：倒序（最后一首在最上）↔ 正序。
     ToggleSortOrder,
     /// 打开排行榜视图。
@@ -198,6 +200,7 @@ fn resolve_normal(key: KeyEvent) -> Action {
         KeyCode::Char('i') => Action::QueuePlayNext,
         KeyCode::Char('x') => Action::RemoveFromQueue,
         KeyCode::Char('X') => Action::ClearQueue,
+        KeyCode::Char('C') => Action::ClearCache,
         KeyCode::Char('o') => Action::ToggleSortOrder,
         KeyCode::Char('b') => Action::OpenRanks,
         KeyCode::Char('c') => Action::OpenCloud,

@@ -220,6 +220,7 @@ impl App {
                     match confirm {
                         ConfirmAction::ClearQueue => self.clear_queue(),
                         ConfirmAction::DeleteCloudPlaylist => self.delete_cloud_playlist(),
+                        ConfirmAction::ClearCache => self.clear_cache(),
                     }
                 }
                 Action::Cancel | Action::Char('n') | Action::Char('N') => {
@@ -375,6 +376,10 @@ impl App {
             // 清空队列是破坏性操作，先进确认流程，避免误按一下就把整个队列清掉。
             Action::ClearQueue => {
                 self.state.pending_confirm = Some(ConfirmAction::ClearQueue);
+            }
+            // 删文件不可恢复，同样先确认
+            Action::ClearCache => {
+                self.state.pending_confirm = Some(ConfirmAction::ClearCache);
             }
             Action::ToggleSortOrder => self.toggle_sort_order(),
             Action::OpenRanks => self.switch_tab(Tab::Ranks),
@@ -1424,6 +1429,34 @@ impl App {
 
     /// 执行「清空播放队列」。**停止当前播放**——队列都没了，继续播一首不在队列里的歌既没意义
     /// （下一首无从查找）。若只想删掉其中一首，用 `x`，它不会打断当前播放。
+    /// 清空音频缓存目录。
+    ///
+    /// 由确认弹窗触发——删文件不可恢复，不能让一次误按就清掉全部缓存。
+    /// 清空后立刻重新统计占用，界面上的「已用」才会跟着变。
+    fn clear_cache(&mut self) {
+        match self.cache.clear() {
+            Ok(report) => {
+                self.refresh_cache_usage();
+
+                let freed = crate::ui::widgets::human_bytes(report.freed_bytes);
+                if report.failed > 0 {
+                    self.state.warn(format!(
+                        "已清理 {} 个文件（{}），{} 个删除失败（检查目录权限）",
+                        report.removed_files, freed, report.failed
+                    ));
+                } else if report.removed_files == 0 {
+                    self.state.info("缓存已经是空的");
+                } else {
+                    self.state.success(format!(
+                        "已清理缓存：{} 个文件，释放 {}",
+                        report.removed_files, freed
+                    ));
+                }
+            }
+            Err(error) => self.state.error(format!("清空缓存失败：{error}")),
+        }
+    }
+
     fn clear_queue(&mut self) {
         if self.state.queue.is_empty() {
             self.state.warn("播放队列已经为空");

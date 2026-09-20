@@ -34,6 +34,15 @@ pub struct EvictionReport {
     pub freed_bytes: u64,
 }
 
+/// 清空缓存的结果。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClearReport {
+    pub removed_files: usize,
+    pub freed_bytes: u64,
+    /// 删除失败的文件数。非 0 时界面应提示用户（多半是权限问题）。
+    pub failed: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct AudioCache {
     root: PathBuf,
@@ -114,6 +123,36 @@ impl AudioCache {
                     tlog!(
                         crate::logger::LEVEL_WARN,
                         "删除缓存文件 {} 失败：{error}",
+                        entry.path.display()
+                    );
+                }
+            }
+        }
+
+        Ok(report)
+    }
+
+    /// 清空整个缓存目录。
+    ///
+    /// 与 [`Self::enforce_limit`] 的区别：那个只删到水位线以下（按修改时间从旧到新），
+    /// 这个是**全部删除**，由用户在界面上主动触发。
+    ///
+    /// 只删**文件**，不动子目录，也不删目录本身——保留目录避免后续播放还要重建。
+    /// 单个文件删除失败不中断，继续删剩下的，最后把失败数报出来。
+    pub fn clear(&self) -> Result<ClearReport> {
+        let mut report = ClearReport::default();
+
+        for entry in self.entries() {
+            match std::fs::remove_file(&entry.path) {
+                Ok(()) => {
+                    report.removed_files += 1;
+                    report.freed_bytes += entry.size_bytes;
+                }
+                Err(error) => {
+                    report.failed += 1;
+                    tlog!(
+                        crate::logger::LEVEL_WARN,
+                        "清空缓存时删除 {} 失败：{error}",
                         entry.path.display()
                     );
                 }
