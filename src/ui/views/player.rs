@@ -195,12 +195,10 @@ pub fn render_lyric(frame: &mut Frame, area: Rect, state: &AppState, theme: &The
         })
         .collect();
 
-    frame.render_widget(
-        Paragraph::new(lines)
-            .alignment(Alignment::Center)
-            .scroll((offset as u16, 0)),
-        inner,
-    );
+    // 注意：上面已经用 skip(offset).take(viewport) 裁好了要显示的行，
+    // 这里**不能**再调 .scroll((offset, 0))——那会形成双重偏移（实际滚 2×offset），
+    // 滚得越来越快，很快就滚过内容末尾，表现就是「歌词播到一半后再也不出现」。
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
 }
 
 /// 播放队列面板需要的外部状态。
