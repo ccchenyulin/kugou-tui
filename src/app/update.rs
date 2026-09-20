@@ -347,11 +347,8 @@ impl App {
             Action::ToggleSidebar => {
                 self.state.sidebar_visible = !self.state.sidebar_visible;
             }
-            Action::SwitchTab(number) => {
-                if let Some(tab) = Tab::from_number(number) {
-                    self.switch_tab(tab);
-                }
-            }
+            // 数字键：焦点在侧边栏时切标签页，在列表里时跳到第 N 项
+            Action::Digit(number) => self.handle_digit(number),
             Action::FocusNext => self.state.cycle_focus(true),
             Action::FocusPrev => self.state.cycle_focus(false),
 
@@ -368,12 +365,26 @@ impl App {
             Action::PlayPause => self.toggle_playback(),
             Action::Next => self.next_track(true),
             Action::Prev => self.previous_track(),
-            Action::SeekForward => self.seek_by(SEEK_STEP_MS),
+            // 焦点在侧边栏时，左右方向键用来在导航与列表之间移动焦点；
+            // 只有焦点已经落在列表/队列里，它们才是快进快退。
+            Action::SeekForward => {
+                if self.state.focus == Focus::Sidebar {
+                    self.state.cycle_focus(true);
+                } else {
+                    self.seek_by(SEEK_STEP_MS);
+                }
+            }
             Action::SeekTo(position_ms) => self.seek_to(position_ms),
             // MPRIS 的 Seek：一次带数值的相对跳转（见 keymap::Action::SeekBy）
             Action::SeekBy(delta_ms) => self.seek_by(delta_ms),
             Action::LoadMoreSearch => self.load_more_search(),
-            Action::SeekBackward => self.seek_by(-SEEK_STEP_MS),
+            Action::SeekBackward => {
+                if self.state.focus == Focus::Sidebar {
+                    self.state.cycle_focus(false);
+                } else {
+                    self.seek_by(-SEEK_STEP_MS);
+                }
+            }
             Action::VolumeUp => self.adjust_volume(VOLUME_STEP),
             Action::VolumeDown => self.adjust_volume(-VOLUME_STEP),
             Action::ToggleMute => self.toggle_mute(),
@@ -1525,6 +1536,56 @@ impl App {
     ///
     /// 只换「去哪儿请求 + 带什么身份」，**不碰播放队列、不打断当前曲目**——
     /// 正在放的音频已经在本地缓存里，换音源没有理由把它停掉。
+    /// 数字键 1-9：按当前焦点决定语义。
+    ///
+    /// * 焦点在**侧边栏** → 切到第 N 个标签页（与之前一致，保留肌肉记忆）
+    /// * 焦点在**列表**里 → 跳到当前列表的第 N 项（长列表里比一路按 ↓ 快得多）
+    /// * 焦点在**队列** → 跳到队列的第 N 首
+    fn handle_digit(&mut self, number: u8) {
+        if self.state.focus == Focus::Sidebar {
+            if let Some(tab) = Tab::from_number(number) {
+                self.switch_tab(tab);
+            }
+            return;
+        }
+
+        let index = number.saturating_sub(1) as usize;
+        match self.state.focus {
+            Focus::Queue => {
+                select_first(&mut self.state.queue_cursor, self.state.queue.len());
+                for _ in 0..index {
+                    move_selection(&mut self.state.queue_cursor, self.state.queue.len(), 1);
+                }
+            }
+            Focus::Primary if self.state.tab == Tab::Sources => {
+                let len = self.state.config.sources.ordered().len();
+                self.state
+                    .sources_cursor
+                    .select(Some(index.min(len.max(1) - 1)));
+            }
+            Focus::Primary => self.jump_entry_index(index),
+            Focus::Secondary => {
+                if let Some(list) = self.state.songs_mut() {
+                    list.select(index);
+                }
+            }
+            // 侧边栏 handled earlier
+            Focus::Sidebar => {}
+        }
+    }
+
+    /// 跳到「条目列表」（歌单/歌手/榜单）的第 `index` 项。
+    fn jump_entry_index(&mut self, index: usize) {
+        match self.state.tab {
+            Tab::Playlists => self.state.playlists.list.select(index),
+            Tab::Artists => self.state.artists.list.select(index),
+            Tab::Ranks => self.state.ranks.list.select(index),
+            Tab::Cloud => self.state.cloud.list.select(index),
+            // 搜索页的主区是输入框，没有条目列表可跳
+            Tab::Search | Tab::Visualizer | Tab::Sources => {}
+        }
+    }
+
     /// `v`：打开音源管理页。
     ///
     /// 以前这个键是「循环切到下一个音源」，但音源多了之后循环切很盲目——用户

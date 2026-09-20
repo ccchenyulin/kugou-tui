@@ -132,8 +132,9 @@ pub enum Action {
     /// 音源管理页：把选中音源的优先级往上 / 往下调。
     RaiseSourcePriority,
     LowerSourcePriority,
-    /// 数字键切换顶层标签页。
-    SwitchTab(u8),
+    /// 按下了数字 1-9。语义由 App 按当前焦点决定：
+    /// 侧边栏 → 切标签页；列表内 → 跳到第 N 项。
+    Digit(u8),
 
     /// 未绑定。
     None,
@@ -428,7 +429,9 @@ fn resolve_normal(key: KeyEvent) -> Action {
         KeyCode::Char('K') => Action::RaiseSourcePriority,
         KeyCode::Char('J') => Action::LowerSourcePriority,
 
-        KeyCode::Char(digit @ '1'..='6') => Action::SwitchTab(digit as u8 - b'0'),
+        // 1-9 的语义按焦点决定：侧边栏里是切标签页，列表里是跳到对应项。
+        // keymap 只产出「按了数字几」，具体含义交给 App 层判断。
+        KeyCode::Char(digit @ '1'..='9') => Action::Digit(digit as u8 - b'0'),
         // Shift 组合的字母键已被上面的显式分支吃掉，这里兜底避免误触发
         KeyCode::Char(_) if shift => Action::None,
         _ => Action::None,
@@ -443,7 +446,7 @@ pub const CHEATSHEET: &[(&str, &str, &str)] = &[
     ("v", "切换音源", "全局"),
     // Tab::ALL 现在是 6 项（第 6 个是可视化页）。改标签页数量时必须同步这里，
     // 否则帮助面板会指向一个不存在的键——用户照着按却没反应，很难自查。
-    ("1..6", "切换顶层标签页", "全局"),
+    ("1..9", "侧边栏切换标签页 / 列表内跳到第 N 项", "导航"),
     ("Tab / S-Tab", "切换焦点区域", "导航"),
     ("j / k", "上下移动", "导航"),
     ("g / G", "跳到首行 / 末行", "导航"),
@@ -466,7 +469,7 @@ pub const CHEATSHEET: &[(&str, &str, &str)] = &[
     ("N", "新建云端歌单", "业务"),
     ("Space", "播放 / 暂停", "播放"),
     ("n / p", "下一首 / 上一首", "播放"),
-    ("← / →", "快退 / 快进 5 秒", "播放"),
+    ("← / →", "列表内快退/快进 5 秒；侧边栏中移动焦点", "播放"),
     ("+ / -", "音量增减 5%", "播放"),
     ("m", "静音开关", "播放"),
     ("r", "循环播放模式", "播放"),
