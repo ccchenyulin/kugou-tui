@@ -90,6 +90,10 @@ impl App {
         )
         .context("初始化 API 客户端失败")?;
 
+        // 自定义键位要在第一次读键之前装好，否则首个按键会落到默认键表。
+        // 装了多少条只在日志里记，不打扰界面。
+        let _custom_keys = crate::keymap::install_custom(&config.keymap);
+
         let audio = AudioHandle::spawn(bus.clone(), config.volume);
         let cache = AudioCache::new(config.cache_dir.clone(), config.cache_limit_mib);
         let downloader = Downloader::new(config.proxy.as_deref()).context("初始化下载器失败")?;

@@ -9,6 +9,9 @@
 //! 之所以把「模式判断」放在这里而不是让 UI 层各自处理，是为了让快捷键表只有一份，
 //! 帮助面板与真实行为不会漂移。
 
+use std::collections::{BTreeMap, HashMap};
+use std::sync::OnceLock;
+
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,10 +140,199 @@ pub enum Action {
 }
 
 /// 把一个按键事件翻译成语义动作。
+/// 自定义键位表。启动时一次性装好，之后只读。
+///
+/// 用 `OnceLock` 而不是把它塞进 `AppState`：`resolve` 是个纯函数式的入口，
+/// 被输入处理链路直接调用，为它单独传递上下文要改动所有调用点，不划算。
+static CUSTOM: OnceLock<HashMap<(KeyCode, KeyModifiers), Action>> = OnceLock::new();
+
+/// 安装配置文件里的自定义键位。
+///
+/// # 冲突与非法
+///
+/// * **按键冲突**（两个动作绑到同一个键）：后配置的覆盖先配置的，并记 WARN——
+///   静默丢一个会让用户以为是程序坏了。
+/// * **非法**：动作名不存在、按键名无法解析、或动作带参数（`SwitchTab` 等
+///   需要数字的动作）→ 跳过该条并记 WARN，**不中断启动**。键位错了只是不顺手，
+///   不该让程序起不来。
+///
+/// 返回实际生效的条数，便于启动时在日志里核对。
+pub fn install_custom(bindings: &BTreeMap<String, String>) -> usize {
+    let mut table: HashMap<(KeyCode, KeyModifiers), Action> = HashMap::new();
+
+    for (action_name, key_name) in bindings {
+        let action = match action_from_name(action_name) {
+            Some(action) => action,
+            None => {
+                crate::logger::tlog!(
+                    crate::logger::LEVEL_WARN,
+                    "键位配置：未知动作 {action_name:?}（键 {key_name:?}），已忽略"
+                );
+                continue;
+            }
+        };
+        let (code, modifiers) = match parse_key(key_name) {
+            Some(parsed) => parsed,
+            None => {
+                crate::logger::tlog!(
+                    crate::logger::LEVEL_WARN,
+                    "键位配置：无法解析按键 {key_name:?}（动作 {action_name}），已忽略"
+                );
+                continue;
+            }
+        };
+
+        if let Some(previous) = table.insert((code, modifiers), action) {
+            crate::logger::tlog!(
+                crate::logger::LEVEL_WARN,
+                "键位配置：{key_name:?} 同时绑定了 {action_name} 与之前的 {previous:?}，以 {action_name} 为准"
+            );
+        }
+    }
+
+    let installed = table.len();
+    if installed > 0 {
+        let _ = CUSTOM.set(table);
+        crate::logger::tlog!(crate::logger::LEVEL_INFO, "已加载 {installed} 条自定义键位");
+    }
+    installed
+}
+
+/// 动作名（snake_case）→ [`Action`]。
+///
+/// 带参数的动作（`SwitchTab` / `SeekTo` / `SeekBy` / `Char`）不在其中：
+/// 它们的值来自运行时，配置文件里写不出完整语义。
+pub fn action_from_name(name: &str) -> Option<Action> {
+    Some(match name {
+        "quit" => Action::Quit,
+        "force_quit" => Action::ForceQuit,
+        "help" => Action::Help,
+        "move_up" => Action::MoveUp,
+        "move_down" => Action::MoveDown,
+        "move_top" => Action::MoveTop,
+        "move_bottom" => Action::MoveBottom,
+        "page_up" => Action::PageUp,
+        "page_down" => Action::PageDown,
+        "focus_next" => Action::FocusNext,
+        "focus_prev" => Action::FocusPrev,
+        "submit" => Action::Submit,
+        "cancel" => Action::Cancel,
+        "backspace" => Action::Backspace,
+        "delete" => Action::Delete,
+        "cursor_left" => Action::CursorLeft,
+        "cursor_right" => Action::CursorRight,
+        "cursor_home" => Action::CursorHome,
+        "cursor_end" => Action::CursorEnd,
+        "play_pause" => Action::PlayPause,
+        "next" => Action::Next,
+        "prev" => Action::Prev,
+        "seek_forward" => Action::SeekForward,
+        "seek_backward" => Action::SeekBackward,
+        "load_more_search" => Action::LoadMoreSearch,
+        "volume_up" => Action::VolumeUp,
+        "volume_down" => Action::VolumeDown,
+        "toggle_mute" => Action::ToggleMute,
+        "cycle_playback_mode" => Action::CyclePlaybackMode,
+        "toggle_lyric_panel" => Action::ToggleLyricPanel,
+        "lyric_delay" => Action::LyricDelay,
+        "lyric_advance" => Action::LyricAdvance,
+        "open_search" => Action::OpenSearch,
+        "reload" => Action::Reload,
+        "queue_append" => Action::QueueAppend,
+        "add_all_to_queue" => Action::AddAllToQueue,
+        "queue_play_next" => Action::QueuePlayNext,
+        "remove_from_queue" => Action::RemoveFromQueue,
+        "clear_queue" => Action::ClearQueue,
+        "clear_cache" => Action::ClearCache,
+        "toggle_sort_order" => Action::ToggleSortOrder,
+        "open_ranks" => Action::OpenRanks,
+        "open_cloud" => Action::OpenCloud,
+        "login" => Action::Login,
+        "cycle_artist_filter" => Action::CycleArtistFilter,
+        "sync_to_cloud" => Action::SyncToCloud,
+        "add_to_cloud" => Action::AddToCloud,
+        "remove_from_cloud" => Action::RemoveFromCloud,
+        "delete_cloud_playlist" => Action::DeleteCloudPlaylist,
+        "new_cloud_playlist" => Action::NewCloudPlaylist,
+        "toggle_sidebar" => Action::ToggleSidebar,
+        "switch_source" => Action::SwitchSource,
+        "set_default_source" => Action::SetDefaultSource,
+        "raise_source_priority" => Action::RaiseSourcePriority,
+        "lower_source_priority" => Action::LowerSourcePriority,
+        _ => return None,
+    })
+}
+
+/// 解析按键名 → (键码, 修饰键)。
+///
+/// 支持单字符（`q` / `Q` / `/`）、命名键（`space` / `enter` / `up` / `f1`…）
+/// 以及 `ctrl+` / `alt+` / `shift+` 前缀。
+fn parse_key(text: &str) -> Option<(KeyCode, KeyModifiers)> {
+    let text = text.trim();
+    let (modifiers, key) = if let Some(rest) = text.strip_prefix("ctrl+") {
+        (KeyModifiers::CONTROL, rest)
+    } else if let Some(rest) = text.strip_prefix("alt+") {
+        (KeyModifiers::ALT, rest)
+    } else if let Some(rest) = text.strip_prefix("shift+") {
+        (KeyModifiers::SHIFT, rest)
+    } else {
+        (KeyModifiers::NONE, text)
+    };
+
+    let code = match key {
+        "space" | " " => KeyCode::Char(' '),
+        "enter" | "return" | "cr" => KeyCode::Enter,
+        "esc" | "escape" => KeyCode::Esc,
+        "tab" => KeyCode::Tab,
+        "backtab" => KeyCode::BackTab,
+        "up" => KeyCode::Up,
+        "down" => KeyCode::Down,
+        "left" => KeyCode::Left,
+        "right" => KeyCode::Right,
+        "home" => KeyCode::Home,
+        "end" => KeyCode::End,
+        "pageup" | "pgup" => KeyCode::PageUp,
+        "pagedown" | "pgdn" => KeyCode::PageDown,
+        "backspace" | "bs" => KeyCode::Backspace,
+        "delete" | "del" => KeyCode::Delete,
+        "insert" | "ins" => KeyCode::Insert,
+        // f1 ~ f12
+        function if function.len() <= 3 && function.starts_with('f') => {
+            let number: u8 = function[1..].parse().ok()?;
+            if (1..=12).contains(&number) {
+                KeyCode::F(number)
+            } else {
+                return None;
+            }
+        }
+        single if single.chars().count() == 1 => KeyCode::Char(single.chars().next()?),
+        _ => return None,
+    };
+
+    Some((code, modifiers))
+}
+
+/// 查自定义键位。未安装或没命中返回 `None`。
+fn custom_action(key: KeyEvent) -> Option<Action> {
+    let table = CUSTOM.get()?;
+    table
+        .get(&(key.code, key.modifiers))
+        // 终端对 Shift+字母 通常报「大写 Char + SHIFT」，而配置里写的可能是
+        // 不带修饰的 "Q"。回退一次，两种写法都能命中。
+        .or_else(|| table.get(&(key.code, KeyModifiers::NONE)))
+        .copied()
+}
+
 pub fn resolve(key: KeyEvent, mode: KeyMode) -> Action {
-    // Ctrl+C 在任何模式下都表示「立刻退出」。
+    // Ctrl+C 在任何模式下都表示「立刻退出」，且不可被自定义覆盖：
+    // 它是唯一的强制退出通道，被绑走会让用户在异常时出不来。
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return Action::ForceQuit;
+    }
+
+    // 自定义键位优先于默认键表
+    if let Some(action) = custom_action(key) {
+        return action;
     }
 
     match mode {
@@ -281,3 +473,62 @@ pub const CHEATSHEET: &[(&str, &str, &str)] = &[
     ("l", "歌词面板开关", "播放"),
     ("[ / ]", "歌词延后 / 提前 100ms", "播放"),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_single_chars_named_keys_and_modifiers() {
+        assert_eq!(
+            parse_key("q"),
+            Some((KeyCode::Char('q'), KeyModifiers::NONE))
+        );
+        assert_eq!(
+            parse_key("Q"),
+            Some((KeyCode::Char('Q'), KeyModifiers::NONE))
+        );
+        assert_eq!(
+            parse_key("/"),
+            Some((KeyCode::Char('/'), KeyModifiers::NONE))
+        );
+        assert_eq!(
+            parse_key("space"),
+            Some((KeyCode::Char(' '), KeyModifiers::NONE))
+        );
+        assert_eq!(
+            parse_key("enter"),
+            Some((KeyCode::Enter, KeyModifiers::NONE))
+        );
+        assert_eq!(parse_key("up"), Some((KeyCode::Up, KeyModifiers::NONE)));
+        assert_eq!(parse_key("f1"), Some((KeyCode::F(1), KeyModifiers::NONE)));
+        assert_eq!(
+            parse_key("ctrl+n"),
+            Some((KeyCode::Char('n'), KeyModifiers::CONTROL))
+        );
+        // 越界的功能键要拒绝，不能悄悄变成别的键
+        assert_eq!(parse_key("f99"), None);
+        assert_eq!(parse_key("不存在的键"), None);
+    }
+
+    #[test]
+    fn action_names_round_trip() {
+        assert_eq!(action_from_name("quit"), Some(Action::Quit));
+        assert_eq!(action_from_name("play_pause"), Some(Action::PlayPause));
+        assert_eq!(
+            action_from_name("set_default_source"),
+            Some(Action::SetDefaultSource)
+        );
+        // 带参数的动作不在映射里：配置文件写不出完整语义
+        assert_eq!(action_from_name("switch_tab"), None);
+        assert_eq!(action_from_name("不存在的动作"), None);
+    }
+
+    /// Ctrl+C 是唯一的强制退出通道，自定义键位不能把它抢走。
+    #[test]
+    fn ctrl_c_cannot_be_rebound() {
+        let forced = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(resolve(forced, KeyMode::Normal), Action::ForceQuit);
+        assert_eq!(resolve(forced, KeyMode::TextInput), Action::ForceQuit);
+    }
+}

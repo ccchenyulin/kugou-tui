@@ -88,6 +88,13 @@ pub struct Config {
     /// 是否强制使用 16 色板（适配老终端）。
     pub basic_color: bool,
 
+    /// 自定义键位：`动作名 -> 按键`，例如 `quit = "Q"`、`open_sources = "s"`。
+    ///
+    /// 动作名是 [`crate::keymap::Action`] 变体的 snake_case（见 keymap.rs 的
+    /// `action_from_name`）。未列出的动作沿用默认键位，因此老配置文件不需要改。
+    #[serde(default)]
+    pub keymap: std::collections::BTreeMap<String, String>,
+
     /// 各音源的连接与身份配置，以及当前选中的音源。
     ///
     /// 切换音源时，`api_base` / `cookie` / `dfid` 会从选中的音源同步过来。
@@ -111,6 +118,7 @@ impl Default for Config {
             proxy: None,
             quality: DEFAULT_QUALITY.to_string(),
             basic_color: false,
+            keymap: std::collections::BTreeMap::new(),
             sources: SourceSet::default(),
         }
     }
