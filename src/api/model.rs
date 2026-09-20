@@ -820,14 +820,17 @@ mod tests {
                 LyricLine {
                     time_ms: 1_000,
                     text: "第一句".into(),
+                    translation: None,
                 },
                 LyricLine {
                     time_ms: 5_000,
                     text: "第二句".into(),
+                    translation: None,
                 },
                 LyricLine {
                     time_ms: 9_000,
                     text: "第三句".into(),
+                    translation: None,
                 },
             ],
         };

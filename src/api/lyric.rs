@@ -244,89 +244,6 @@ fn clean_krc_markup(text: &str) -> String {
     output.trim().to_string()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn parses_plain_lrc() {
-        let text = "[ti:测试]\n[ar:歌手]\n[00:01.00]第一句\n[00:05.50]第二句\n";
-        let lyric = parse_lrc(text);
-        assert_eq!(lyric.lines.len(), 2);
-        assert_eq!(lyric.lines[0].time_ms, 1_000);
-        assert_eq!(lyric.lines[1].time_ms, 5_500);
-        assert_eq!(lyric.lines[1].text, "第二句");
-    }
-
-    #[test]
-    fn expands_multiple_tags_on_one_line() {
-        let lyric = parse_lrc("[00:01.00][00:05.00]副歌\n");
-        assert_eq!(lyric.lines.len(), 2);
-        assert_eq!(lyric.lines[0].time_ms, 1_000);
-        assert_eq!(lyric.lines[1].time_ms, 5_000);
-        assert_eq!(lyric.lines[0].text, lyric.lines[1].text);
-    }
-
-    #[test]
-    fn handles_varying_fraction_widths() {
-        assert_eq!(parse_time_tag("00:01"), Some(1_000));
-        assert_eq!(parse_time_tag("00:01.5"), Some(1_500));
-        assert_eq!(parse_time_tag("00:01.23"), Some(1_230));
-        assert_eq!(parse_time_tag("00:01.234"), Some(1_234));
-        assert_eq!(parse_time_tag("01:02.3456"), Some(62_345));
-    }
-
-    #[test]
-    fn rejects_metadata_tags() {
-        assert_eq!(parse_time_tag("ti:标题"), None);
-        assert_eq!(parse_time_tag("ar:歌手"), None);
-        // `[language:base64...]` 是 MoeKoeMusic 用的翻译元信息
-        assert_eq!(parse_time_tag("language:eyJhbGciOi"), None);
-        // 秒数越界
-        assert_eq!(parse_time_tag("00:99.00"), None);
-    }
-
-    #[test]
-    fn parses_krc_style_timestamps() {
-        let lyric = parse_lrc("[1234,567]逐字歌词\n");
-        assert_eq!(lyric.lines.len(), 1);
-        assert_eq!(lyric.lines[0].time_ms, 1_234);
-    }
-
-    #[test]
-    fn strips_krc_inline_markup() {
-        let lyric = parse_lrc("[1000,500]海<100,200,0>阔<300,200,0>天空\n");
-        assert_eq!(lyric.lines[0].text, "海阔天空");
-    }
-
-    #[test]
-    fn skips_lines_without_text() {
-        let lyric = parse_lrc("[00:01.00]\n[00:02.00]有词\n");
-        assert_eq!(lyric.lines.len(), 1);
-        assert_eq!(lyric.lines[0].text, "有词");
-    }
-
-    #[test]
-    fn sorts_out_of_order_lines() {
-        let lyric = parse_lrc("[00:05.00]后\n[00:01.00]前\n");
-        assert_eq!(lyric.lines[0].text, "前");
-    }
-
-    #[test]
-    fn extracts_decoded_content_from_json() {
-        let root = json!({"status": 1, "decodeContent": "[00:01.00]嗨\n"});
-        assert_eq!(extract_lyric_text(&root), "[00:01.00]嗨");
-    }
-
-    #[test]
-    fn decodes_base64_content_when_decode_content_absent() {
-        // "abc" 的 base64
-        let root = json!({"content": "YWJj"});
-        assert_eq!(extract_lyric_text(&root), "abc");
-    }
-}
-
 /// 从 KRC 的 `[language:base64]` 标签里取出译文，按行挂到歌词上。
 ///
 /// 标签形如：
@@ -411,5 +328,88 @@ fn flatten_lyric_content(entry: &serde_json::Value) -> Option<String> {
             Some(text)
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parses_plain_lrc() {
+        let text = "[ti:测试]\n[ar:歌手]\n[00:01.00]第一句\n[00:05.50]第二句\n";
+        let lyric = parse_lrc(text);
+        assert_eq!(lyric.lines.len(), 2);
+        assert_eq!(lyric.lines[0].time_ms, 1_000);
+        assert_eq!(lyric.lines[1].time_ms, 5_500);
+        assert_eq!(lyric.lines[1].text, "第二句");
+    }
+
+    #[test]
+    fn expands_multiple_tags_on_one_line() {
+        let lyric = parse_lrc("[00:01.00][00:05.00]副歌\n");
+        assert_eq!(lyric.lines.len(), 2);
+        assert_eq!(lyric.lines[0].time_ms, 1_000);
+        assert_eq!(lyric.lines[1].time_ms, 5_000);
+        assert_eq!(lyric.lines[0].text, lyric.lines[1].text);
+    }
+
+    #[test]
+    fn handles_varying_fraction_widths() {
+        assert_eq!(parse_time_tag("00:01"), Some(1_000));
+        assert_eq!(parse_time_tag("00:01.5"), Some(1_500));
+        assert_eq!(parse_time_tag("00:01.23"), Some(1_230));
+        assert_eq!(parse_time_tag("00:01.234"), Some(1_234));
+        assert_eq!(parse_time_tag("01:02.3456"), Some(62_345));
+    }
+
+    #[test]
+    fn rejects_metadata_tags() {
+        assert_eq!(parse_time_tag("ti:标题"), None);
+        assert_eq!(parse_time_tag("ar:歌手"), None);
+        // `[language:base64...]` 是 MoeKoeMusic 用的翻译元信息
+        assert_eq!(parse_time_tag("language:eyJhbGciOi"), None);
+        // 秒数越界
+        assert_eq!(parse_time_tag("00:99.00"), None);
+    }
+
+    #[test]
+    fn parses_krc_style_timestamps() {
+        let lyric = parse_lrc("[1234,567]逐字歌词\n");
+        assert_eq!(lyric.lines.len(), 1);
+        assert_eq!(lyric.lines[0].time_ms, 1_234);
+    }
+
+    #[test]
+    fn strips_krc_inline_markup() {
+        let lyric = parse_lrc("[1000,500]海<100,200,0>阔<300,200,0>天空\n");
+        assert_eq!(lyric.lines[0].text, "海阔天空");
+    }
+
+    #[test]
+    fn skips_lines_without_text() {
+        let lyric = parse_lrc("[00:01.00]\n[00:02.00]有词\n");
+        assert_eq!(lyric.lines.len(), 1);
+        assert_eq!(lyric.lines[0].text, "有词");
+    }
+
+    #[test]
+    fn sorts_out_of_order_lines() {
+        let lyric = parse_lrc("[00:05.00]后\n[00:01.00]前\n");
+        assert_eq!(lyric.lines[0].text, "前");
+    }
+
+    #[test]
+    fn extracts_decoded_content_from_json() {
+        let root = json!({"status": 1, "decodeContent": "[00:01.00]嗨\n"});
+        assert_eq!(extract_lyric_text(&root), "[00:01.00]嗨");
+    }
+
+    #[test]
+    fn decodes_base64_content_when_decode_content_absent() {
+        // "abc" 的 base64
+        let root = json!({"content": "YWJj"});
+        assert_eq!(extract_lyric_text(&root), "abc");
     }
 }
