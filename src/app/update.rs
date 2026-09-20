@@ -236,12 +236,16 @@ impl App {
             let action_kind = prompt.action;
             match action {
                 Action::Char(character) => {
-                    let prompt = self.state.prompt.as_mut().expect("刚检查过");
-                    prompt.buffer.push(character);
+                    // 上面已确认 prompt 存在，但这里不用 expect：契约一旦变化
+                    // 就是整个程序 panic，不划算。取不到就当作没按这个键。
+                    if let Some(prompt) = self.state.prompt.as_mut() {
+                        prompt.buffer.push(character);
+                    }
                 }
                 Action::Backspace => {
-                    let prompt = self.state.prompt.as_mut().expect("刚检查过");
-                    prompt.buffer.pop();
+                    if let Some(prompt) = self.state.prompt.as_mut() {
+                        prompt.buffer.pop();
+                    }
                 }
                 Action::Submit => {
                     let Some(prompt) = self.state.prompt.take() else {
