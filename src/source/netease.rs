@@ -98,6 +98,7 @@ fn song_from_json(value: &Value) -> Option<Song> {
         // 网易云不返回版权标记，按可播处理；取不到链接时会有明确报错
         privilege: None,
         album_audio_id: 0,
+        audio_id: 0,
         extra_hashes: Default::default(),
         file_id: None,
         source: crate::source::SourceKind::Netease,

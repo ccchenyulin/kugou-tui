@@ -427,9 +427,23 @@ impl ApiClient {
 
         let mut last_full = None;
         for (hash, q, album_audio_id) in &candidates {
-            let response = self
+            // 单个候选失败（比如服务端对某个 `album_audio_id` 直接 502）**不能**中断
+            // 整个流程——我们要的是「试出第一个能用的组合」，不是「第一个组合必须成功」。
+            // 之前这里用了 `?`，一个 502 就把能播的组合也一起放弃了。
+            let response = match self
                 .request_song_url_with_hash(song, hash, q, album_audio_id, false)
-                .await?;
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    tlog!(
+                        crate::logger::LEVEL_DEBUG,
+                        "/song/url 候选失败（hash={hash} quality={q} aid={album_audio_id}）：{}，继续下一个",
+                        error.user_hint()
+                    );
+                    continue;
+                }
+            };
             if let Some(url) = extract_stream_url(&response) {
                 let degraded = q != quality && VIPER_QUALITIES.contains(&quality);
                 return Ok(StreamUrl {
@@ -445,6 +459,8 @@ impl ApiClient {
         // 完整版拿不到，先记下原因再退到试听片段
         let reason = last_full.as_ref().and_then(|root| self.fail_reason(root));
 
+        // 试听兜底：这一路失败也别抛出去了——上面完整版已经试过一轮，能到这里说明
+        // 全都没成，应该给用户一个**完整的原因**而不是最后这次的网络错误。
         let trial = self
             .request_song_url_with_hash(
                 song,
@@ -453,7 +469,15 @@ impl ApiClient {
                 &song.album_audio_id.to_string(),
                 true,
             )
-            .await?;
+            .await
+            .unwrap_or_else(|error| {
+                tlog!(
+                    crate::logger::LEVEL_DEBUG,
+                    "试听兜底请求失败：{}",
+                    error.user_hint()
+                );
+                Value::Null
+            });
         if let Some(url) = extract_stream_url(&trial) {
             return Ok(StreamUrl {
                 url,
@@ -553,25 +577,42 @@ impl ApiClient {
             return Self::fallback_candidates(song, quality);
         }
 
-        // 每个候选配**两个** `album_audio_id`，都试一遍。
+        // 每个候选配**所有已知的文件标识**，挨个试。
         //
         // 实测（同一首歌，概念版服务端）：
-        //   - 歌单条目给的 `audio_id`（=116104796）→ /song/url 拿到直链 ✅
-        //   - /privilege/lite 返回的那个（=330978610，实为 mixsongid）
-        //     → /song/url 返回 status=3、空 url ❌
+        //   - 歌单条目的 `audio_id`（=116104796）→ /song/url 拿到直链 ✅
+        //   - 同一个条目的 `mixsongid`（=330978610）→ status=3、空 url ❌
+        //   - /privilege/lite 返回的那个也是 mixsongid → 同样失败 ❌
         //
-        // 也就是说 privilege 给的这个字段和 /song/url 认的不是同一个东西，
-        // 光信它会把能播的歌判成下架。所以两个都放进候选，让服务端自己挑。
-        let own = song.album_audio_id.to_string();
-        let mut out = Vec::with_capacity(candidates.len() * 2);
+        // 而搜索接口反过来：`MixSongID` 对、`Audioid` 不一定。两个字段在不同
+        // 接口里各有对错，只信一个就会把一半的歌判成下架。所以全都放进去，
+        // 让服务端挑它认的那个。
+        let mut ids: Vec<String> = Vec::with_capacity(3);
+        for id in [song.album_audio_id, song.audio_id] {
+            if id > 0 {
+                let text = id.to_string();
+                if !ids.contains(&text) {
+                    ids.push(text);
+                }
+            }
+        }
+
+        let mut out = Vec::with_capacity(candidates.len() * (ids.len() + 1));
         for candidate in candidates {
-            out.push((
-                candidate.hash.clone(),
-                candidate.quality.clone(),
-                own.clone(),
-            ));
-            if !candidate.album_audio_id.is_empty() && candidate.album_audio_id != own {
-                out.push((candidate.hash, candidate.quality, candidate.album_audio_id));
+            for id in &ids {
+                out.push((
+                    candidate.hash.clone(),
+                    candidate.quality.clone(),
+                    id.clone(),
+                ));
+            }
+            // privilege 自己给的那个也试一下（可能与上面两个都不同）
+            if !candidate.album_audio_id.is_empty() && !ids.contains(&candidate.album_audio_id) {
+                out.push((
+                    candidate.hash.clone(),
+                    candidate.quality.clone(),
+                    candidate.album_audio_id.clone(),
+                ));
             }
         }
         out
@@ -1111,6 +1152,7 @@ mod tests {
             hash: "PRIMARY_HASH".to_string(),
             album_id: "1".to_string(),
             album_audio_id: 0,
+            audio_id: 0,
             album_name: String::new(),
             singers: vec![],
             duration_ms: 0,
@@ -1144,6 +1186,7 @@ mod tests {
             hash: "ONLY_HASH".to_string(),
             album_id: String::new(),
             album_audio_id: 0,
+            audio_id: 0,
             album_name: String::new(),
             singers: vec![],
             duration_ms: 0,
@@ -1187,6 +1230,7 @@ mod tests {
             hash: "h_128".to_string(),
             album_id: String::new(),
             album_audio_id: 116104796,
+            audio_id: 0,
             album_name: String::new(),
             singers: vec![],
             duration_ms: 0,

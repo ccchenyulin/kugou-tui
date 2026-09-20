@@ -38,8 +38,23 @@ pub struct Song {
     /// 音频文件 hash，是 `/song/url`、`/search/lyric` 的唯一标识。
     pub hash: String,
     pub album_id: String,
-    /// `album_audio_id`（也叫 `MixSongID`）。带上它能显著提高取播放链接的成功率。
+    /// `album_audio_id`（也叫 `MixSongID`）。取播放链接时要用它。
     pub album_audio_id: i64,
+    /// 同一首歌的**另一个**文件标识（`audio_id` / `Audioid`）。
+    ///
+    /// # 为什么要两个都留着
+    ///
+    /// 实测这两个字段在不同接口里各有对错，而 `/song/url` 只认其中**一个**：
+    ///
+    /// * 歌单条目（`/playlist/track/all/new`）：`audio_id` 能拿直链，
+    ///   `mixsongid` 会让服务端返回 `status=3`、空 url ——**同一首歌**换一个 id
+    ///   就从「下架」变成「能播」。
+    /// * 搜索结果（`/search`）：反过来 `MixSongID` 是对的。
+    ///
+    /// 之前只存一个，等于把一半的歌判成下架。现在两个都留，取链接时挨个试。
+    /// 没有这个字段的接口留 0，跳过即可。
+    #[serde(default)]
+    pub audio_id: i64,
     pub album_name: String,
     pub singers: Vec<Singer>,
     pub duration_ms: u64,
@@ -383,6 +398,11 @@ pub fn song_from_json(value: &Value) -> Option<Song> {
         .or_else(|| pick_audio_duration(value))
         .unwrap_or_default();
 
+    // `album_audio_id`：沿用原来「MixSongID 系」的候选键。
+    //
+    // 注意候选键里**刻意不放** `audio_id` ——它在歌单接口里才是正确值，
+    // 而搜索接口里 `MixSongID` 才是。混在同一个字段里必然有一半接口取错，
+    // 所以拆成两个字段分别存，取链接时挨个试。
     let album_audio_id = pick_i64(
         value,
         &[
@@ -391,10 +411,13 @@ pub fn song_from_json(value: &Value) -> Option<Song> {
             "MixSongID",
             "mixsongid",
             "EMixSongID",
-            "audio_id",
         ],
     )
     .unwrap_or_default();
+
+    // `audio_id`：歌单接口（`/playlist/track/all/new`）给的另一个标识。
+    // 实测对下架歌曲它是唯一能拿到直链的那个。
+    let audio_id = pick_i64(value, &["audio_id", "Audioid", "audioid"]).unwrap_or_default();
 
     // 封面可能在顶层、在 `trans_param` 里，也可能在 `album_info` / `albuminfo` 里
     let cover = pick_string(value, &["Image", "img", "cover", "album_image"])
@@ -414,6 +437,7 @@ pub fn song_from_json(value: &Value) -> Option<Song> {
         hash,
         album_id: pick_string(value, &["AlbumID", "album_id"]).unwrap_or_default(),
         album_audio_id,
+        audio_id,
         album_name,
         singers,
         duration_ms,
