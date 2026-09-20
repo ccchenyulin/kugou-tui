@@ -910,14 +910,15 @@ impl AppState {
             Tab::Artists => self.artists.list.select(index),
             Tab::Ranks => self.ranks.list.select(index),
             Tab::Cloud => self.cloud.list.select(index),
-            // 搜索页、可视化页、音源页都没有条目列表
-            Tab::Search
-            | Tab::Home
-            | Tab::Queue
-            | Tab::Lyrics
-            | Tab::Cover
-            | Tab::Visualizer
-            | Tab::Sources => {}
+            // 音源页的「条目」就是音源，点哪行选哪个
+            Tab::Sources => {
+                let len = self.config.sources.ordered().len();
+                if index < len {
+                    self.sources_cursor.select(Some(index));
+                }
+            }
+            // 其余页面没有条目列表
+            Tab::Search | Tab::Home | Tab::Queue | Tab::Lyrics | Tab::Cover | Tab::Visualizer => {}
         }
     }
 

@@ -44,6 +44,12 @@ use crate::logger::tlog;
 
 pub use state::AppState;
 
+/// kitty 终端里封面图片的 ID。
+///
+/// 固定值即可——同一时刻只会显示一张封面，换页时靠它精确删除，
+/// 不会波及终端里其它程序放的图。
+const COVER_IMAGE_ID: u32 = 1;
+
 /// 主循环每帧最多处理的事件数在 [`update`] 里定义。
 pub struct App {
     pub state: AppState,
@@ -225,21 +231,29 @@ impl App {
         if !crate::ui::kitty::is_supported() {
             return Ok(());
         }
-        let Some(area) = self.state.cover_area else {
-            return Ok(());
-        };
-        let Some(png) = self.state.cover.png.as_deref() else {
-            return Ok(());
-        };
-        if area.width == 0 || area.height == 0 {
-            return Ok(());
-        }
 
         use std::io::Write;
         let mut stdout = std::io::stdout();
-        // 移到区域左上角再放图（MoveTo 是 0 基坐标）
-        ratatui::crossterm::execute!(stdout, ratatui::crossterm::cursor::MoveTo(area.x, area.y))?;
-        stdout.write_all(crate::ui::kitty::display_png(png, area.width).as_bytes())?;
+
+        // **先删掉上一帧的图**。kitty 的图片是终端浮层、显示在字符之上，
+        // ratatui 的整屏重绘擦不掉它——只发不删的话，切到别的页面后旧封面
+        // 会留在原地，切几次就叠出好几张（用户实测踩到）。
+        stdout.write_all(crate::ui::kitty::delete_image(COVER_IMAGE_ID).as_bytes())?;
+
+        // 本帧不需要封面（切到了别的页、或这首歌没有封面）时，删掉即可
+        if let (Some(area), Some(png)) = (self.state.cover_area, self.state.cover.png.as_deref()) {
+            if area.width > 0 && area.height > 0 {
+                // 移到区域左上角再放图（MoveTo 是 0 基坐标）
+                ratatui::crossterm::execute!(
+                    stdout,
+                    ratatui::crossterm::cursor::MoveTo(area.x, area.y)
+                )?;
+                stdout.write_all(
+                    crate::ui::kitty::display_png(png, area.width, COVER_IMAGE_ID).as_bytes(),
+                )?;
+            }
+        }
+
         stdout.flush()?;
         Ok(())
     }

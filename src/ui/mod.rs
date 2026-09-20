@@ -204,14 +204,11 @@ fn render_main(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Them
             Tab::Artists => state.artists.list.len(),
             Tab::Ranks => state.ranks.list.len(),
             Tab::Cloud => state.cloud.list.len(),
-            // 搜索页、可视化页、音源页都没有条目列表
-            Tab::Search
-            | Tab::Home
-            | Tab::Queue
-            | Tab::Lyrics
-            | Tab::Cover
-            | Tab::Visualizer
-            | Tab::Sources => 0,
+            // 音源页的「条目列表」就是音源本身——不返回真实长度的话，
+            // 鼠标命中区长度为 0，点上去不会有任何反应
+            Tab::Sources => state.config.sources.ordered().len(),
+            // 其余页面没有条目列表
+            Tab::Search | Tab::Home | Tab::Queue | Tab::Lyrics | Tab::Cover | Tab::Visualizer => 0,
         };
         state.add_hit_zone(
             Rect::new(

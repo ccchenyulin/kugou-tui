@@ -53,7 +53,7 @@ pub fn is_supported() -> bool {
 /// **拉伸**填满那个矩形，而字符格不是正方形（高约为宽的两倍），于是
 /// 「列数 = 行数 × 2」的矩形在像素上并不是方的，方形封面就被拉窄了。
 /// 交给终端自己算比例，怎么都不会变形。
-pub fn display_png(png: &[u8], columns: u16) -> String {
+pub fn display_png(png: &[u8], columns: u16, id: u32) -> String {
     let encoded = base64(png);
     let mut out = String::with_capacity(encoded.len() + 64);
 
@@ -69,7 +69,7 @@ pub fn display_png(png: &[u8], columns: u16) -> String {
         if index == 0 {
             // 只有第一块带控制参数
             out.push_str("\x1b_Ga=T,f=100,");
-            out.push_str(&format!("c={columns},"));
+            out.push_str(&format!("c={columns},i={id},"));
         } else {
             out.push_str("\x1b_G");
         }
@@ -79,6 +79,17 @@ pub fn display_png(png: &[u8], columns: u16) -> String {
     }
 
     out
+}
+
+/// 删除指定 ID 的图片。
+///
+/// **必须每帧调用**：kitty 的图片是终端层面的浮层，显示在字符**之上**，
+/// ratatui 的整屏重绘擦不掉它。只发不删的话，切到别的页面后旧封面会留在
+/// 原地——切几次就叠出好几张。
+///
+/// 按 ID 删而不是删全部：终端里可能有别的程序也放了图，不该波及。
+pub fn delete_image(id: u32) -> String {
+    format!("\x1b_Ga=d,d=i,i={id}\x1b\\")
 }
 
 /// 标准 base64 编码。
@@ -132,19 +143,26 @@ mod tests {
     #[test]
     fn display_sequence_carries_size_and_chunks() {
         let png = vec![0u8; 8];
-        let seq = display_png(&png, 30);
+        let seq = display_png(&png, 30, 1);
         assert!(
-            seq.starts_with("\x1b_Ga=T,f=100,c=30,m=0;"),
-            "首块要带控制参数"
+            seq.starts_with("\x1b_Ga=T,f=100,c=30,i=1,m=0;"),
+            "首块要带控制参数与图片 ID"
         );
         assert!(seq.ends_with("\x1b\\"), "必须以 ST 结束");
+    }
+
+    /// 删除序列必须带上 ID：不带就会把终端里其它程序放的图一并删掉。
+    #[test]
+    fn delete_sequence_targets_specific_image() {
+        let seq = delete_image(7);
+        assert_eq!(seq, "\x1b_Ga=d,d=i,i=7\x1b\\");
     }
 
     #[test]
     fn large_payload_is_split_into_chunks() {
         // 超过一块的阈值，应该出现多条序列且中间块 m=1
         let png = vec![0u8; 8192];
-        let seq = display_png(&png, 10);
+        let seq = display_png(&png, 10, 1);
         assert!(seq.contains("m=1;"), "分块时中间块应为 m=1");
         assert_eq!(seq.matches("\x1b_G").count(), 3, "8192 字节 → 3 块 base64");
     }
