@@ -41,11 +41,15 @@ start_one() {
   fi
 
   mkdir -p "$LOG_DIR"
+  # 端口与平台用命令行参数传，不用 `env`：空平台展开成 `env ""` 会直接报错
+  # （标准版没有 platform，历史上就是栽在这上面）。
   # setsid 让服务脱离当前会话，避免终端退出时被一起回收
   if command -v setsid >/dev/null 2>&1; then
-    ( cd "$API_DIR" && env "${platform:1}" PORT="$port" setsid nohup node app.js >>"$log" 2>&1 </dev/null & )
+    ( cd "$API_DIR" && setsid nohup node app.js --port="$port" \
+        ${platform:+--platform=$platform} >>"$log" 2>&1 </dev/null & )
   else
-    ( cd "$API_DIR" && env "${platform:1}" PORT="$port" nohup node app.js >>"$log" 2>&1 </dev/null & )
+    ( cd "$API_DIR" && nohup node app.js --port="$port" \
+        ${platform:+--platform=$platform} >>"$log" 2>&1 </dev/null & )
   fi
 
   for _ in $(seq 1 40); do
@@ -65,9 +69,9 @@ start_one() {
 case "${1:-start}" in
   start)
     printf '启动 KuGouMusicApi（%s）\n' "$API_DIR"
-    # 平台串以 " " 开头是为了让 env 把它当独立参数；标准版不设 platform
-    start_one "$STANDARD_PORT" " " "$LOG_DIR/api.log"
-    start_one "$LITE_PORT" " platform=lite" "$LOG_DIR/api-lite.log"
+    # 标准版不传 platform（服务端默认就是手机版）
+    start_one "$STANDARD_PORT" "" "$LOG_DIR/api.log"
+    start_one "$LITE_PORT" "lite" "$LOG_DIR/api-lite.log"
     printf '标准版 :%s ／ 概念版 :%s\n' "$STANDARD_PORT" "$LITE_PORT"
     ;;
 
@@ -84,9 +88,25 @@ case "${1:-start}" in
     ;;
 
   stop)
-    # 只杀本目录下的 app.js，避免误伤其它 Node 进程
-    pkill -f "node app.js" 2>/dev/null || true
-    printf '已停止两个实例\n'
+    # 只杀 `node app.js` 起的实例，避免误伤其它 Node 进程。
+    #
+    # pattern 有两条硬性要求，都是实测踩出来的：
+    #
+    # 1. **必须锚定 `^`**。`-f` 匹配的是完整命令行，不锚定的话任何「命令行里含
+    #    这段文本」的进程都会中招——包括正在执行这条命令的 shell 自己（它的
+    #    cmdline 里就有这串字）。实测 `pgrep -af 'node app.js'` 会把
+    #    `bash -c "... node app.js ..."` 一起列出来，等于自杀。
+    # 2. **绝不能为空**。空 pattern 会匹配每一个进程（内核线程的 cmdline 是空的，
+    #    所以连 kthreadd 都会命中），pkill 就从 pid 1 开始挨个发信号。
+    targets=$(pgrep -f '^node app\.js' 2>/dev/null || true)
+    if [ -z "$targets" ]; then
+      printf '没有正在运行的实例\n'
+    else
+      # shellcheck disable=SC2086
+      kill $targets 2>/dev/null || true
+      printf '已停止 %s 个实例：%s\n' \
+        "$(printf '%s\n' "$targets" | wc -l)" "$(printf '%s' "$targets" | tr '\n' ' ')"
+    fi
     ;;
 
   *)

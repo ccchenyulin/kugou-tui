@@ -39,15 +39,51 @@ fi
 #
 # 这里解析出的地址仅供探测服务是否存活；解析不到就退回默认端口。
 config_file="${XDG_CONFIG_HOME:-$HOME/.config}/kugou-tui/config.toml"
+
+# 当前选中的音源（值形如 `kugou` / `kugou_concept`）。
+#
+# 认不出来就按标准版处理——那也是服务端的默认值。
+ACTIVE_SOURCE=$(sed -n 's/^[[:space:]]*active[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+  "$config_file" 2>/dev/null | head -n 1)
+
+# 取**选中音源**档案里的 api_base，而不是顶层的那个。
+#
+# 顶层 api_base 有可能是脏的：用 `--api-base` 临时指向别处后退出，它会跟着写进
+# 配置文件，而选中音源没变——于是「顶层写着 :3000、实际用的是概念版 :3001」。
+# 启动器若信了顶层值，就会把服务起在错误的端口上，探活永远过不去。
+source_api_base() {
+  sed -n "/^\[sources\.${1}\]/,/^\[sources\./p" "$config_file" 2>/dev/null |
+    sed -n 's/^[[:space:]]*api_base[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
+}
+
 if [ -n "${KUGOU_API_BASE:-}" ]; then
   CHECK_BASE="$KUGOU_API_BASE"
-elif [ -r "$config_file" ]; then
-  CHECK_BASE=$(sed -n 's/^[[:space:]]*api_base[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
-    "$config_file" | head -n 1)
-  CHECK_BASE="${CHECK_BASE:-http://127.0.0.1:3000}"
 else
-  CHECK_BASE="http://127.0.0.1:3000"
+  CHECK_BASE=$(source_api_base "$ACTIVE_SOURCE")
+  if [ -z "$CHECK_BASE" ] && [ -r "$config_file" ]; then
+    # 退回顶层值（老配置可能还没有 sources 段）
+    CHECK_BASE=$(sed -n 's/^[[:space:]]*api_base[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+      "$config_file" | head -n 1)
+  fi
+  CHECK_BASE="${CHECK_BASE:-http://127.0.0.1:3000}"
 fi
+
+# 拉起服务时要传的端口与平台。
+#
+# 平台不能省：酷狗两个平台是两套鉴权体系，服务端靠 `platform` 区分（lite = 概念版）。
+# 以前这里是无参数拉起，等于永远起的是标准版——当前音源若是概念版（:3001），
+# 探活就一直失败，20 秒后报「服务启动失败」，程序根本进不去。
+API_PORT=$(printf '%s' "$CHECK_BASE" | sed -n 's#.*:\([0-9]\{1,\}\).*#\1#p')
+API_PORT="${API_PORT:-3000}"
+
+# 从配置的 `sources.active` 判断当前音源（值形如 `kugou` / `kugou_concept`）。
+# 认不出来就按标准版处理——那也是服务端的默认值。
+ACTIVE_SOURCE=$(sed -n 's/^[[:space:]]*active[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+  "$config_file" 2>/dev/null | head -n 1)
+case "$ACTIVE_SOURCE" in
+  kugou_concept) API_PLATFORM="lite" ;;
+  *) API_PLATFORM="" ;;
+esac
 
 # 用本地静态页做健康检查：/register/dev 会真的去请求酷狗服务器（冷缓存时 1 秒以上），
 # 而 `/` 由 express.static 直接吐出来，是纯本地操作。顺手校验内容，确认监听的是本服务。
@@ -61,13 +97,17 @@ if ! api_alive; then
     exit 1
   fi
 
-  printf '\033[36mKuGouMusicApi 未运行，正在启动…\033[0m\n' >&2
+  printf '\033[36mKuGouMusicApi 未运行，正在启动…（端口 %s%s）\033[0m\n' \
+    "$API_PORT" "${API_PLATFORM:+，平台 $API_PLATFORM}" >&2
   mkdir -p "$(dirname "$API_LOG")"
+  # 端口与平台用命令行参数传，不用 env：参数可以留空，`env ""` 反而会报错。
   # setsid 让服务脱离当前会话，避免终端或父进程退出时被一起回收；没有就退回 nohup。
   if command -v setsid >/dev/null 2>&1; then
-    ( cd "$API_DIR" && setsid nohup node app.js >>"$API_LOG" 2>&1 </dev/null & )
+    ( cd "$API_DIR" && setsid nohup node app.js --port="$API_PORT" \
+        ${API_PLATFORM:+--platform=$API_PLATFORM} >>"$API_LOG" 2>&1 </dev/null & )
   else
-    ( cd "$API_DIR" && nohup node app.js >>"$API_LOG" 2>&1 </dev/null & )
+    ( cd "$API_DIR" && nohup node app.js --port="$API_PORT" \
+        ${API_PLATFORM:+--platform=$API_PLATFORM} >>"$API_LOG" 2>&1 </dev/null & )
   fi
 
   for _ in $(seq 1 40); do
