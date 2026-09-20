@@ -12,7 +12,7 @@
 //!
 //! 接口路径全部对照 <https://github.com/MakcRe/KuGouMusicApi> 的 `docs/README.md` 核对过。
 
-mod catalog;
+pub(crate) mod catalog;
 mod client;
 /// 登录与云端歌单写操作。
 pub mod cloud;

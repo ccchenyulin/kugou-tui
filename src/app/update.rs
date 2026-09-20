@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use ratatui::crossterm::event::MouseEvent;
 
+use crate::api::catalog::PAGE_LIMIT;
 use crate::api::cloud::QrStatus;
 use crate::api::model::{Artist, Playlist, RankBoard, Song};
 use crate::app::App;
@@ -1095,8 +1096,42 @@ impl App {
 
         self.runtime.spawn(async move {
             // 自建/收藏歌单走新版接口（按数字 listid），公开歌单走 global_collection_id
-            let result = match playlist.list_id.filter(|_| playlist.is_own) {
-                // 取全：歌单接口每页硬限 30，只取第一页会漏掉后面几百首
+            let is_own = playlist.list_id.filter(|_| playlist.is_own);
+
+            // ---- 首屏：先只取第一页，让界面立刻有内容 ----
+            //
+            // 大歌单（几百首）即使并发翻页也要好几秒，这段时间界面只有一个"载入中"，
+            // 体验很差。学 MoeKoeMusic 的做法：先给首屏，剩下的后台继续取。
+            // 它那边是滚动到底再加载；我们一次性取完，但**先让用户看到东西**。
+            let first = match is_own {
+                Some(list_id) => api.user_playlist_tracks(list_id, 1, PAGE_LIMIT).await,
+                None => api.playlist_tracks(&playlist.id, 1, PAGE_LIMIT).await,
+            };
+
+            match first {
+                Ok(songs) => {
+                    let has_more = songs.len() >= PAGE_LIMIT as usize;
+                    bus.emit(Loaded::PlaylistTracks {
+                        playlist: playlist.clone(),
+                        songs,
+                        source,
+                    });
+                    // 不足一页说明这首页就是全部，没必要再取
+                    if !has_more {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    bus.fail(format!("载入歌单《{}》失败", playlist.name), error);
+                    return;
+                }
+            }
+
+            // ---- 后台继续取全部，取到后覆盖为完整列表 ----
+            //
+            // 界面上会看到「30 首」变成「400 首」，是个不错的进度反馈，
+            // 比干等一个"载入中"强。
+            let result = match is_own {
                 Some(list_id) => api.user_playlist_tracks_all(list_id).await,
                 None => api.playlist_tracks_all(&playlist.id).await,
             };
