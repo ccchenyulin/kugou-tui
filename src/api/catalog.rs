@@ -409,13 +409,20 @@ impl ApiClient {
 
         // 蝰蛇系列（viper_clear / viper_atmos / viper_tape）是酷狗的**付费加项**，
         // 需要独立的「蝰蛇 VIP」——普通 VIP / TVIP 账号设了它，上游会直接拒绝
-        // （实测 error_code 31863），表现为「所有歌都播不了」。用户会把播放器坏掉，
-        // 实际只是这一档没权限。
+        // （实测 error_code 31863），表现为「所有歌都播不了」。
         //
-        // 兜底：把标准 128 也塞进候选——viper 系列没权限时降到 128，**宁可音质
-        // 差一点也不能一首都听不了**。
+        // 兜底思路：**降到这个账号实际能用的最高音质**，而不是无条件降到 128。
+        // 用户要的是「能听」，不是「能听但音质最差」——他是 VIP 就该拿到 flac
+        // 而不是 128。所以先从 `/privilege/lite` 给的可用音质里挑一个非蝰蛇的
+        // （那份列表已经是该账号有权限的），实在没有才退到 128。
         if VIPER_QUALITIES.contains(&quality) {
-            candidates.push((song.hash.clone(), VIPER_FALLBACK_QUALITY.to_string()));
+            let fallback = candidates
+                .iter()
+                .map(|(_, candidate_quality)| candidate_quality)
+                .find(|candidate_quality| !VIPER_QUALITIES.contains(&candidate_quality.as_str()))
+                .cloned()
+                .unwrap_or_else(|| VIPER_FALLBACK_QUALITY.to_string());
+            candidates.push((song.hash.clone(), fallback));
         }
 
         let mut last_full = None;
@@ -486,25 +493,49 @@ impl ApiClient {
         )))
     }
 
+    /// 把这一首歌的**所有** hash 配上用户选的音质，作为兜底候选。
+    ///
+    /// 顺序：主 hash 在前，`audio_info` 里的其它 hash 在后。
+    ///
+    /// # 为什么不能只用 `song.hash`
+    ///
+    /// 搜索接口给的 `FileHash` 常指向**已下架**的版本（酷狗搜索保留历史 hash），
+    /// 而 `audio_info.hash_320` / `hash_128` 等往往还是能播的——这就是用户说的
+    /// 「下架歌曲收藏到歌单里就能听」：歌单接口给的正是 `audio_info` 那一组 hash。
+    ///
+    /// 所以 `/privilege/lite` 查不到、或者服务端根本没有这个接口（旧版
+    /// KuGouMusicApi）时，把整组 hash 挨个试一遍，而不是只抱着失效的那个不放。
+    fn fallback_candidates(song: &Song, quality: &str) -> Vec<(String, String)> {
+        let mut candidates = vec![(song.hash.clone(), quality.to_string())];
+        for hash in song.extra_hashes.values() {
+            if *hash != song.hash {
+                candidates.push((hash.clone(), quality.to_string()));
+            }
+        }
+        candidates
+    }
+
     /// 把 `/privilege/lite` 的响应转换成「按用户选的音质降级排序」的候选列表。
     ///
-    /// 没拿到响应或解析不出候选时，回退到「原 hash + 用户选的音质」——
-    /// 走老路不一定能拿到，但至少不会因为这个查询失败就让整条路堵死。
+    /// 没拿到响应或解析不出候选时，回退到 `fallback_candidates`——这一首歌的所有
+    /// hash 挨个试。走老路不一定能拿到，但至少不会因为这个查询失败就整条堵死。
     async fn privilege_candidates(&self, song: &Song, quality: &str) -> Vec<(String, String)> {
         let response = match self.request_privilege_lite(song).await {
             Ok(value) => value,
             Err(error) => {
                 tlog!(
                     crate::logger::LEVEL_DEBUG,
-                    "/privilege/lite 失败：{}，按单 hash 兜底",
+                    "/privilege/lite 失败：{}，按整组 hash 兜底",
                     error.user_hint()
                 );
-                return vec![(song.hash.clone(), quality.to_string())];
+                return Self::fallback_candidates(song, quality);
             }
         };
         let candidates = parse_quality_candidates(&response, quality);
         if candidates.is_empty() {
-            vec![(song.hash.clone(), quality.to_string())]
+            // 服务端认这个 hash 但没给任何可用档位——多半是下架歌曲。
+            // 换这一首歌的其它 hash 再试，别只咬着失效的那个。
+            Self::fallback_candidates(song, quality)
         } else {
             candidates
                 .into_iter()
@@ -667,12 +698,28 @@ const VIPER_QUALITIES: &[&str] = &["viper_clear", "viper_atmos", "viper_tape"];
 /// 蝰蛇音质没权限时的兜底音质。128 是酷狗默认音质，**不需要任何 VIP**。
 const VIPER_FALLBACK_QUALITY: &str = "128";
 
-/// 音质降级链：用户选的那档在最前，逐级降到 128 kbps。
+/// 音质降级链，从低到高。用户选的那档在最前（代码里会 `rev()`），逐级往下退。
 ///
-/// 顺序与服务端 `QUALITY_LEVELS` 一致（见 MoeKoeMusic 的
-/// `src/components/player/songQueue/OnlineMusicQueue.js`），但去掉了一些
-/// 不常见的蝰蛇档——那些我们也调不到，先不掺进来。
-const PRIVILEGE_FALLBACK_CHAIN: &[&str] = &["128", "320", "flac", "high"];
+/// **顺序与 MoeKoeMusic 的 `QUALITY_LEVELS` 一致**（见其
+/// `src/components/player/songQueue/OnlineMusicQueue.js`），七个档次全保留：
+///
+/// ```js
+/// const QUALITY_LEVELS = ['128', '320', 'flac', 'high', 'viper_atmos', 'viper_clear', 'viper_tape'];
+/// ```
+///
+/// 之前我砍掉了三个蝰蛇档，结果 `relate_goods` 里的相关变体全被过滤掉
+/// ——而「下架歌曲在歌单里能听」走的就是 `relate_goods` 这条路。
+/// 没权限的档位服务端会给 `level == 0`，由 `parse_quality_candidates` 过滤，
+/// 所以这里放宽是安全的。
+const PRIVILEGE_FALLBACK_CHAIN: &[&str] = &[
+    "128",
+    "320",
+    "flac",
+    "high",
+    "viper_atmos",
+    "viper_clear",
+    "viper_tape",
+];
 
 /// 一个候选音质：账号在该音质下有权限时，服务端给的 hash + 品质名。
 #[derive(Debug, Clone, PartialEq)]
@@ -1021,6 +1068,64 @@ mod tests {
 
         let candidates = parse_quality_candidates(&json!({"data": "garbage"}), "flac");
         assert!(candidates.is_empty());
+    }
+
+    /// 下架歌曲的修复点：/privilege/lite 查不到时，不能只抱着失效的主 hash，
+    /// 要把这一首歌的**整组** hash（主 hash + audio_info 里那些）挨个试。
+    /// 用户说的「下架歌曲收藏到歌单里能听」，歌单给的正是后者那一组。
+    #[test]
+    fn fallback_candidates_include_every_hash_of_the_song() {
+        let mut extra = std::collections::BTreeMap::new();
+        extra.insert("320".to_string(), "HASH_320".to_string());
+        extra.insert("flac".to_string(), "HASH_FLAC".to_string());
+        let song = Song {
+            name: "下架的歌".to_string(),
+            hash: "PRIMARY_HASH".to_string(),
+            album_id: "1".to_string(),
+            album_audio_id: 0,
+            album_name: String::new(),
+            singers: vec![],
+            duration_ms: 0,
+            cover: None,
+            privilege: None,
+            file_id: None,
+            extra_hashes: extra,
+            source: crate::source::SourceKind::Kugou,
+        };
+
+        let candidates = ApiClient::fallback_candidates(&song, "128");
+        // 主 hash 在前，其余两个在后；每个都用用户选的音质
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(
+            candidates[0],
+            ("PRIMARY_HASH".to_string(), "128".to_string())
+        );
+        assert!(candidates.iter().any(|(h, _)| h == "HASH_320"));
+        assert!(candidates.iter().any(|(h, _)| h == "HASH_FLAC"));
+    }
+
+    /// 没有 extra_hashes 时兜底就只有主 hash 一项，别凭空造数据。
+    #[test]
+    fn fallback_candidates_is_just_primary_hash_when_no_extras() {
+        let song = Song {
+            name: "普通歌".to_string(),
+            hash: "ONLY_HASH".to_string(),
+            album_id: String::new(),
+            album_audio_id: 0,
+            album_name: String::new(),
+            singers: vec![],
+            duration_ms: 0,
+            cover: None,
+            privilege: None,
+            file_id: None,
+            extra_hashes: Default::default(),
+            source: crate::source::SourceKind::Kugou,
+        };
+        let candidates = ApiClient::fallback_candidates(&song, "320");
+        assert_eq!(
+            candidates,
+            vec![("ONLY_HASH".to_string(), "320".to_string())]
+        );
     }
 
     /// 蝰蛇音质 vs 标准音质的分类不能错——否则降级逻辑会把标准 128 当蝰蛇
