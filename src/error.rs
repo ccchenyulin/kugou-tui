@@ -76,17 +76,38 @@ impl AppError {
 
     /// 是否属于「需要登录」类错误。UI 层据此弹出登录引导而不是普通报错。
     ///
-    /// 已知码：`152` 搜索接口缺 cookie；`20005` / `40004` 登录态失效；
-    /// `20028` 取播放直链时返回的「本次请求需要验证」。
+    /// 已知码（都是实测出来的，上游不公开语义）：
+    ///
+    /// * `152` —— 搜索接口缺 cookie
+    /// * `20005` / `40004` —— 登录态失效
+    /// * `20028` —— 取播放直链时的「本次请求需要验证」
+    /// * `20010` —— 请求里完全没有可用的认证信息（`/user/playlist` 实测）
+    /// * `20017` —— token 本身无效或已过期：`/user/playlist` 只在带了 token 时才
+    ///   返回它，不带 token 时返回 `20010`。服务端不附带任何错误描述，所以只认
+    ///   这个码，界面才能提示「重新扫码」而不是甩一句 `code=20017`。
     pub fn is_auth_related(&self) -> bool {
         match self {
-            Self::Api { code, .. } => matches!(code, 152 | 20005 | 20028 | 40004),
+            Self::Api { code, .. } => matches!(code, 152 | 20005 | 20010 | 20017 | 20028 | 40004),
+            _ => false,
+        }
+    }
+
+    /// 是否是「曾经登录过、但现在失效了」（区别于「从来没登录」）。
+    ///
+    /// 两者的处置动作都是按 `L`，但说清楚「已失效」能省掉一次自查：
+    /// 用户不用先怀疑是不是自己没扫过码。
+    pub fn is_login_expired(&self) -> bool {
+        match self {
+            Self::Api { code, .. } => matches!(code, 20005 | 20017 | 40004),
             _ => false,
         }
     }
 
     /// 面向用户的一行提示。避免把 reqwest 的长串错误直接糊到状态栏上。
     pub fn user_hint(&self) -> String {
+        if self.is_login_expired() {
+            return "登录态已失效：按 L 重新扫码（酷狗会定期轮换 token）".to_string();
+        }
         if self.is_auth_related() {
             return "需要登录：按 L 扫码，或配置 cookie（--cookie / 配置文件）".to_string();
         }
@@ -97,5 +118,39 @@ impl AppError {
             }
             other => other.to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn api(code: i64) -> AppError {
+        AppError::Api {
+            path: "/user/playlist".to_string(),
+            code,
+            message: "服务端未提供错误描述".to_string(),
+        }
+    }
+
+    /// `/user/playlist` 实测：不带认证信息返回 20010，带了失效 token 返回 20017。
+    /// 两个都必须归入「需要登录」，否则界面只会甩一句 `code=20017`。
+    #[test]
+    fn auth_codes_are_recognized() {
+        for code in [152, 20005, 20010, 20017, 20028, 40004] {
+            assert!(api(code).is_auth_related(), "code={code} 应属于登录类");
+        }
+        assert!(!api(149).is_auth_related(), "页码越界不是登录问题");
+        assert!(api(149).is_page_out_of_range());
+    }
+
+    #[test]
+    fn expired_login_gets_a_clearer_hint() {
+        let hint = api(20017).user_hint();
+        assert!(hint.contains("失效"), "应说明是失效而不是没登录：{hint}");
+        assert!(hint.contains("L"), "应提示重新扫码：{hint}");
+
+        // 从来没登录过的（152 = 搜索缺 cookie）不该说「失效」
+        assert!(api(152).user_hint().contains("需要登录"));
     }
 }
