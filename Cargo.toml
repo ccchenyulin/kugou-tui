@@ -57,6 +57,11 @@ rodio = { version = "0.22", default-features = false, features = [
     "wav",
 ] }
 
+# --- 封面图片解码 ---
+# 只开 jpeg / png：酷狗的封面基本就这两种格式，
+# 关掉默认特性可以少拖进来一大堆编码器与并行依赖
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
 # --- 序列化 ---
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

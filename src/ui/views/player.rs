@@ -130,8 +130,38 @@ pub fn render_lyric(frame: &mut Frame, area: Rect, state: &AppState, theme: &The
         return;
     }
 
+    // 封面画在歌词上方：两者都属于「当前这首歌」的信息，放一起语义最顺，
+    // 也不用另找地方挤（侧边栏和播放条都已经在高度上排满了）。
+    let lyric_area = if state.cover.lines.is_empty() || inner.width < 8 {
+        inner
+    } else {
+        let cover_height = (state.cover.lines.len() as u16 + 2).min(inner.height / 2);
+        let [cover_area, rest] = ratatui::layout::Layout::vertical([
+            ratatui::layout::Constraint::Length(cover_height),
+            ratatui::layout::Constraint::Min(1),
+        ])
+        .areas(inner);
+
+        let lines: Vec<ratatui::text::Line> = state
+            .cover
+            .lines
+            .iter()
+            .map(|line| {
+                ratatui::text::Line::from(ratatui::text::Span::styled(
+                    line.clone(),
+                    theme.now_playing(),
+                ))
+            })
+            .collect();
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center),
+            cover_area,
+        );
+        rest
+    };
+
     if state.lyric.loading && state.lyric.lyric.is_empty() {
-        frame.render_widget(loading_placeholder(theme), inner);
+        frame.render_widget(loading_placeholder(theme), lyric_area);
         return;
     }
     if state.lyric.lyric.is_empty() {
@@ -140,12 +170,12 @@ pub fn render_lyric(frame: &mut Frame, area: Rect, state: &AppState, theme: &The
         } else {
             "播放歌曲后显示歌词"
         };
-        frame.render_widget(empty_placeholder(hint, theme), inner);
+        frame.render_widget(empty_placeholder(hint, theme), lyric_area);
         return;
     }
 
     let total = state.lyric.lyric.lines.len();
-    let viewport = inner.height as usize;
+    let viewport = lyric_area.height as usize;
     let active = state.lyric.active_line;
 
     // 让当前行居中，同时不允许滚出内容范围
@@ -198,7 +228,10 @@ pub fn render_lyric(frame: &mut Frame, area: Rect, state: &AppState, theme: &The
     // 注意：上面已经用 skip(offset).take(viewport) 裁好了要显示的行，
     // 这里**不能**再调 .scroll((offset, 0))——那会形成双重偏移（实际滚 2×offset），
     // 滚得越来越快，很快就滚过内容末尾，表现就是「歌词播到一半后再也不出现」。
-    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
+    frame.render_widget(
+        Paragraph::new(lines).alignment(Alignment::Center),
+        lyric_area,
+    );
 }
 
 /// 播放队列面板需要的外部状态。

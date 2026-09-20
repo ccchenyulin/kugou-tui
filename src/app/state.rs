@@ -494,6 +494,22 @@ pub struct CloudPane {
     pub songs: SongList,
 }
 
+/// 当前封面的字符画。
+#[derive(Debug, Default, Clone)]
+pub struct CoverArt {
+    /// 封面属于哪首歌（用 hash 标识）。`None` 表示还没有封面。
+    pub hash: Option<String>,
+    /// 半块字符画，每行等宽。空表示还没取到或该音源没有封面。
+    pub lines: Vec<String>,
+}
+
+impl CoverArt {
+    /// 是否属于这首歌。
+    pub fn belongs_to(&self, hash: &str) -> bool {
+        self.hash.as_deref() == Some(hash)
+    }
+}
+
 /// 歌词面板状态。
 #[derive(Debug, Default)]
 pub struct LyricPane {
@@ -592,6 +608,8 @@ pub struct AppState {
     pub login: Option<LoginState>,
     /// 文本输入弹窗；`None` 表示没有弹出的输入框。
     pub prompt: Option<PromptState>,
+    /// 当前封面的字符画，以及它属于哪首歌（避免切歌后继续显示上一张）。
+    pub cover: CoverArt,
     /// 当前账号的会员摘要（如「概念版 SVIP · 至 09-21」），未登录或未取到时为 None。
     pub vip_label: Option<String>,
     /// 上次鼠标点击命中的（区域, 数据下标）。
@@ -724,6 +742,7 @@ impl AppState {
             volume,
             volume_before_mute: None,
             lyric: LyricPane::default(),
+            cover: CoverArt::default(),
             sync_target: None,
             status: "按 / 搜索，或按 2-5 浏览歌单/歌手/排行榜/云端".to_string(),
             status_level: StatusLevel::Info,

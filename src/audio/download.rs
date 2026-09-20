@@ -131,6 +131,23 @@ impl Downloader {
         }
     }
 
+    /// 把一个小文件整个读进内存（封面图用，不落盘）。
+    ///
+    /// 封面每张几十 KB，没必要为它建一套磁盘缓存；而且它和音频缓存的回收策略
+    /// 也不一样（按修改时间删旧的，会把正在看的封面删掉）。
+    pub async fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>> {
+        let response = self.http.get(url).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(AppError::HttpStatus {
+                path: url.to_string(),
+                status: status.as_u16(),
+            });
+        }
+        let bytes = response.bytes().await.map_err(AppError::Http)?;
+        Ok(bytes.to_vec())
+    }
+
     /// 根据直链推断音频容器扩展名。
     ///
     /// 酷狗的直链形如 `http://xxx/yyy.mp3?token=...`，扩展名在路径段里，

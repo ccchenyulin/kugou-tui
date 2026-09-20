@@ -17,8 +17,8 @@ use crate::api::cloud::QrStatus;
 use crate::api::model::{Artist, Playlist, RankBoard, Song};
 use crate::app::App;
 use crate::app::state::{
-    ConfirmAction, EntryList, Focus, HitTarget, HitZone, LoginState, PromptAction, PromptState,
-    Tab, move_selection, select_first, select_last,
+    ConfirmAction, CoverArt, EntryList, Focus, HitTarget, HitZone, LoginState, PromptAction,
+    PromptState, Tab, move_selection, select_first, select_last,
 };
 use crate::config::Config;
 use crate::source::SourceKind;
@@ -56,6 +56,10 @@ const SEARCH_MAX_PAGES: u32 = 16;
 /// 歌手列表一次取多少个。接口叫 `hotsize`，与「歌曲每页条数」不是一个概念，
 /// 因此刻意不跟着 `config.page_size` 走。
 const ARTIST_LIST_SIZE: u32 = 60;
+
+/// 封面的尺寸（列 x 行）。每个字符承载上下 2 个像素，所以实际是 24x24 像素。
+const COVER_WIDTH: usize = 24;
+const COVER_HEIGHT: usize = 12;
 
 /// 滚轮一格滚动多少行。1 行太慢、10 行太跳，3 行是手感上的折中。
 const WHEEL_ROWS: isize = 3;
@@ -924,6 +928,11 @@ impl App {
             hash: Some(song.hash.clone()),
             ..Default::default()
         };
+        // 切歌后先把旧封面清掉，否则会短暂显示上一张
+        if !self.state.cover.belongs_to(&song.hash) {
+            self.state.cover = CoverArt::default();
+        }
+        self.load_cover(&song);
 
         self.audio.mark_loading();
         self.state.playback = PlaybackState::Loading;
@@ -2366,6 +2375,21 @@ impl App {
                 self.finish_login(false, message);
             }
 
+            Loaded::CoverReady { hash, lines } => {
+                // 结果回来时用户可能已经切歌，只认当前这首
+                if self
+                    .state
+                    .current
+                    .as_ref()
+                    .is_some_and(|song| song.hash == hash)
+                {
+                    self.state.cover = CoverArt {
+                        hash: Some(hash),
+                        lines,
+                    };
+                }
+            }
+
             Loaded::VipStatus { label } => {
                 self.state.vip_label = Some(label);
             }
@@ -2425,6 +2449,44 @@ impl App {
                 }),
                 Err(error) => bus.fail(format!("下载《{label}》失败"), error),
             }
+        });
+    }
+
+    /// 为当前歌曲取封面（异步）：下载 → 解码 → 生成字符画。
+    ///
+    /// 失败只记日志：封面是锦上添花，不能因为它让播放流程报错。
+    fn load_cover(&mut self, song: &Song) {
+        let Some(url) = song.cover.clone() else {
+            self.state.cover = CoverArt::default();
+            return;
+        };
+        // 已经有这张封面就不用重复取
+        if self.state.cover.belongs_to(&song.hash) && !self.state.cover.lines.is_empty() {
+            return;
+        }
+
+        let hash = song.hash.clone();
+        let downloader = self.downloader.clone();
+        let bus = self.bus.clone();
+
+        self.runtime.spawn(async move {
+            let bytes = match downloader.fetch_bytes(&url).await {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    crate::logger::tlog!(crate::logger::LEVEL_WARN, "下载封面失败 {url}：{error}");
+                    return;
+                }
+            };
+            let image = match image::load_from_memory(&bytes) {
+                Ok(image) => image,
+                Err(error) => {
+                    crate::logger::tlog!(crate::logger::LEVEL_WARN, "解码封面失败 {url}：{error}");
+                    return;
+                }
+            };
+            // 尺寸交给渲染层按实际面板大小决定，这里只把图带过去
+            let lines = crate::ui::cover::cover_lines(&image, COVER_WIDTH, COVER_HEIGHT);
+            bus.emit(Loaded::CoverReady { hash, lines });
         });
     }
 

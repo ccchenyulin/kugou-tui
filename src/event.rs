@@ -116,6 +116,11 @@ pub enum Loaded {
     LoginFailed {
         message: String,
     },
+    /// 封面已解码成字符画。`hash` 用于丢弃过期结果（用户已切歌）。
+    CoverReady {
+        hash: String,
+        lines: Vec<String>,
+    },
     /// 当前账号的会员信息摘要（用于界面显示）。
     VipStatus {
         label: String,

@@ -22,6 +22,7 @@
 //!
 //! 这样一套布局从 80 列的 SSH 窗口到 200 列的宽屏都能用，不需要用户配置。
 
+pub mod cover;
 pub mod theme;
 pub mod views;
 pub mod widgets;
