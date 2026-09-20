@@ -44,20 +44,6 @@ use crate::logger::tlog;
 
 pub use state::AppState;
 
-/// kitty 终端里封面图片的 ID。
-///
-/// 固定值即可——同一时刻只会显示一张封面，换页时靠它精确删除，
-/// 不会波及终端里其它程序放的图。
-const COVER_IMAGE_ID: u32 = 1;
-
-/// 两次封面发送之间的最小间隔。
-///
-/// 一次发送是几百 KB 的转义序列。正常情况下「只在内容或区域变化时发送」
-/// 已经足够，但这个判定依赖区域稳定——一旦有意外（比如某页的区域每帧重算），
-/// 就会退化成每帧发送，终端消费不过来会让 stdout 写入阻塞，主线程卡死。
-/// 用最小间隔兜底，最坏也只是每秒两次。
-const COVER_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
-
 /// 主循环每帧最多处理的事件数在 [`update`] 里定义。
 pub struct App {
     pub state: AppState,
@@ -81,20 +67,12 @@ pub struct App {
     /// MPRIS 句柄。没有 D-Bus 时为 `None`（不影响播放，只是桌面集成不可用）。
     mpris: Option<crate::mpris::MprisHandle>,
 
-    /// 已经画到终端上的封面：(歌曲 hash, 区域)。
+    /// 终端图形协议的探测器（kitty / iTerm2 / sixel，都没有就退到半块字符）。
     ///
-    /// 用来避免每帧重发——kitty 的图片会自己留在屏幕上（ratatui 的重绘擦不到
-    /// 它），每帧删掉重画反而会让终端反复擦除+绘制，看起来就是整屏乱闪。
-    /// 只有内容或位置真的变了才需要动它。
-    cover_painted: Option<(String, ratatui::layout::Rect)>,
-
-    /// 上一次真的把图片写进终端的时间。
-    ///
-    /// 用来节流：一次发送是几百 KB 的转义序列，若因任何原因退化成每帧发送，
-    /// 终端消费不过来会阻塞 stdout 写入，主线程就卡死在 write_all 上
-    /// （用户实测：切到封面页之后按键、音量全无响应）。限流之后最坏情况也只是
-    /// 每秒两次，不会把主线程写死。
-    cover_sent_at: Option<std::time::Instant>,
+    /// 只在启动时探测一次：探测要临时开关 raw mode 并向终端发查询序列，
+    /// 每帧做一次既慢又会打断输入。`None` 表示探测失败（输出不是终端等），
+    /// 此时封面只能走字符画兜底。
+    picker: Option<ratatui_image::picker::Picker>,
 }
 
 impl App {
@@ -143,9 +121,16 @@ impl App {
             runtime,
             last_frame_at: Instant::now(),
             mpris,
-            cover_painted: None,
-            cover_sent_at: None,
+            picker: None,
         };
+
+        // 探测终端支持哪种图形协议。失败只是没有真图，不影响使用。
+        //
+        // 必须在 `ratatui::init()` **之前**调用：探测内部会自己开关一次 raw mode，
+        // 放在 init 之后反而会把已打开的 raw mode 关掉，键盘输入就全废了。
+        // 终端不回答查询时要等满超时（默认 2 秒）才退回半块字符，这是启动
+        // 阶段唯一可能变慢的地方，之后不再重复探测。
+        app.picker = ratatui_image::picker::Picker::from_query_stdio().ok();
 
         app.announce_readiness();
         // 放在 announce_readiness 之后：这种故障比「未登录」严重，提示不能被覆盖
@@ -219,16 +204,6 @@ impl App {
 
     fn event_loop(&mut self, terminal: &mut ratatui::DefaultTerminal) -> anyhow::Result<()> {
         loop {
-            // 封面图片在 ratatui 绘制**之前**处理。
-            //
-            // 它会写 stdout 并移动光标，而 ratatui 内部维护着「光标现在在哪」的
-            // 假设；在 draw 之后动手会把那个假设打乱，下一帧的差分渲染就会错位
-            // （表现是画面乱闪）。放在 draw 之前，ratatui 随后的绘制会重新定位
-            // 光标，两不相扰。
-            //
-            // 图片在字符之上，ratatui 重绘它所在区域的空格也盖不住它。
-            self.paint_cover()?;
-
             terminal
                 .draw(|frame| crate::ui::render(frame, &mut self.state))
                 .context("渲染失败")?;
@@ -248,88 +223,6 @@ impl App {
             }
         }
 
-        Ok(())
-    }
-
-    /// 用终端图形协议把封面原图铺到本帧预留的区域上。
-    ///
-    /// 只在支持 kitty 协议的终端上做；其余终端由 `render_lyric` 里的字符画兜底。
-    /// 没有封面（或取不到 PNG）时什么都不做。
-    ///
-    /// 每帧都要重发：ratatui 是整屏差分重绘，只要它重写了图片所在的格子，
-    /// 图片就被擦掉了。PNG 字节缓存在 state 里，重发只是拼一次 base64。
-    fn paint_cover(&mut self) -> anyhow::Result<()> {
-        if !crate::ui::kitty::is_supported() {
-            return Ok(());
-        }
-
-        // 本帧**想要**显示什么。三者缺一就是「不该有封面」。
-        let wanted = match (
-            self.state.cover_area,
-            self.state.cover.png.as_deref(),
-            self.state.cover.hash.as_deref(),
-        ) {
-            (Some(area), Some(png), Some(hash)) if area.width > 0 && area.height > 0 => {
-                Some((hash.to_string(), area, png))
-            }
-            _ => None,
-        };
-
-        // 与上一帧完全相同就**什么都不做**。
-        //
-        // 图片在字符之上，ratatui 的重绘擦不到它，所以它会一直留在屏幕上；
-        // 反过来，每帧删掉重发会让终端反复「擦除 + 绘制」——那就是用户看到的
-        // 整屏乱闪。只在内容或位置真的变了时才动手。
-        if let (Some((hash, area, _)), Some((last_hash, last_area))) =
-            (&wanted, &self.cover_painted)
-        {
-            if hash == last_hash && area == last_area {
-                // 正常情况每帧都走到这里：图片在字符之上，ratatui 的重绘擦不掉它，
-                // 不需要重发。（这里刻意不记日志——每帧都发生，记了会刷屏。）
-                // 排查卡顿时看的是**发送**那条：它应当只在换歌/换页时出现，
-                // 若成片出现就说明区域每帧都在变。
-                return Ok(());
-            }
-        }
-
-        use std::io::Write;
-        let mut stdout = std::io::stdout();
-
-        // 先清掉旧图：换歌、换位置、或本帧不再需要封面（切到别的页）。
-        // 不删的话旧图会留在原地，切几次就叠出好几张（用户实测踩到过）。
-        if self.cover_painted.is_some() {
-            stdout.write_all(crate::ui::kitty::delete_image(COVER_IMAGE_ID).as_bytes())?;
-            self.cover_painted = None;
-        }
-
-        if let Some((hash, area, png)) = wanted {
-            // 节流：不到间隔就先不画。图片还在屏幕上（ratatui 的重绘擦不掉它），
-            // 所以晚半秒补上不会有任何视觉损失。
-            if let Some(last) = self.cover_sent_at {
-                if last.elapsed() < COVER_MIN_INTERVAL {
-                    return Ok(());
-                }
-            }
-            // 移到区域左上角再放图（MoveTo 是 0 基坐标）
-            ratatui::crossterm::execute!(
-                stdout,
-                ratatui::crossterm::cursor::MoveTo(area.x, area.y)
-            )?;
-            stdout.write_all(
-                crate::ui::kitty::display_png(png, area.width, COVER_IMAGE_ID).as_bytes(),
-            )?;
-            crate::logger::tlog!(
-                crate::logger::LEVEL_DEBUG,
-                "封面：发送 {} 字节到 {}x{}",
-                png.len(),
-                area.width,
-                area.height
-            );
-            self.cover_painted = Some((hash, area));
-            self.cover_sent_at = Some(std::time::Instant::now());
-        }
-
-        stdout.flush()?;
         Ok(())
     }
 

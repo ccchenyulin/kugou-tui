@@ -8,6 +8,7 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Gauge, ListState, Paragraph};
+use ratatui_image::StatefulImage;
 
 use crate::api::model::format_duration_ms;
 use crate::app::queue::PlayQueue;
@@ -130,8 +131,8 @@ pub fn render_lyric(frame: &mut Frame, area: Rect, state: &mut AppState, theme: 
         return;
     }
 
-    // 封面不在这里画：`cover_area` 只能有一个写入点（见 draw_cover_block），
-    // 多个渲染函数抢着写会让区域被覆盖、进而让图片每帧重发。
+    // 封面不在这里画：`render_lyric` 被首页/歌词页/封面页共用，封面由各自的
+    // `draw_cover_block` 决定放不放、放多大。
     let lyric_area = inner;
 
     if state.lyric.loading && state.lyric.lyric.is_empty() {
@@ -268,43 +269,78 @@ pub fn render_queue(
     frame.render_stateful_widget(widget, inner, cursor);
 }
 
-/// 在当前区域的**上半部分**画封面，返回留给下方内容的区域。
+/// 封面块的行数下限 / 上限。
 ///
-/// 抽出来是因为「首页」和「歌词页」都要它。kitty 终端把真图铺在预留区域上
-/// （渲染完成后由 `App::paint_cover` 放），其它终端退回字符画。
-fn draw_cover_block(frame: &mut Frame, inner: Rect, state: &mut AppState, theme: &Theme) -> Rect {
-    if state.cover.lines.is_empty() || inner.width < 12 || inner.height < 8 {
-        return inner;
+/// 上限不只是审美：图片协议按区域尺寸编码，区域越大单次编码的数据越多，
+/// 而封面页最宽也就 48 列左右，再大没有意义。
+const COVER_MIN_ROWS: u16 = 6;
+const COVER_MAX_ROWS: u16 = 24;
+
+/// 在 `inner` 上方划出一块居中的方形封面区，返回（封面区, 剩余区）。
+///
+/// 抽成纯函数是为了能直接测：这块几何一变，图片协议就得重新编码（尺寸变了），
+/// 值得有断言兜着。
+///
+/// 字符宽高比约 1:2，所以方形区域的列数取行数的两倍；最多占一半高，
+/// 剩下的留给下方内容。区域太小时返回 `None`，调用方把整块都留给内容。
+fn cover_layout(inner: Rect) -> Option<(Rect, Rect)> {
+    if inner.width < 12 || inner.height < 8 {
+        return None;
     }
 
-    // 字符宽高比约 1:2，方形区域的列数是行数的两倍；最多占一半高，留一行间距
-    let rows = (inner.height / 2).clamp(6, 24);
+    let rows = (inner.height / 2).clamp(COVER_MIN_ROWS, COVER_MAX_ROWS);
     let columns = (rows * 2).min(inner.width);
     let [cover_area, rest] =
         Layout::vertical([Constraint::Length(rows + 1), Constraint::Min(1)]).areas(inner);
 
+    // 居中：封面比可用宽度窄时左右留白
     let x = cover_area.x + cover_area.width.saturating_sub(columns) / 2;
-    state.cover_area = Some(Rect::new(x, cover_area.y, columns, rows));
+    Some((Rect::new(x, cover_area.y, columns, rows), rest))
+}
 
-    if !crate::ui::kitty::is_supported() {
-        let lines: Vec<Line> = state
-            .cover
-            .lines
-            .iter()
-            .map(|line| Line::from(Span::styled(line.clone(), theme.now_playing())))
-            .collect();
-        frame.render_widget(
-            Paragraph::new(lines).alignment(Alignment::Center),
-            cover_area,
-        );
+/// 在当前区域的**上半部分**画封面，返回留给下方内容的区域。
+///
+/// 抽出来是因为「首页」「歌词页」「封面页」都要它。
+///
+/// 有图形协议就用 `ratatui-image` 的 widget：它把图片写进 ratatui 的 Buffer，
+/// 由框架的 diff 统一输出——不再自己往 stdout 写几百 KB 的转义序列（那会阻塞
+/// 写入并打乱光标跟踪），而且内容不变时一个字节都不会重发。探测不出终端能力
+/// 时才退回字符画。
+fn draw_cover_block(frame: &mut Frame, inner: Rect, state: &mut AppState, theme: &Theme) -> Rect {
+    if !state.cover.is_drawable() {
+        return inner;
     }
+    let Some((cover_area, rest)) = cover_layout(inner) else {
+        return inner;
+    };
+
+    if let Some(protocol) = state.cover.protocol.as_mut() {
+        frame.render_stateful_widget(StatefulImage::default(), cover_area, protocol);
+        // 缩放与编码发生在渲染时（只在区域或图片变化时）。失败只记日志：
+        // 下一帧会重试，不该因为一张图把界面搞崩。
+        if let Some(Err(error)) = protocol.last_encoding_result() {
+            crate::logger::tlog!(crate::logger::LEVEL_WARN, "封面编码失败：{error}");
+        }
+        return rest;
+    }
+
+    let lines: Vec<Line> = state
+        .cover
+        .lines
+        .iter()
+        .map(|line| Line::from(Span::styled(line.clone(), theme.now_playing())))
+        .collect();
+    frame.render_widget(
+        Paragraph::new(lines).alignment(Alignment::Center),
+        cover_area,
+    );
     rest
 }
 
 /// 普通页面右下角的歌词面板：上方小封面 + 下方歌词。
 ///
 /// 这里的面板**没有自己的边框**（外层已经由调用方画好了），所以不要在内部
-/// 再套一层 `panel`。封面仍走 `draw_cover_block`，保证 cover_area 单一来源。
+/// 再套一层 `panel`。
 pub fn render_lyric_panel(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
     if area.height < 3 || area.width < 8 {
         return;
@@ -316,7 +352,7 @@ pub fn render_lyric_panel(frame: &mut Frame, area: Rect, state: &mut AppState, t
 /// 歌词页：上方封面、下方歌词。
 ///
 /// 封面与歌词都是「当前这首歌」的信息，放一起语义最顺。组合方式与首页一致，
-/// 都走 `draw_cover_block` —— 保证 `cover_area` 只有一个写入点。
+/// 都走 `draw_cover_block`。
 pub fn render_lyrics_page(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
     let block = panel("歌词", false, theme);
     let inner = block.inner(area);
@@ -340,13 +376,12 @@ pub fn render_cover_page(frame: &mut Frame, area: Rect, state: &mut AppState, th
         return;
     }
 
-    // 同上：清空交给 ui::render 每帧统一做，这里只管设置
     let Some(song) = state.current.as_ref() else {
         frame.render_widget(empty_placeholder("播放歌曲后显示封面", theme), inner);
         return;
     };
     // 先把要显示的文字取出来，释放对 state 的不可变借用——
-    // 下面 draw_cover_block 要可变借用它（记录封面区域）
+    // 下面 draw_cover_block 要可变借用它（图片协议状态是可变的）
     let title = song.name.clone();
     let subtitle = format!("{} · {}", song.singer_text(), song.album_name);
 
@@ -393,5 +428,108 @@ pub fn render_home(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &
     } else {
         let rest = draw_cover_block(frame, inner, state, theme);
         render_lyric(frame, rest, state, theme);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 封面区是「列 = 行 × 2」的方形（字符宽高比 1:2），并水平居中。
+    #[test]
+    fn cover_block_is_twice_as_wide_as_tall_and_centered() {
+        let inner = Rect::new(0, 0, 60, 20);
+        let (cover, _rest) = cover_layout(inner).expect("60x20 够放封面");
+
+        assert_eq!(cover.height, 10, "最多占一半高");
+        assert_eq!(cover.width, 20, "列数是行数的两倍");
+        assert_eq!(cover.x, 20, "剩余宽度左右平分");
+        assert_eq!(cover.y, inner.y);
+    }
+
+    /// 区域太小就整块留给内容——半个封面对阅读毫无帮助。
+    #[test]
+    fn cover_block_is_skipped_when_area_is_tiny() {
+        assert!(cover_layout(Rect::new(0, 0, 11, 20)).is_none());
+        assert!(cover_layout(Rect::new(0, 0, 60, 7)).is_none());
+    }
+
+    /// 行数被夹在 [6, 24]：矮区域不至于缩成一条，高区域也不会把内容挤没。
+    #[test]
+    fn cover_rows_are_clamped() {
+        let (short, _) = cover_layout(Rect::new(0, 0, 40, 8)).expect("8 行够放最小封面");
+        assert_eq!(short.height, COVER_MIN_ROWS);
+
+        let (tall, _) = cover_layout(Rect::new(0, 0, 80, 100)).expect("100 行够放封面");
+        assert_eq!(tall.height, COVER_MAX_ROWS);
+        assert_eq!(tall.width, 48);
+    }
+
+    /// 窄区域里宽度是硬约束：宁可矮一点也不让封面超出边界。
+    #[test]
+    fn cover_width_is_capped_by_area_width() {
+        let (cover, _) = cover_layout(Rect::new(0, 0, 14, 20)).expect("14x20 够放封面");
+        assert_eq!(cover.width, 14, "10 行本该要 20 列，被宽度压到 14");
+        assert_eq!(cover.x, 0);
+    }
+
+    /// 端到端：封面真的画进了 ratatui 的 Buffer。
+    ///
+    /// 用 `TestBackend` 就是为了能拿到绘制后的 Buffer——「有没有偷偷写 stdout」
+    /// 在真实终端上根本无从断言，而那正是之前卡死与闪烁的来源。
+    /// 这里选 `Picker::halfblocks()`：它不碰 stdio，测试里能稳定跑。
+    #[test]
+    fn cover_is_rendered_into_the_frame_buffer() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        // 渐变而不是纯色：半块字符在上下两格同色时会退化成空格（用底色表示），
+        // 纯色图渲染出来就是一片空白，测不出东西。
+        let mut pixels = image::RgbImage::new(32, 32);
+        for (x, y, pixel) in pixels.enumerate_pixels_mut() {
+            *pixel = image::Rgb([(x * 8) as u8, (y * 8) as u8, 128]);
+        }
+        let protocol = ratatui_image::picker::Picker::halfblocks()
+            .new_resize_protocol(image::DynamicImage::ImageRgb8(pixels));
+
+        let mut state = AppState::new(crate::config::Config::default());
+        state.cover = crate::app::state::CoverArt {
+            hash: Some("test-hash".to_string()),
+            lines: Vec::new(),
+            protocol: Some(protocol),
+        };
+
+        let area = Rect::new(0, 0, 60, 20);
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).expect("测试后端可用");
+        let mut rest = Rect::default();
+        let drawn = terminal
+            .draw(|frame| {
+                let theme = Theme::for_config(false);
+                rest = draw_cover_block(frame, area, &mut state, &theme);
+            })
+            .expect("绘制成功");
+
+        assert_eq!(rest.y, 11, "下方内容从封面（10 行 + 1 行间距）之后开始");
+
+        // 落在封面区里的非空格单元格：全是空格就说明图根本没进去
+        let painted = drawn
+            .buffer
+            .content()
+            .iter()
+            .filter(|cell| cell.symbol() != " ")
+            .count();
+        assert!(painted > 0, "封面应当写进 Buffer，而不是 stdout");
+    }
+
+    /// 剩余区域紧接封面下方，且两者高度加起来仍是原区域高度。
+    #[test]
+    fn remainder_sits_below_the_cover() {
+        let inner = Rect::new(3, 5, 60, 20);
+        let (cover, rest) = cover_layout(inner).expect("60x20 够放封面");
+
+        // rows + 1：多留一行当间距，不然封面和下面的内容会糊在一起
+        assert_eq!(rest.y, cover.y + cover.height + 1);
+        assert_eq!(rest.height, inner.height - cover.height - 1);
+        assert_eq!(rest.width, inner.width, "剩余区用满宽度");
     }
 }

@@ -569,6 +569,9 @@ cargo test     # 覆盖上述解析路径，以及队列 / 缓存 / 按键的边
 - [KugouMusic.NET](https://github.com/Linsxyx/KugouMusic.NET) —— 接口封装思路参考。
 - [ratatui](https://github.com/ratatui/ratatui) / [rodio](https://github.com/RustAudio/rodio) /
   [tokio](https://github.com/tokio-rs/tokio) —— 本项目的三块基石。
+- [ratatui-image](https://github.com/benjajaja/ratatui-image) —— 封面渲染。它把图片
+  写进 ratatui 的 Buffer 而不是自己写 stdout，并负责探测 kitty / iTerm2 / sixel
+  协议（都不支持时退到彩色半块）。
 
 ## 许可
 
@@ -576,26 +579,25 @@ cargo test     # 覆盖上述解析路径，以及队列 / 缓存 / 按键的边
 
 ### 第三方依赖许可
 
-`Cargo.lock` 共 **406 个包**（含传递依赖）。已逐个核对 `license` 字段，
-**不含 GPL / LGPL 等强著佐权许可**。分布如下（按包数排序）：
+`Cargo.lock` 共 **468 个包**（含传递依赖，不区分目标平台）。已逐个核对 `license`
+字段。分布如下（按包数排序，分类互斥）：
 
 | 许可 | 数量 | 说明 |
 |---|---|---|
-| `MIT OR Apache-2.0`（各种写法） | ~245 | 宽松，双许可任选其一 |
-| `MIT` | 80 | 宽松 |
-| `Unicode-3.0` / `Unicode-DFS-2016` | 18 | 宽松（Unicode 数据表与算法） |
-| **`MPL-2.0`** | 13 | **弱著佐权**：来自 symphonia 系列（FLAC / MP3 等解码器）。文件级 copyleft，静态链接分发需保留其源码可得性 |
-| `Apache-2.0`（含 `WITH LLVM-exception`） | 13 | 宽松 |
-| `Zlib` / `ISC` / `BSD` / `0BSD` 及其组合 | 12 | 宽松 |
-| `CDLA-Permissive-2.0` | 1 | 宽松（webpki-root-certs，根证书数据） |
-| `WTFPL` | 1 | 宽松（terminfo） |
+| `MIT` / `Apache-2.0` 及其各种组合写法 | 427 | 宽松，任选其一即可 |
+| `Unicode-3.0` / `Unicode-DFS-2016` | 21 | 宽松（Unicode 数据表与算法） |
+| **`MPL-2.0`** | 13 | **弱著佐权**：symphonia 系列（FLAC / MP3 等解码器）与 `option-ext`。文件级 copyleft，静态链接分发需保留其源码可得性 |
+| 其余宽松许可（`WTFPL`、`CDLA-Permissive-2.0` 等） | 7 | 宽松 |
 
-需要注意的两点：
+需要注意的三点：
 
 1. **MPL-2.0**：若以二进制形式分发本项目，需保证 symphonia 相关 MPL 代码的源码可得
    （保留 `Cargo.lock` 与目标平台的依赖获取方式即满足）。
 2. **`ring` / `aws-lc-rs`**：加密库，许可为 `Apache-2.0 AND ISC` 等组合；在某些司法
    辖区可能涉及出口管制，商业分发前请自行确认。
+3. **出现 GPL / LGPL 字样的 3 个包**均为**可选**双许可，整体按宽松许可使用即可，
+   不构成著佐权义务：`self_cell`（`Apache-2.0 OR GPL-2.0-only`，随 ratatui-image
+   引入）、`r-efi` 两个版本（`MIT OR Apache-2.0 OR LGPL-2.1-or-later`）。
 
 > 许可信息由脚本从 `Cargo.lock` 与各依赖的 `Cargo.toml` 自动提取。依赖变动后建议
 > 用 `cargo-deny` 或 `cargo about` 复核，本表可能滞后。

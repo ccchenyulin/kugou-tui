@@ -57,37 +57,11 @@ const SEARCH_MAX_PAGES: u32 = 16;
 /// 因此刻意不跟着 `config.page_size` 走。
 const ARTIST_LIST_SIZE: u32 = 60;
 
-/// 把图片编码成 PNG。失败只记日志，返回 `None` 让字符画兜底。
-fn encode_png(image: &image::DynamicImage) -> Option<Vec<u8>> {
-    // 缩到 512 见方再编码：原图往往 300~1000px，直接用会让每帧要发的
-    // base64 大出好几倍，而终端显示的尺寸远小于此。
-    let scaled = image.resize_exact(
-        COVER_PIXEL_SIZE,
-        COVER_PIXEL_SIZE,
-        image::imageops::FilterType::Triangle,
-    );
-    let mut buffer = std::io::Cursor::new(Vec::new());
-    match scaled.write_to(&mut buffer, image::ImageFormat::Png) {
-        Ok(()) => Some(buffer.into_inner()),
-        Err(error) => {
-            crate::logger::tlog!(crate::logger::LEVEL_WARN, "封面转 PNG 失败：{error}");
-            None
-        }
-    }
-}
-
-/// 封面字符画取用的原图像素尺寸。
+/// 封面取图的边长（像素）：URL 里 `{size}` 占位符的替换值。
 ///
-/// 比字符数大得多：字符画每个字符要采上下两个像素，放大源图能保留更多细节。
-/// 封面转 PNG 时的边长（像素）。
-///
-/// **不是越大越好**：这张图会以 base64 塞进 kitty 图形协议的转义序列里写进终端，
-/// 尺寸直接决定每次写入的字节数。实测 512×512 的 PNG 是 355KB，base64 后 474KB；
-/// 一旦每帧重发就是 2.3MB/s，终端消费不过来会阻塞 stdout 写入——主线程卡在
-/// write_all 上，表现为「听歌时按键、音量、切页全部无响应」。
-///
-/// 而封面实际只显示在约 20 列 × 10 行的字符区域（≈200×400 像素），256 已经
-/// 覆盖得了，数据量降到约 1/4。
+/// 决定的是**下载与解码**的规模，不是显示精度——显示时由 `ratatui-image`
+/// 按字符单元格的实际像素尺寸重新缩放。取 256 是因为封面最大只画到 48 列 × 24 行，
+/// 常见字号下约合 380 像素见方，再往上下载变慢而肉眼几乎无差别。
 const COVER_PIXEL_SIZE: u32 = 256;
 
 /// 展开封面 URL 里的 \`{size}\` 占位符。
@@ -2585,7 +2559,7 @@ impl App {
                 self.finish_login(false, message);
             }
 
-            Loaded::CoverReady { hash, lines, png } => {
+            Loaded::CoverReady { hash, lines, image } => {
                 // 结果回来时用户可能已经切歌，只认当前这首
                 if self
                     .state
@@ -2593,10 +2567,16 @@ impl App {
                     .as_ref()
                     .is_some_and(|song| song.hash == hash)
                 {
+                    // 协议必须在主线程建：`Picker` 探测过终端能力，不是 Send，
+                    // 不能挪到网络任务里。探测失败（picker 为 None）就只有字符画。
+                    let protocol = self
+                        .picker
+                        .as_ref()
+                        .map(|picker| picker.new_resize_protocol(image));
                     self.state.cover = CoverArt {
                         hash: Some(hash),
                         lines,
-                        png,
+                        protocol,
                     };
                 }
             }
@@ -2668,7 +2648,7 @@ impl App {
     /// 失败只记日志：封面是锦上添花，不能因为它让播放流程报错。
     fn load_cover(&mut self, song: &Song) {
         // 已经有这张封面就不用重复取
-        if self.state.cover.belongs_to(&song.hash) && !self.state.cover.lines.is_empty() {
+        if self.state.cover.belongs_to(&song.hash) && self.state.cover.is_drawable() {
             return;
         }
         if song.hash.is_empty() {
@@ -2722,11 +2702,9 @@ impl App {
                     return;
                 }
             };
-            // 字符画是兜底：非 kitty 终端只能用它
+            // 字符画是兜底：探测不到终端能力（比如输出不是终端）时只能用它
             let lines = crate::ui::cover::cover_lines(&image, COVER_WIDTH, COVER_HEIGHT);
-            // kitty 终端要的是原图 PNG，由终端自己缩放合成（1:1 还原）
-            let png = encode_png(&image);
-            bus.emit(Loaded::CoverReady { hash, lines, png });
+            bus.emit(Loaded::CoverReady { hash, lines, image });
         });
     }
 

@@ -35,7 +35,7 @@ pub enum Tab {
     Queue,
     /// 歌词。原先和封面挤在同一块面板，拆开之后两边都舒展。
     Lyrics,
-    /// 封面。kitty 终端放真图（1:1 还原），其它终端退回字符画。
+    /// 封面。终端支持图形协议时放真图，否则退回半块字符画。
     Cover,
     /// 音频可视化。不承载列表，整块主区都用来画实时频谱。
     Visualizer,
@@ -528,22 +528,48 @@ pub struct CloudPane {
     pub songs: SongList,
 }
 
-/// 当前封面的字符画。
-#[derive(Debug, Default, Clone)]
+/// 当前封面。
+///
+/// 刻意**不** derive Debug / Clone：`protocol` 是终端图形协议持有的可变图片
+/// 状态，既打不出有用的调试信息，也不该被复制共享。
+#[derive(Default)]
 pub struct CoverArt {
     /// 封面属于哪首歌（用 hash 标识）。`None` 表示还没有封面。
     pub hash: Option<String>,
-    /// 半块字符画，每行等宽。**非 kitty 终端的兜底**。
+    /// 半块字符画，每行等宽。**只在拿不到图形协议时的兜底**。
     pub lines: Vec<String>,
-    /// 原图的 PNG 字节。kitty 终端用它按原样显示（1:1 还原），
-    /// 字符画只是画不出真图时的降级方案。
-    pub png: Option<Vec<u8>>,
+    /// 图形协议的图片状态，由 `ratatui-image` 管理。
+    ///
+    /// 有它就不用自己往 stdout 写转义序列了——widget 会把图片画进 ratatui 的
+    /// Buffer，由框架的 diff 统一决定输出什么：既不会阻塞写入，也不会打乱
+    /// 光标跟踪（这两点正是之前卡死与闪烁的根因），而且内容没变时一个字节
+    /// 都不会重发（kitty 走「已传输图片 + 占位符」引用）。
+    pub protocol: Option<ratatui_image::protocol::StatefulProtocol>,
 }
 
 impl CoverArt {
     /// 是否属于这首歌。
     pub fn belongs_to(&self, hash: &str) -> bool {
         self.hash.as_deref() == Some(hash)
+    }
+
+    /// 有没有可以画出来的内容。
+    ///
+    /// 图形协议优先；探测不出终端能力时才轮到字符画。
+    pub fn is_drawable(&self) -> bool {
+        self.protocol.is_some() || !self.lines.is_empty()
+    }
+}
+
+/// 手动实现：`protocol` 是终端图形协议的状态，打不出有用的调试信息，
+/// 其余字段照常输出。`AppState` 的 derive(Debug) 依赖这个。
+impl std::fmt::Debug for CoverArt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CoverArt")
+            .field("hash", &self.hash)
+            .field("lines", &self.lines.len())
+            .field("protocol", &self.protocol.is_some())
+            .finish()
     }
 }
 
@@ -647,11 +673,8 @@ pub struct AppState {
     pub login_picker: Option<LoginPicker>,
     /// 文本输入弹窗；`None` 表示没有弹出的输入框。
     pub prompt: Option<PromptState>,
-    /// 当前封面的字符画，以及它属于哪首歌（避免切歌后继续显示上一张）。
+    /// 当前封面，以及它属于哪首歌（避免切歌后继续显示上一张）。
     pub cover: CoverArt,
-    /// 本帧封面占用的字符区域。渲染时记录，渲染**之后**由 kitty 协议把真图
-    /// 画上去——图片是终端浮层，必须在 ratatui 绘制完成后再放。
-    pub cover_area: Option<ratatui::layout::Rect>,
     /// 当前账号的会员摘要（如「概念版 SVIP · 至 09-21」），未登录或未取到时为 None。
     pub vip_label: Option<String>,
     /// 上次鼠标点击命中的（区域, 数据下标）。
@@ -815,7 +838,6 @@ impl AppState {
             volume_before_mute: None,
             lyric: LyricPane::default(),
             cover: CoverArt::default(),
-            cover_area: None,
             sync_target: None,
             status: "按 / 搜索，或按 2-5 浏览歌单/歌手/排行榜/云端".to_string(),
             status_level: StatusLevel::Info,

@@ -118,12 +118,14 @@ pub enum Loaded {
     LoginFailed {
         message: String,
     },
-    /// 封面已解码成字符画。`hash` 用于丢弃过期结果（用户已切歌）。
+    /// 封面已解码。`hash` 用于丢弃过期结果（用户已切歌）。
     CoverReady {
         hash: String,
+        /// 半块字符画，只在没有图形协议时兜底。
         lines: Vec<String>,
-        /// 原图 PNG，供 kitty 终端按原样显示。
-        png: Option<Vec<u8>>,
+        /// 解码后的原图。图形协议要它来按显示区域重新编码，
+        /// 所以传解码结果而不是原始字节——省掉主线程再解一次。
+        image: image::DynamicImage,
     },
     /// 当前账号的会员信息摘要（用于界面显示）。
     VipStatus {

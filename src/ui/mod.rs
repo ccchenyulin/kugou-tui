@@ -23,7 +23,6 @@
 //! 这样一套布局从 80 列的 SSH 窗口到 200 列的宽屏都能用，不需要用户配置。
 
 pub mod cover;
-pub mod kitty;
 pub mod theme;
 pub mod views;
 pub mod widgets;
@@ -54,10 +53,6 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
 
     // 命中区每帧重建，保证鼠标坐标换算始终对应当前布局
     state.begin_frame();
-
-    // 封面区域也每帧重置：由需要显示封面的页面（首页/歌词页/封面页）
-    // 通过 draw_cover_block 重新设置。集中在这里做，避免各页面互相覆盖。
-    state.cover_area = None;
 
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         render_too_small(frame, area);

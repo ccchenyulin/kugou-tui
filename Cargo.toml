@@ -2,7 +2,10 @@
 name = "kugou-tui"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+# 1.86 是 ratatui-image 11.x 的下限：它要 ratatui 0.30，而支持 ratatui 0.30 的
+# ratatui-image 最低是 10.0.0，MSRV 就是 1.86。不能退回 8.x——8.x 只认
+# ratatui 0.29，会和这里的 0.30 编出两份 ratatui（且不兼容，渲染不进同一个 Frame）。
+rust-version = "1.86"
 description = "轻量级酷狗音乐命令行 TUI 播放器，基于 KuGouMusicApi"
 license = "MIT"
 repository = "https://github.com/sijin-xb/kugou-tui"
@@ -78,6 +81,13 @@ base64 = "0.23"
 crossbeam-channel = "0.5"
 qrcode = { version = "0.14.1", default-features = false }
 zbus = { version = "5.13.2", default-features = false, features = ["tokio"] }
+
+# --- 终端图片（封面）---
+# 关掉默认的 image-defaults：那会打开 image 的全部格式解码器并拖进 rayon，
+# 和本项目「只开 jpeg / png」的取舍冲突。crossterm 是探测终端能力所必需的。
+ratatui-image = { version = "11.1.0", default-features = false, features = [
+    "crossterm",
+] }
 
 [profile.release]
 opt-level = "z"
