@@ -265,9 +265,13 @@ impl ApiClient {
 
         // 第 1 页单独取：确定后面还有没有内容，避免一上来就并发一堆空请求
         let first = make(self.clone(), 1).await?;
-        let first_full = first.len() >= PAGE_LIMIT as usize;
+        // 只有**空**才说明真没了。
+        //
+        // 不能用「不足 PAGE_LIMIT」判断：解析时会有条目被过滤掉
+        // （缺 hash、字段类型不对等），一页 30 条剩 29 条是常事，
+        // 那样会误判成"没有下一页"，歌单直接被截断在 29 首。
         all.extend(first);
-        if !first_full {
+        if all.is_empty() {
             return Ok(all);
         }
 
@@ -285,8 +289,9 @@ impl ApiClient {
             while let Some(joined) = set.join_next().await {
                 match joined {
                     Ok(Ok(songs)) => {
-                        if songs.len() < PAGE_LIMIT as usize {
-                            stop = true; // 不足一页说明后面没有了
+                        // 同理，只有空页才停；短页后面可能还有内容
+                        if songs.is_empty() {
+                            stop = true;
                         }
                         all.extend(songs);
                     }
