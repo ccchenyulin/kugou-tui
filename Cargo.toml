@@ -1,0 +1,84 @@
+[package]
+name = "kugou-tui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "轻量级酷狗音乐命令行 TUI 播放器，基于 KuGouMusicApi"
+license = "MIT"
+repository = "https://github.com/sijin-xb/kugou-tui"
+keywords = ["tui", "music", "kugou", "player", "cli"]
+categories = ["command-line-utilities", "multimedia"]
+
+[[bin]]
+name = "kugou-tui"
+path = "src/main.rs"
+
+[dependencies]
+# --- TUI ---
+# 只依赖 ratatui，crossterm 通过 ratatui::crossterm 复用，避免版本错配
+ratatui = { version = "0.30", default-features = false, features = [
+    "crossterm",
+    "crossterm_0_29",
+    "all-widgets",
+    "layout-cache",
+    "underline-color",
+] }
+
+# --- 异步运行时（仅用于网络 IO） ---
+tokio = { version = "1", default-features = false, features = [
+    "rt-multi-thread",
+    "macros",
+    "time",
+    "fs",
+    "io-util",
+    "sync",
+] }
+
+# --- HTTP ---
+# 关闭默认 feature 以剔除 native-tls / system-proxy，改用 rustls，减小体积
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
+    "json",
+    "query",
+    "gzip",
+    "stream",
+    "http2",
+    "charset",
+] }
+
+# --- 音频解码与播放 ---
+# 关闭 default 以剔除 recording（录音，不需要）与 dither（抖动，额外引入 rand）
+rodio = { version = "0.22", default-features = false, features = [
+    "playback",
+    "mp3",
+    "flac",
+    "mp4",
+    "vorbis",
+    "wav",
+] }
+
+# --- 序列化 ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+
+# --- 错误处理 ---
+thiserror = "2"
+anyhow = "1"
+
+# --- 基础设施 ---
+dirs = "7"
+clap = { version = "4", features = ["derive", "env"] }
+base64 = "0.23"
+crossbeam-channel = "0.5"
+qrcode = { version = "0.14.1", default-features = false }
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 1

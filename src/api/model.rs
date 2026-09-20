@@ -1,0 +1,818 @@
+//! 领域模型，以及酷狗接口响应的**防御性**解析。
+//!
+//! # 为什么要写得这么啰嗦
+//!
+//! KuGouMusicApi 是对官方接口的逆向封装，返回的是酷狗原始 JSON。它的字段有两个
+//! 稳定特征：
+//!
+//! 1. **同一语义有多个键名**。歌单 id 可能是 `listid` / `list_id` / `specialid`；
+//!    歌曲列表可能在 `songs` / `list` / `info` / `musiclist` 下。
+//! 2. **数字与字符串混用**。`AlbumID` 有时是 `"123"`，有时是 `123`，有时是 `null`。
+//!
+//! 直接 `#[derive(Deserialize)]` 到强类型结构体，任何一个字段漂移都会让整条响应
+//! 解析失败，表现为「界面一片空白」这种最难排查的故障。所以这里：
+//!
+//! * 用 [`Value`] 承接叶子字段，再用 [`value_to_string`] 一类工具做宽容转换；
+//! * 用「候选键名列表」代替写死键名；
+//! * 所有构造器返回 `Option`，单条数据坏掉只丢一条，不会连累整页。
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::error::{AppError, Result};
+
+// ============================================================================
+// 领域模型
+// ============================================================================
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Singer {
+    pub id: i64,
+    pub name: String,
+}
+
+/// 一首歌。整个程序内部只认这一种表示，API 层的各种原始形态都要归一到它。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Song {
+    pub name: String,
+    /// 音频文件 hash，是 `/song/url`、`/search/lyric` 的唯一标识。
+    pub hash: String,
+    pub album_id: String,
+    /// `album_audio_id`（也叫 `MixSongID`）。带上它能显著提高取播放链接的成功率。
+    pub album_audio_id: i64,
+    pub album_name: String,
+    pub singers: Vec<Singer>,
+    pub duration_ms: u64,
+    pub cover: Option<String>,
+    /// 酷狗版权标记：`8` 通常表示可完整播放，`0` 表示需要 VIP 或已下架。
+    ///
+    /// 用 `Option` 是因为不少接口根本不返回这个字段（例如排行榜的 `/rank/audio`），
+    /// 把「没给」和「给了 0」混为一谈会让客户端对一堆正常歌曲误报版权受限。
+    pub privilege: Option<i64>,
+    /// 歌单条目 id，仅从歌单接口返回，云端删歌时需要。
+    pub file_id: Option<i64>,
+}
+
+impl Song {
+    /// 歌手名拼接，用于列表展示。
+    pub fn singer_text(&self) -> String {
+        if self.singers.is_empty() {
+            return "未知歌手".to_string();
+        }
+        self.singers
+            .iter()
+            .map(|singer| singer.name.as_str())
+            .collect::<Vec<_>>()
+            .join("、")
+    }
+
+    /// 版权标记是否表示可播。
+    ///
+    /// 酷狗没有公开 privilege 的语义，只能靠实测分布倒推：取真实歌单 30 首，
+    /// **29 首是 `10`、只有 1 首是 `0`**。把 `10` 当「不可播」会让整页正常歌曲误报
+    /// 版权受限，所以这里只把明确的 `0` 视作受限，其余（含字段缺失）都按可播处理——
+    /// 真正不能播时取链会失败并给出准确原因，比提前瞎猜好。
+    pub fn looks_playable(&self) -> bool {
+        match self.privilege {
+            None => true,
+            Some(code) => code != 0,
+        }
+    }
+
+    /// 展示用时长，形如 `03:47`。
+    pub fn duration_text(&self) -> String {
+        format_duration_ms(self.duration_ms)
+    }
+
+    /// 缓存键：同一首歌的不同音质要分开缓存。
+    pub fn cache_key(&self, quality: &str) -> String {
+        format!("{}-{}", self.hash.to_lowercase(), quality)
+    }
+
+    /// 试听片段专用的缓存键。
+    ///
+    /// # 为什么片段不能用正常缓存键
+    ///
+    /// 缓存键只由 `hash-quality` 组成，不区分「完整版」和「试听片段」。若把 60 秒
+    /// 片段按正常键存下来，之后即使会员生效，播放也会命中这个旧片段——表现就是
+    /// 「明明已经是会员，这首歌还是只能听几十秒」，而且很难想到是缓存问题。
+    ///
+    /// 用独立键之后：播放只查正常键，查不到就重新取链；能拿到完整版就存正常键，
+    /// 拿不到才存片段键。会员一生效，下一次播放自然就是完整版。
+    pub fn trial_cache_key(&self, quality: &str) -> String {
+        format!("{}-{}-trial", self.hash.to_lowercase(), quality)
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Playlist {
+    /// 歌单主键。公开歌单是 `global_collection_id` 字符串，自建歌单是数字 `listid`。
+    pub id: String,
+    /// 自建/收藏歌单的数字 `listid`，云端增删歌曲需要它。
+    pub list_id: Option<i64>,
+    pub name: String,
+    pub cover: Option<String>,
+    pub song_count: u32,
+    pub creator: Option<String>,
+    pub description: Option<String>,
+    /// 是否是当前登录用户自己创建的歌单。
+    pub is_own: bool,
+}
+
+impl Playlist {
+    /// 能否对它做云端写操作（加歌/删歌）。
+    pub fn is_writable(&self) -> bool {
+        self.list_id.is_some() && self.is_own
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Artist {
+    pub id: i64,
+    pub name: String,
+    pub avatar: Option<String>,
+    pub song_count: Option<u32>,
+    pub follower_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RankBoard {
+    pub id: i64,
+    pub name: String,
+    pub cover: Option<String>,
+    pub update_frequency: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LyricLine {
+    /// 该行起始时间（毫秒）。
+    pub time_ms: u64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Lyric {
+    pub lines: Vec<LyricLine>,
+}
+
+impl Lyric {
+    /// 二分查找当前时间对应的歌词行下标。
+    ///
+    /// 返回 `None` 表示还没到第一句歌词（前奏阶段）。
+    pub fn index_at(&self, position_ms: u64) -> Option<usize> {
+        if self.lines.is_empty() {
+            return None;
+        }
+        if position_ms < self.lines[0].time_ms {
+            return None;
+        }
+        // partition_point 返回第一个 time_ms > position 的位置，减一即为当前行
+        let index = self
+            .lines
+            .partition_point(|line| line.time_ms <= position_ms);
+        index.checked_sub(1)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+}
+
+// ============================================================================
+// 宽容的 JSON 取值工具
+// ============================================================================
+
+/// 把 `Value` 转成 `String`，兼容数字与布尔。
+pub fn value_to_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        _ => None,
+    }
+}
+
+/// 把 `Value` 转成 `i64`，兼容 `"123"`、`123.0`、`null`。
+pub fn value_to_i64(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| number.as_f64().map(|float| float as i64)),
+        Value::String(text) => {
+            let trimmed = text.trim();
+            trimmed
+                .parse::<i64>()
+                .ok()
+                .or_else(|| trimmed.parse::<f64>().ok().map(|float| float as i64))
+        }
+        Value::Bool(flag) => Some(i64::from(*flag)),
+        _ => None,
+    }
+}
+
+pub fn value_to_u64(value: &Value) -> Option<u64> {
+    value_to_i64(value).and_then(|number| u64::try_from(number).ok())
+}
+
+pub fn value_to_u32(value: &Value) -> Option<u32> {
+    value_to_i64(value).and_then(|number| u32::try_from(number).ok())
+}
+
+/// 依次尝试多个键名，返回第一个能转成字符串的值。
+///
+/// 这是应对「同一语义多个键名」的主要手段。
+pub fn pick_string(object: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(value_to_string))
+}
+
+pub fn pick_i64(object: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(value_to_i64))
+}
+
+pub fn pick_u64(object: &Value, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(value_to_u64))
+}
+
+/// 依次尝试多个键名，返回第一个是数组的值；都没有则返回空数组。
+pub fn pick_array<'a>(object: &'a Value, keys: &[&str]) -> &'a [Value] {
+    for key in keys {
+        if let Some(array) = object.get(*key).and_then(Value::as_array) {
+            return array.as_slice();
+        }
+    }
+    &[]
+}
+
+/// 校验 KuGouMusicApi 的业务错误码。
+///
+/// 只检查 `error_code`：`status` 字段在不同接口语义不一致（有的用 1/0，有的用 200），
+/// 拿它做判断会误杀正常响应。
+pub fn check_error_code(path: &str, root: &Value) -> Result<()> {
+    let Some(code) = root.get("error_code").and_then(value_to_i64) else {
+        return Ok(());
+    };
+    if code == 0 {
+        return Ok(());
+    }
+    let message = pick_string(root, &["error_msg", "errmsg", "msg", "message"])
+        .unwrap_or_else(|| "服务端未提供错误描述".to_string());
+    Err(AppError::Api {
+        path: path.to_string(),
+        code,
+        message,
+    })
+}
+
+// ============================================================================
+// 歌曲解析
+// ============================================================================
+
+/// 从任意一种酷狗歌曲 JSON 中提取 [`Song`]。
+///
+/// 酷狗在不同接口里用**三套完全不同的布局**描述同一首歌，这里都要认：
+///
+/// * 搜索结果：`SongName` / `FileHash` / `Singer` 数组
+/// * 歌单条目：`filename` / `hash` / `singername`
+/// * 排行榜条目（`/rank/audio`）：顶层**没有** `hash`、`duration`、`album_name`，
+///   音频信息全在 `audio_info`（`hash_128` / `hash_320` / `hash_flac`…），
+///   专辑名在 `album_info.album_name`，歌手在 `authors[].author_name`
+///
+/// 缺少 hash 时返回 `None`——没有 hash 就无法取播放链接，这条数据没有意义。
+pub fn song_from_json(value: &Value) -> Option<Song> {
+    let hash = pick_string(value, &["FileHash", "hash", "Filehash", "file_hash"])
+        .or_else(|| pick_audio_hash(value))?;
+
+    let name = pick_string(
+        value,
+        &["SongName", "songname", "audio_name", "filename", "name"],
+    )
+    .map(|name| strip_extension(&name))
+    .unwrap_or_else(|| "未知曲目".to_string());
+
+    let singers = parse_singers(value);
+    // 歌单条目的 `name` 形如 `BIGBANG - Love Song`（歌手被塞进了名字），
+    // 而列表里歌手本来就是单独一列，不去掉前缀就会显示两遍
+    let name = strip_singer_prefix(&name, &singers);
+
+    let duration_ms = pick_u64(value, &["Duration", "duration", "timelength", "timelen"])
+        .map(normalize_duration)
+        .or_else(|| pick_audio_duration(value))
+        .unwrap_or_default();
+
+    let album_audio_id = pick_i64(
+        value,
+        &[
+            "AlbumAudioID",
+            "album_audio_id",
+            "MixSongID",
+            "mixsongid",
+            "EMixSongID",
+            "audio_id",
+        ],
+    )
+    .unwrap_or_default();
+
+    // 封面可能在顶层、在 `trans_param` 里，也可能在 `album_info` / `albuminfo` 里
+    let cover = pick_string(value, &["Image", "img", "cover", "album_image"])
+        .or_else(|| nested_string(value, "trans_param", &["union_cover", "cover"]))
+        .or_else(|| nested_string(value, "album_info", &["sizable_cover", "cover"]))
+        .or_else(|| nested_string(value, "albuminfo", &["cover", "sizable_cover"]));
+
+    // 专辑名有三种藏法：顶层 `AlbumName`、排行榜的 `album_info.album_name`、
+    // 歌单条目的 `albuminfo.name`（注意这个没有下划线，是另一套命名）
+    let album_name = pick_string(value, &["AlbumName", "album_name"])
+        .or_else(|| nested_string(value, "album_info", &["album_name", "name"]))
+        .or_else(|| nested_string(value, "albuminfo", &["name", "album_name"]))
+        .unwrap_or_default();
+
+    Some(Song {
+        name,
+        hash,
+        album_id: pick_string(value, &["AlbumID", "album_id"]).unwrap_or_default(),
+        album_audio_id,
+        album_name,
+        singers,
+        duration_ms,
+        cover,
+        // 缺失即「未知」，交给 looks_playable 决定要不要预警
+        privilege: pick_i64(value, &["Privilege", "privilege", "pay_type"]),
+        file_id: pick_i64(value, &["Fileid", "FileId", "fileid", "file_id"]),
+    })
+}
+
+/// 从 `audio_info` 里取音频 hash。
+///
+/// 只有排行榜那类接口用这个布局：条目顶层没有 `hash`，各音质的 hash 分列在
+/// `audio_info.hash_128` / `hash_320` / `hash_flac` 等字段里。按「默认音质优先、
+/// 再退到任意可用」的顺序取——取哪个都只是播放时选的音质不同，不影响能不能播。
+fn pick_audio_hash(value: &Value) -> Option<String> {
+    let info = value.get("audio_info")?;
+    pick_string(
+        info,
+        &[
+            "hash_128",
+            "hash_320",
+            "hash_flac",
+            "hash_high",
+            "hash_super",
+        ],
+    )
+}
+
+/// 从 `audio_info` 里取时长。单位同样走 [`normalize_duration`] 归一。
+fn pick_audio_duration(value: &Value) -> Option<u64> {
+    let info = value.get("audio_info")?;
+    pick_u64(
+        info,
+        &[
+            "duration_128",
+            "duration_320",
+            "duration_flac",
+            "duration_high",
+            "duration_super",
+        ],
+    )
+    .map(normalize_duration)
+}
+
+/// 从 `object[key]` 这个嵌套对象里按候选键名取字符串。
+///
+/// 酷狗把同一语义散在不同嵌套结构里（`album_info` / `albuminfo` / `trans_param`…），
+/// 用这个省掉一长串 `.get(..).and_then(..)`。
+fn nested_string(object: &Value, key: &str, candidates: &[&str]) -> Option<String> {
+    object
+        .get(key)
+        .and_then(|inner| pick_string(inner, candidates))
+}
+
+/// 去掉歌名里重复的歌手前缀。
+///
+/// 歌单条目的 `name` 是 `BIGBANG - Love Song` 这种「歌手 - 歌名」，而列表里歌手
+/// 本来就单独占一列，不去掉就会显示两遍。只在确实以已知歌手名开头时才动手，
+/// 避免误伤真的以「某某 - 」开头的歌名。
+fn strip_singer_prefix(name: &str, singers: &[Singer]) -> String {
+    // 多位歌手时酷狗可能用「A、B」拼接，所以除了逐个歌手，也试一次拼接形式
+    let joined = singers
+        .iter()
+        .map(|singer| singer.name.as_str())
+        .collect::<Vec<_>>()
+        .join("、");
+
+    let candidates = singers
+        .iter()
+        .map(|singer| singer.name.as_str())
+        .chain(std::iter::once(joined.as_str()));
+
+    for candidate in candidates {
+        if candidate.is_empty() {
+            continue;
+        }
+        if let Some(rest) = name.strip_prefix(candidate) {
+            if let Some(title) = rest.strip_prefix(" - ") {
+                let title = title.trim();
+                if !title.is_empty() {
+                    return title.to_string();
+                }
+            }
+        }
+    }
+
+    name.to_string()
+}
+
+/// 去掉歌名末尾的音频扩展名。
+///
+/// 部分入口返回的歌名形如 `Overcast Sky.mp3`——扩展名对听歌没有任何帮助，却会挤占
+/// 列表本来就紧张的列名宽度。这里只在「后缀确实是常见音频格式、且去掉后名字不为空」
+/// 时才动手，避免误伤本来就以此结尾的正常歌名。
+fn strip_extension(name: &str) -> String {
+    const EXTENSIONS: [&str; 6] = [".mp3", ".flac", ".m4a", ".wav", ".ogg", ".aac"];
+
+    let lower = name.to_lowercase();
+    for extension in EXTENSIONS {
+        if let Some(stem) = lower.strip_suffix(extension) {
+            if !stem.trim().is_empty() {
+                // 按原串长度切片，保留原本的大小写
+                return name[..name.len() - extension.len()].trim_end().to_string();
+            }
+        }
+    }
+    name.to_string()
+}
+
+/// 解析歌手数组，退化时回落到 `SingerName` 字符串。
+fn parse_singers(value: &Value) -> Vec<Singer> {
+    let raw = pick_array(value, &["Singer", "singerinfo", "singers", "authors"]);
+    let mut singers: Vec<Singer> = raw
+        .iter()
+        .filter_map(|entry| {
+            let name = pick_string(entry, &["name", "Name", "singername", "author_name"])?;
+            Some(Singer {
+                id: pick_i64(entry, &["id", "Id", "singerid", "author_id"]).unwrap_or_default(),
+                name,
+            })
+        })
+        .collect();
+
+    if singers.is_empty() {
+        if let Some(text) = pick_string(value, &["SingerName", "singername", "author_name"]) {
+            singers = split_singer_text(&text);
+        }
+    }
+
+    // `filename` 形如 "Beyond - 海阔天空"，歌手名可以从中兜底提取
+    if singers.is_empty() {
+        if let Some(filename) = pick_string(value, &["filename", "audio_name"]) {
+            if let Some((prefix, _)) = filename.split_once(" - ") {
+                let prefix = prefix.trim();
+                if !prefix.is_empty() && prefix != "未知" {
+                    singers.push(Singer {
+                        id: 0,
+                        name: prefix.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    singers
+}
+
+/// 把 `"Beyond、黄家驹"` / `"Beyond/黄家驹"` 这类文本拆成多个歌手。
+fn split_singer_text(text: &str) -> Vec<Singer> {
+    text.split(['、', '/', '&', ',', '，'])
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| Singer {
+            id: 0,
+            name: name.to_string(),
+        })
+        .collect()
+}
+
+/// 酷狗的 `Duration` 单位不稳定：有时是秒，有时是毫秒。
+///
+/// 用 10000 做分界——超过 10000 的只可能是毫秒（约 2.7 小时以上），
+/// 秒数超过 10000 的歌曲不存在。
+fn normalize_duration(raw: u64) -> u64 {
+    if raw == 0 {
+        0
+    } else if raw > 10_000 {
+        raw
+    } else {
+        raw.saturating_mul(1_000)
+    }
+}
+
+/// 在 `data` 下寻找歌曲数组。
+///
+/// 候选键按「最可能」到「最兜底」排列，最后再扫描 `data` 本身。
+pub fn extract_songs(data: &Value) -> Vec<Song> {
+    const CANDIDATES: &[&str] = &[
+        "songs",
+        "list",
+        "info",
+        "musiclist",
+        "songlist",
+        "audios",
+        "lists",
+        "data",
+        "filelist",
+    ];
+
+    for key in CANDIDATES {
+        let array = pick_array(data, &[key]);
+        if array.is_empty() {
+            continue;
+        }
+        let songs: Vec<Song> = array.iter().filter_map(song_from_json).collect();
+        if !songs.is_empty() {
+            return songs;
+        }
+    }
+    Vec::new()
+}
+
+// ============================================================================
+// 歌单 / 歌手 / 排行榜解析
+// ============================================================================
+
+pub fn playlist_from_json(value: &Value) -> Option<Playlist> {
+    let list_id = pick_i64(value, &["listid", "list_id", "specialid", "special_id"]);
+    let global_id = pick_string(value, &["global_collection_id", "global_id", "gid"]);
+
+    // 至少要有一个 id，否则这个条目无法被打开
+    let id = global_id
+        .clone()
+        .or_else(|| list_id.map(|number| number.to_string()))?;
+
+    let name = pick_string(
+        value,
+        &["name", "listname", "specialname", "title", "collectname"],
+    )?;
+
+    Some(Playlist {
+        id,
+        list_id,
+        name,
+        cover: pick_string(
+            value,
+            &["pic", "imgurl", "img", "cover", "picurl", "banner"],
+        ),
+        song_count: pick_u32(
+            value,
+            &["songcount", "song_count", "count", "songnum", "total"],
+        )
+        .unwrap_or_default(),
+        creator: pick_string(
+            value,
+            &["nickname", "username", "creator", "user_name", "author"],
+        ),
+        description: pick_string(value, &["introduction", "intro", "description", "desc"]),
+        is_own: pick_i64(value, &["is_self", "isself", "is_mine"]).unwrap_or_default() == 1,
+    })
+}
+
+pub fn artist_from_json(value: &Value) -> Option<Artist> {
+    let name = pick_string(value, &["name", "author_name", "singername", "ArtistName"])?;
+    Some(Artist {
+        id: pick_i64(value, &["id", "author_id", "singerid", "ArtistId"]).unwrap_or_default(),
+        name,
+        avatar: pick_string(value, &["img", "avatar", "pic", "singer_img", "image"]),
+        song_count: pick_u32(
+            value,
+            &["songcount", "song_count", "audio_count", "musicnum"],
+        ),
+        follower_count: pick_u32(value, &["fanscount", "fans_count", "fansnum"]),
+    })
+}
+
+pub fn rank_board_from_json(value: &Value) -> Option<RankBoard> {
+    let id = pick_i64(value, &["rankid", "rank_id", "id"])?;
+    let name = pick_string(value, &["rankname", "rank_name", "name", "title"])?;
+    Some(RankBoard {
+        id,
+        name,
+        cover: pick_string(value, &["imgurl", "img", "pic", "cover", "banner"]),
+        update_frequency: pick_string(value, &["update_frequency", "updatefrequency", "frequency"]),
+    })
+}
+
+fn pick_u32(object: &Value, keys: &[&str]) -> Option<u32> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(value_to_u32))
+}
+
+// ============================================================================
+// 通用格式化
+// ============================================================================
+
+/// 毫秒 → `mm:ss`（超过一小时则是 `h:mm:ss`）。
+pub fn format_duration_ms(milliseconds: u64) -> String {
+    let total_seconds = milliseconds / 1_000;
+    let seconds = total_seconds % 60;
+    let minutes = (total_seconds / 60) % 60;
+    let hours = total_seconds / 3_600;
+
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parses_search_result_song() {
+        let raw = json!({
+            "SongName": "海阔天空",
+            "FileHash": "ABC123",
+            "AlbumID": 12345,
+            "AlbumAudioID": "67890",
+            "AlbumName": "乐与怒",
+            "Duration": 326,
+            "Privilege": 8,
+            "Singer": [{"id": 42, "name": "Beyond"}]
+        });
+
+        let song = song_from_json(&raw).expect("应能解析");
+        assert_eq!(song.name, "海阔天空");
+        assert_eq!(song.hash, "ABC123");
+        assert_eq!(song.album_id, "12345");
+        assert_eq!(song.album_audio_id, 67_890);
+        assert_eq!(song.duration_ms, 326_000);
+        assert_eq!(song.singer_text(), "Beyond");
+        assert!(song.looks_playable());
+    }
+
+    #[test]
+    fn parses_playlist_entry_song() {
+        let raw = json!({
+            "filename": "Beyond - 海阔天空",
+            "hash": "DEF456",
+            "duration": 326000,
+            "fileid": 999
+        });
+
+        let song = song_from_json(&raw).expect("应能解析");
+        assert_eq!(song.hash, "DEF456");
+        assert_eq!(song.duration_ms, 326_000);
+        assert_eq!(song.file_id, Some(999));
+        assert_eq!(song.singer_text(), "Beyond");
+    }
+
+    #[test]
+    fn rejects_song_without_hash() {
+        assert!(song_from_json(&json!({"SongName": "无 hash"})).is_none());
+    }
+
+    #[test]
+    fn parses_rank_entry_with_nested_audio_info() {
+        // 结构照抄 /rank/audio 的真实响应：顶层没有 hash / duration / album_name，
+        // 音频信息在 audio_info、专辑名在 album_info、歌手在 authors
+        let raw = json!({
+            "songname": "甲乙丙丁 (你我怎么两清)",
+            "author_name": "李佳薇",
+            "authors": [{ "author_id": 83922, "author_name": "李佳薇" }],
+            "audio_id": 1106816298,
+            "album_id": 197648995,
+            "album_audio_id": 920474385,
+            "audio_info": {
+                "hash_128": "213D580CA0BDCC28A5FDBA995FFDA106",
+                "hash_320": "B7AC734C6806EFF90C22C74F1AFFA156",
+                "hash_flac": "85479C21FADC65A7C495989D6FE9396D",
+                "duration_128": 210000,
+                "filesize_128": 3368531
+            },
+            "album_info": {
+                "album_name": "甲乙丙丁",
+                "sizable_cover": "http://imge.kugou.com/stdmusic/{size}/x.jpg"
+            }
+        });
+
+        let song = song_from_json(&raw).expect("排行榜条目也应能解析");
+        assert_eq!(song.hash, "213D580CA0BDCC28A5FDBA995FFDA106");
+        assert_eq!(song.name, "甲乙丙丁 (你我怎么两清)");
+        assert_eq!(song.album_name, "甲乙丙丁");
+        assert_eq!(song.duration_ms, 210_000);
+        assert_eq!(song.album_audio_id, 920_474_385);
+        assert_eq!(song.singer_text(), "李佳薇");
+        assert!(song.cover.is_some());
+        // privilege 缺失 → 按可播处理，否则会对整页正常歌曲误报版权受限
+        assert!(song.looks_playable());
+    }
+
+    #[test]
+    fn parses_playlist_entry_with_prefixed_name() {
+        // 结构照抄 /playlist/track/all 的真实响应：时长字段是 `timelen`，
+        // 专辑在 `albuminfo`（无下划线），而 `name` 里带着歌手前缀
+        let raw = json!({
+            "name": "BIGBANG - Love Song",
+            "hash": "1B0772CFE733408D58B4EEE703E1EBAE",
+            "timelen": 225854,
+            "size": 3614319,
+            "bitrate": 128,
+            "extname": "mp3",
+            "album_id": "537580",
+            "mixsongid": 64542610,
+            "fileid": 58,
+            "privilege": 10,
+            "singerinfo": [{ "name": "BIGBANG", "id": 84161, "type": 2 }],
+            "albuminfo": { "name": "빅뱅 스페셜에디션", "id": 537580 },
+            "cover": "http://imge.kugou.com/stdmusic/{size}/x.jpg"
+        });
+
+        let song = song_from_json(&raw).expect("歌单条目应能解析");
+        assert_eq!(song.name, "Love Song", "应去掉与歌手列重复的前缀");
+        assert_eq!(song.singer_text(), "BIGBANG");
+        assert_eq!(song.duration_ms, 225_854, "`timelen` 是毫秒");
+        assert_eq!(song.album_name, "빅뱅 스페셜에디션");
+        assert_eq!(song.album_audio_id, 64_542_610);
+        assert_eq!(song.file_id, Some(58));
+        // 实测歌单里 29/30 首的 privilege 都是 10，必须当作可播
+        assert_eq!(song.privilege, Some(10));
+        assert!(song.looks_playable());
+    }
+
+    #[test]
+    fn keeps_name_when_prefix_is_not_the_singer() {
+        let raw = json!({
+            "SongName": "Love - Actually",
+            "FileHash": "H",
+            "Singer": [{ "id": 1, "name": "Someone Else" }]
+        });
+        let song = song_from_json(&raw).expect("应能解析");
+        assert_eq!(song.name, "Love - Actually", "前缀不是歌手名时不该动它");
+    }
+
+    #[test]
+    fn missing_privilege_is_treated_as_playable() {
+        let absent = song_from_json(&json!({"FileHash": "H"})).expect("应能解析");
+        assert_eq!(absent.privilege, None);
+        assert!(absent.looks_playable());
+
+        let blocked = song_from_json(&json!({"FileHash": "H", "Privilege": 0})).expect("应能解析");
+        assert_eq!(blocked.privilege, Some(0));
+        assert!(!blocked.looks_playable());
+    }
+
+    #[test]
+    fn extracts_songs_from_nested_container() {
+        let payload = json!({
+            "data": {
+                "info": [
+                    {"SongName": "A", "FileHash": "h1"},
+                    {"SongName": "B", "FileHash": "h2"}
+                ]
+            }
+        });
+        let songs = extract_songs(payload.get("data").expect("data"));
+        assert_eq!(songs.len(), 2);
+        assert_eq!(songs[1].name, "B");
+    }
+
+    #[test]
+    fn finds_current_lyric_line() {
+        let lyric = Lyric {
+            lines: vec![
+                LyricLine {
+                    time_ms: 1_000,
+                    text: "第一句".into(),
+                },
+                LyricLine {
+                    time_ms: 5_000,
+                    text: "第二句".into(),
+                },
+                LyricLine {
+                    time_ms: 9_000,
+                    text: "第三句".into(),
+                },
+            ],
+        };
+        assert_eq!(lyric.index_at(500), None);
+        assert_eq!(lyric.index_at(1_000), Some(0));
+        assert_eq!(lyric.index_at(7_000), Some(1));
+        assert_eq!(lyric.index_at(60_000), Some(2));
+    }
+
+    #[test]
+    fn formats_duration() {
+        assert_eq!(format_duration_ms(0), "00:00");
+        assert_eq!(format_duration_ms(227_000), "03:47");
+        assert_eq!(format_duration_ms(3_723_000), "1:02:03");
+    }
+}

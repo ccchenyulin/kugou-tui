@@ -1,0 +1,322 @@
+//! 列表类视图：歌曲列表、条目列表、搜索输入框。
+//!
+//! 所有列表都走同一条渲染路径（`List` + `ListState`），因此滚动行为、选中高亮、
+//! 滚动条在五个标签页里完全一致——用户学一次就够了。
+
+use ratatui::Frame;
+use ratatui::layout::Rect;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+
+use crate::api::model::{Artist, Playlist, RankBoard};
+use crate::app::state::{EntryList, SearchPane, SongList};
+use crate::app::update::{artist_subtitle, playlist_subtitle, rank_subtitle};
+use crate::audio::engine::PlaybackState;
+use crate::ui::theme::Theme;
+use crate::ui::views::{empty_placeholder, loading_placeholder};
+use crate::ui::widgets::{
+    RowContext, display_width, entry_row, panel, selection_list, song_row, truncate_to_width,
+};
+
+/// 面板太小时直接跳过绘制。
+///
+/// ratatui 对 0 尺寸区域是安全的，但边框加内容至少需要 3 行 10 列才有意义；
+/// 提前返回也能省掉无谓的字符串构造。
+fn too_small(area: Rect) -> bool {
+    area.height < 3 || area.width < 10
+}
+
+/// 歌曲列表。五个标签页的「下半屏」都用它。
+/// 歌曲列表的视图参数。收成结构与 `QueueView` 保持一致，避免参数个数触发 clippy。
+pub struct SongView<'a> {
+    pub focused: bool,
+    pub current_hash: Option<&'a str>,
+    pub playback: PlaybackState,
+    /// 鼠标位置（列, 行）。用于算出悬停行（渲染函数内部换算，所以这里存原始坐标）。
+    pub pointer: Option<(u16, u16)>,
+}
+
+pub fn render_song_list(
+    frame: &mut Frame,
+    area: Rect,
+    list: &mut SongList,
+    view: SongView,
+    theme: &Theme,
+) {
+    if too_small(area) {
+        return;
+    }
+
+    let title = if list.title.is_empty() {
+        "歌曲".to_string()
+    } else {
+        list.title.clone()
+    };
+
+    let block = panel(title, view.focused, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if list.loading {
+        frame.render_widget(loading_placeholder(theme), inner);
+        return;
+    }
+    if list.songs.is_empty() {
+        frame.render_widget(empty_placeholder(list.empty_text(), theme), inner);
+        return;
+    }
+
+    // 右侧留 1 列给滚动条
+    let row_width = inner.width.saturating_sub(1) as usize;
+
+    // 把鼠标位置换算成「数据行下标」：List 内部按 cursor.offset() 滚动，
+    // 屏幕第 r 行对应的是 offset + r。
+    let hover_row = view.pointer.and_then(|(column, row)| {
+        if row < inner.y
+            || row >= inner.y + inner.height
+            || column < inner.x
+            || column >= inner.x + inner.width
+        {
+            return None;
+        }
+        let visible = (row - inner.y) as usize + list.cursor.offset();
+        (visible < list.songs.len()).then_some(visible)
+    });
+
+    let items: Vec<_> = list
+        .songs
+        .iter()
+        .enumerate()
+        .map(|(index, song)| {
+            let context = RowContext {
+                width: row_width,
+                is_current: view.current_hash == Some(song.hash.as_str()),
+                playback: view.playback,
+                hover: hover_row == Some(index),
+            };
+            song_row(index, song, context, theme)
+        })
+        .collect();
+
+    let widget = selection_list(items, theme);
+
+    frame.render_stateful_widget(widget, inner, &mut list.cursor);
+    render_scrollbar(frame, area, list.songs.len(), list.cursor.selected());
+}
+
+/// 歌单条目列表。
+pub fn render_playlist_entries(
+    frame: &mut Frame,
+    area: Rect,
+    list: &mut EntryList<Playlist>,
+    focused: bool,
+    theme: &Theme,
+) {
+    let title = "歌单广场".to_string();
+    render_entry_list(frame, area, list, &title, focused, theme, |playlist| {
+        playlist_subtitle(playlist)
+    });
+}
+
+/// 歌手条目列表。
+pub fn render_artist_entries(
+    frame: &mut Frame,
+    area: Rect,
+    list: &mut EntryList<Artist>,
+    focused: bool,
+    theme: &Theme,
+) {
+    render_entry_list(frame, area, list, "歌手", focused, theme, artist_subtitle);
+}
+
+/// 排行榜条目列表。
+pub fn render_rank_entries(
+    frame: &mut Frame,
+    area: Rect,
+    list: &mut EntryList<RankBoard>,
+    focused: bool,
+    theme: &Theme,
+) {
+    render_entry_list(frame, area, list, "排行榜", focused, theme, rank_subtitle);
+}
+
+/// 云端歌单条目列表。
+pub fn render_cloud_entries(
+    frame: &mut Frame,
+    area: Rect,
+    list: &mut EntryList<Playlist>,
+    focused: bool,
+    theme: &Theme,
+) {
+    render_entry_list(
+        frame,
+        area,
+        list,
+        "云端歌单 · s 收藏单曲 / S 同步队列",
+        focused,
+        theme,
+        |playlist| {
+            let mut subtitle = playlist_subtitle(playlist);
+            if !playlist.is_writable() {
+                subtitle.push_str(" · 只读");
+            }
+            subtitle
+        },
+    );
+}
+
+/// 条目列表的通用渲染。`subtitle` 由调用方决定每类条目显示什么副信息。
+fn render_entry_list<T: EntryTitle>(
+    frame: &mut Frame,
+    area: Rect,
+    list: &mut EntryList<T>,
+    title: &str,
+    focused: bool,
+    theme: &Theme,
+    subtitle: impl Fn(&T) -> String,
+) {
+    if too_small(area) {
+        return;
+    }
+
+    let block = panel(title.to_string(), focused, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if list.loading {
+        frame.render_widget(loading_placeholder(theme), inner);
+        return;
+    }
+    if list.entries.is_empty() {
+        frame.render_widget(empty_placeholder("暂无数据 · R 重新载入", theme), inner);
+        return;
+    }
+    let width = inner.width.saturating_sub(1) as usize;
+    let items: Vec<_> = list
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| entry_row(index, "", &subtitle(entry), None, width, theme))
+        .collect();
+
+    // `entry_row` 需要标题，这里按类型分别传入名称字段
+    let items = items
+        .into_iter()
+        .zip(list.entries.iter().enumerate())
+        .map(|(_, (index, entry))| {
+            entry_row(
+                index,
+                entry_title(entry),
+                &subtitle(entry),
+                None,
+                width,
+                theme,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let widget = selection_list(items, theme);
+
+    frame.render_stateful_widget(widget, inner, &mut list.cursor);
+    render_scrollbar(frame, area, list.entries.len(), list.cursor.selected());
+}
+
+/// 条目标题：三类条目都有 `name` 字段，用一个小 trait 统一取出来。
+trait EntryTitle {
+    fn title(&self) -> &str;
+}
+
+impl EntryTitle for Playlist {
+    fn title(&self) -> &str {
+        &self.name
+    }
+}
+
+impl EntryTitle for Artist {
+    fn title(&self) -> &str {
+        &self.name
+    }
+}
+
+impl EntryTitle for RankBoard {
+    fn title(&self) -> &str {
+        &self.name
+    }
+}
+
+fn entry_title<T: EntryTitle>(entry: &T) -> &str {
+    entry.title()
+}
+
+/// 搜索输入框。
+pub fn render_search_input(
+    frame: &mut Frame,
+    area: Rect,
+    pane: &SearchPane,
+    focused: bool,
+    theme: &Theme,
+) {
+    if area.height < 3 || area.width < 12 {
+        return;
+    }
+
+    let title = if pane.editing {
+        "搜索 · 输入中（Enter 提交 / Esc 退出）"
+    } else {
+        "搜索 · 按 Enter 或 / 开始输入"
+    };
+
+    let block = panel(title, focused, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height == 0 || inner.width < 4 {
+        return;
+    }
+
+    let empty = pane.input.is_empty();
+    let text = if empty {
+        "输入关键词，例如「海阔天空」"
+    } else {
+        pane.input.text()
+    };
+    let style = if empty { theme.dim() } else { theme.body() };
+
+    let line = Line::from(vec![
+        Span::styled("> ", theme.title()),
+        Span::styled(
+            truncate_to_width(text, inner.width.saturating_sub(2) as usize),
+            style,
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(line), inner);
+
+    // 编辑态下把真实终端光标放到输入位置，方便用户看清插入点
+    if pane.editing {
+        let before_cursor = &pane.input.text()[..pane.input.cursor_byte_index()];
+        let offset = display_width(before_cursor);
+        let max_offset = inner.width.saturating_sub(3) as usize;
+        let x = inner.x + 2 + offset.min(max_offset) as u16;
+        frame.set_cursor_position((x, inner.y));
+    }
+}
+
+/// 右侧滚动条。列表放得下时不画。
+fn render_scrollbar(frame: &mut Frame, area: Rect, total: usize, position: Option<usize>) {
+    if total == 0 || area.height < 5 {
+        return;
+    }
+    // 内容比视口短就不需要滚动条
+    if total <= area.height.saturating_sub(2) as usize {
+        return;
+    }
+
+    let mut state = ScrollbarState::new(total).position(position.unwrap_or(0));
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .thumb_symbol("┃")
+            .track_symbol(Some("│")),
+        area,
+        &mut state,
+    );
+}

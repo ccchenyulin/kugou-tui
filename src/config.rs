@@ -1,0 +1,412 @@
+//! 配置持久化。
+//!
+//! 落盘位置：`$XDG_CONFIG_HOME/kugou-tui/config.toml`（Linux 下即
+//! `~/.config/kugou-tui/config.toml`）。缓存与日志放在 `$XDG_CACHE_HOME/kugou-tui/`，
+//! 这样备份配置时不会把几百 MB 的音频缓存一起带走。
+//!
+//! 优先级：命令行参数 > 环境变量 > 配置文件 > 内置默认值。
+//! 环境变量由 clap 的 `env` 属性直接读入 [`Cli`]，因此这里只需实现后两级。
+
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::app::queue::PlaybackMode;
+use crate::cli::Cli;
+use crate::error::{AppError, Result};
+use crate::logger::tlog;
+use crate::source::{SourceKind, SourceSet};
+
+/// KuGouMusicApi 的默认监听地址。
+pub const DEFAULT_API_BASE: &str = "http://127.0.0.1:3000";
+
+const DEFAULT_VOLUME: f32 = 0.7;
+const DEFAULT_PAGE_SIZE: u32 = 30;
+const DEFAULT_TICK_MS: u64 = 200;
+const DEFAULT_CACHE_LIMIT_MIB: u64 = 512;
+const DEFAULT_QUALITY: &str = "128";
+const APP_DIR_NAME: &str = "kugou-tui";
+
+/// `/song/url` 支持的音质取值。
+///
+/// 前五个是常规音质；`viper_*` 是酷狗的「蝰蛇音效」系列，仅部分歌曲支持，
+/// 拿不到时服务端会返回空 url，客户端的错误提示会说明原因。
+pub const SUPPORTED_QUALITIES: &[&str] = &[
+    "128",
+    "320",
+    "flac",
+    "high",
+    "super",
+    "viper_clear",
+    "viper_atmos",
+    "viper_tape",
+];
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Config {
+    /// KuGouMusicApi 服务地址，例如 `http://127.0.0.1:3000`。
+    pub api_base: String,
+
+    /// 登录态 cookie，形如 `token=xxx; userid=xxx; dfid=xxx`。
+    ///
+    /// 搜索接口缺少认证信息会返回 `error_code: 152`，云歌单同步也依赖它。
+    pub cookie: Option<String>,
+
+    /// 设备指纹。为空时由 `/register/dev` 自动获取并回写。
+    pub dfid: Option<String>,
+
+    /// 音量，范围 `0.0 ~ 1.0`。
+    pub volume: f32,
+
+    /// 播放模式。
+    pub playback_mode: PlaybackMode,
+
+    /// 音频缓存目录。
+    pub cache_dir: PathBuf,
+
+    /// 缓存上限（MiB），`0` 表示不限制。
+    pub cache_limit_mib: u64,
+
+    /// 歌词时间偏移（毫秒）。正值表示歌词提前显示。
+    pub lyric_offset_ms: i64,
+
+    /// 界面刷新间隔（毫秒）。这是控制 CPU 占用的主要旋钮。
+    pub tick_ms: u64,
+
+    /// 列表每页条目数。
+    pub page_size: u32,
+
+    /// 访问 KuGouMusicApi 时使用的 HTTP 代理。
+    pub proxy: Option<String>,
+
+    /// 音质。可选 `128` / `320` / `flac` / `high`。
+    ///
+    /// 128 是普通音质，下载体积最小、缓存最省空间，作为默认值。
+    pub quality: String,
+
+    /// 是否强制使用 16 色板（适配老终端）。
+    pub basic_color: bool,
+
+    /// 各音源的连接与身份配置，以及当前选中的音源。
+    ///
+    /// 切换音源时，`api_base` / `cookie` / `dfid` 会从选中的音源同步过来。
+    /// 这三个字段仍是运行时实际读取的值，这样改动面最小，也不会漏掉某处引用。
+    pub sources: SourceSet,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            api_base: DEFAULT_API_BASE.to_string(),
+            cookie: None,
+            dfid: None,
+            volume: DEFAULT_VOLUME,
+            playback_mode: PlaybackMode::Sequential,
+            cache_dir: default_cache_dir(),
+            cache_limit_mib: DEFAULT_CACHE_LIMIT_MIB,
+            lyric_offset_ms: 0,
+            tick_ms: DEFAULT_TICK_MS,
+            page_size: DEFAULT_PAGE_SIZE,
+            proxy: None,
+            quality: DEFAULT_QUALITY.to_string(),
+            basic_color: false,
+            sources: SourceSet::default(),
+        }
+    }
+}
+
+impl Config {
+    /// 当前选中的音源种类。
+    pub fn active_source_kind(&self) -> SourceKind {
+        self.sources.active
+    }
+
+    /// 切换到指定音源：把它的连接与身份信息同步到运行时字段。
+    ///
+    /// 只改配置，**不碰播放队列与当前曲目**，因此切换过程中播放不会中断。
+    pub fn switch_source(&mut self, kind: SourceKind) {
+        let profile = self.sources.profile(kind).clone();
+        self.sources.active = kind;
+        self.api_base = profile.api_base;
+        self.cookie = profile.cookie;
+        self.dfid = profile.device_id;
+    }
+
+    /// 把当前运行时字段回填进选中音源的档案。
+    ///
+    /// 登录成功或自动取到 dfid 后调用，保证切走再切回来时身份还在。
+    pub fn sync_active_source(&mut self) {
+        let kind = self.sources.active;
+        let profile = self.sources.profile_mut(kind);
+        // 刻意**不**回写 api_base：它是音源自己的身份，不该被运行时的地址覆盖。
+        // 否则一旦用 `--api-base` 临时指向别处，就会把该音源的地址改坏——
+        // 表现是「明明选了概念版，却一直在打标准版」，而 dfid 又只对概念版有效，
+        // 于是取链报 20028。地址只由 switch_source() 从档案里取。
+        profile.cookie = self.cookie.clone();
+        profile.device_id = self.dfid.clone();
+    }
+}
+
+impl Config {
+    /// 配置文件路径。
+    pub fn path() -> PathBuf {
+        config_root().join("config.toml")
+    }
+
+    /// 日志文件路径。
+    pub fn log_path() -> PathBuf {
+        default_cache_dir().join("kugou-tui.log")
+    }
+
+    /// 读取配置。任何异常都退化为默认配置，保证程序总能启动。
+    pub fn load() -> Self {
+        let path = Self::path();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Self::default();
+            }
+            Err(error) => {
+                tlog!(
+                    crate::logger::LEVEL_WARN,
+                    "读取配置文件 {} 失败：{error}，改用默认配置",
+                    path.display()
+                );
+                return Self::default();
+            }
+        };
+
+        match toml::from_str::<Self>(&text) {
+            Ok(config) => config.normalized(),
+            Err(error) => {
+                tlog!(
+                    crate::logger::LEVEL_WARN,
+                    "解析配置文件 {} 失败：{error}，改用默认配置",
+                    path.display()
+                );
+                Self::default()
+            }
+        }
+    }
+
+    /// 写回配置文件，使用 pretty 格式方便用户手工编辑。
+    ///
+    /// 文件里存着登录 token，所以目录收成 `0700`、文件收成 `0600`——默认的
+    /// `0644` 会让同机器上的其他用户直接读到你的账号凭据。
+    pub fn save(&self) -> Result<()> {
+        let path = Self::path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| AppError::io_at(parent.display().to_string(), error))?;
+            restrict_permissions(parent, 0o700)?;
+        }
+
+        let text = toml::to_string_pretty(self)
+            .map_err(|error| AppError::Config(format!("序列化配置失败：{error}")))?;
+        std::fs::write(&path, text)
+            .map_err(|error| AppError::io_at(path.display().to_string(), error))?;
+        restrict_permissions(&path, 0o600)
+    }
+
+    /// 用命令行参数覆盖配置。仅当用户显式传参时才覆盖。
+    pub fn merge_cli(&mut self, cli: &Cli) {
+        if let Some(api_base) = cli.api_base.as_deref() {
+            let trimmed = api_base.trim();
+            if !trimmed.is_empty() {
+                self.api_base = trimmed.to_string();
+            }
+        }
+        if let Some(cookie) = cli.cookie.as_deref() {
+            let trimmed = cookie.trim();
+            if !trimmed.is_empty() {
+                self.cookie = Some(trimmed.to_string());
+            }
+        }
+        if let Some(volume) = cli.volume {
+            self.volume = f32::from(volume) / 100.0;
+        }
+        if let Some(cache_dir) = cli.cache_dir.as_ref() {
+            self.cache_dir = cache_dir.clone();
+        }
+        if let Some(limit) = cli.cache_limit {
+            self.cache_limit_mib = limit;
+        }
+        if let Some(tick_ms) = cli.tick_ms {
+            self.tick_ms = tick_ms;
+        }
+        if let Some(page_size) = cli.page_size {
+            self.page_size = page_size;
+        }
+        if let Some(proxy) = cli.proxy.as_deref() {
+            let trimmed = proxy.trim();
+            if !trimmed.is_empty() {
+                self.proxy = Some(trimmed.to_string());
+            }
+        }
+        if cli.basic_color {
+            self.basic_color = true;
+        }
+        self.normalize();
+    }
+
+    /// 把配置约束到合法区间，避免手改配置文件写出越界值。
+    pub fn normalized(mut self) -> Self {
+        self.normalize();
+        self
+    }
+
+    fn normalize(&mut self) {
+        self.api_base = self.api_base.trim().trim_end_matches('/').to_string();
+        if self.api_base.is_empty() {
+            self.api_base = DEFAULT_API_BASE.to_string();
+        }
+        if !self.api_base.starts_with("http://") && !self.api_base.starts_with("https://") {
+            self.api_base = format!("http://{}", self.api_base);
+        }
+
+        self.volume = if self.volume.is_finite() {
+            self.volume.clamp(0.0, 1.0)
+        } else {
+            DEFAULT_VOLUME
+        };
+
+        self.tick_ms = self.tick_ms.clamp(50, 5_000);
+        self.page_size = self.page_size.clamp(5, 200);
+        self.lyric_offset_ms = self.lyric_offset_ms.clamp(-10_000, 10_000);
+
+        let quality = self.quality.trim().to_ascii_lowercase();
+        self.quality = if SUPPORTED_QUALITIES.contains(&quality.as_str()) {
+            quality
+        } else {
+            DEFAULT_QUALITY.to_string()
+        };
+
+        if self.cache_dir.as_os_str().is_empty() {
+            self.cache_dir = default_cache_dir();
+        } else {
+            // 允许在配置文件里写 `~/music-cache`
+            self.cache_dir = expand_tilde(&self.cache_dir);
+        }
+
+        if let Some(cookie) = self.cookie.as_ref() {
+            let trimmed = cookie.trim();
+            if trimmed.is_empty() {
+                self.cookie = None;
+            } else if trimmed.len() != cookie.len() {
+                self.cookie = Some(trimmed.to_string());
+            }
+        }
+    }
+
+    /// 组装最终发给 KuGouMusicApi 的 cookie 串。
+    ///
+    /// 若用户配置里已包含 `dfid=`，则以用户配置为准；否则用自动探测到的 dfid 补齐。
+    /// `/song/url` 接口缺少 dfid 会返回「本次请求需要验证」。
+    pub fn cookie_header(&self) -> Option<String> {
+        let base = self.cookie.as_deref().unwrap_or_default().trim();
+        let has_dfid = base.split(';').any(|pair| pair.trim().starts_with("dfid="));
+
+        match (base.is_empty(), has_dfid, self.dfid.as_deref()) {
+            (true, _, Some(dfid)) => Some(format!("dfid={dfid}")),
+            (true, _, None) => None,
+            (false, false, Some(dfid)) => Some(format!("{base}; dfid={dfid}")),
+            (false, _, _) => Some(base.to_string()),
+        }
+    }
+
+    /// 是否已配置登录态。
+    pub fn is_logged_in(&self) -> bool {
+        self.cookie
+            .as_deref()
+            .map(|cookie| cookie.contains("token=") && cookie.contains("userid="))
+            .unwrap_or(false)
+    }
+
+    /// 确保缓存目录存在。
+    pub fn ensure_cache_dir(&self) -> Result<()> {
+        std::fs::create_dir_all(&self.cache_dir)
+            .map_err(|error| AppError::io_at(self.cache_dir.display().to_string(), error))
+    }
+}
+
+/// 缓存根目录。
+pub fn default_cache_dir() -> PathBuf {
+    dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(APP_DIR_NAME)
+}
+
+fn config_root() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(APP_DIR_NAME)
+}
+
+/// 把 `~` 展开成用户主目录，供配置文件里手写路径时使用。
+pub fn expand_tilde(path: &Path) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    let Some(rest) = text.strip_prefix('~') else {
+        return path.to_path_buf();
+    };
+    let Some(home) = dirs::home_dir() else {
+        return path.to_path_buf();
+    };
+    home.join(rest.trim_start_matches('/'))
+}
+
+/// 收紧文件或目录权限。非 Unix 平台上是空操作。
+///
+/// 刻意用 `set_permissions` 而不是依赖 umask：umask 是进程级、由启动环境决定的，
+/// 不能让「凭据文件谁能读」取决于用户从哪个 shell 启动程序。
+fn restrict_permissions(path: &Path, mode: u32) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .map_err(|error| AppError::io_at(path.display().to_string(), error))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn normalizes_api_base_and_volume() {
+        let mut config = Config {
+            api_base: "127.0.0.1:3000/".to_string(),
+            volume: 9.0,
+            ..Config::default()
+        };
+        config = config.normalized();
+        assert_eq!(config.api_base, "http://127.0.0.1:3000");
+        assert!((config.volume - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn appends_dfid_only_when_absent() {
+        let mut config = Config {
+            cookie: Some("token=t; userid=1".to_string()),
+            dfid: Some("abc".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(
+            config.cookie_header().as_deref(),
+            Some("token=t; userid=1; dfid=abc")
+        );
+
+        config.cookie = Some("token=t; userid=1; dfid=keep".to_string());
+        assert_eq!(
+            config.cookie_header().as_deref(),
+            Some("token=t; userid=1; dfid=keep")
+        );
+    }
+}

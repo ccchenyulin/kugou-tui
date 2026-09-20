@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+#
+# kugou-api —— 一次拉起两个 KuGouMusicApi 实例（标准版 / 概念版）。
+#
+# 为什么需要两个：酷狗的两个平台是两套独立的鉴权体系，平台由服务端 `platform`
+# 环境变量决定（`lite` = 概念版），而一个 Node 进程只能加载一份配置。所以要同时
+# 用两个音源，就得起两个进程、各占一个端口。
+#
+# 注意：两个平台的登录态不通用。切到概念版音源后需要按 L 重新扫码。
+#
+# 用法：
+#   kugou-api          # 启动两个实例（已在跑的会跳过）
+#   kugou-api status   # 查看状态
+#   kugou-api stop     # 停止两个实例
+#
+set -euo pipefail
+
+API_DIR="${KUGOU_API_DIR:-$HOME/KuGouMusicApi}"
+LOG_DIR="${KUGOU_API_LOG_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/kugou-tui}"
+
+# 端口与平台一一对应：3000 标准版（不设 platform）、3001 概念版（platform=lite）
+STANDARD_PORT="${KUGOU_STANDARD_PORT:-3000}"
+LITE_PORT="${KUGOU_LITE_PORT:-3001}"
+
+if [ ! -d "$API_DIR" ]; then
+  printf '\033[31m找不到 KuGouMusicApi：%s\033[0m\n' "$API_DIR" >&2
+  printf '先执行：\n  git clone https://github.com/MakcRe/KuGouMusicApi.git "%s"\n  cd "%s" && npm install --omit=dev\n' \
+    "$API_DIR" "$API_DIR" >&2
+  exit 1
+fi
+
+# 健康检查走 `/`：express.static 直接吐静态页，是纯本地操作；
+# /register/dev 会真的请求酷狗服务器，冷缓存时要 1 秒以上。
+alive() { curl -sf --max-time 2 "http://127.0.0.1:$1/" 2>/dev/null | grep -q '酷狗'; }
+
+start_one() {
+  local port="$1" platform="$2" log="$3"
+  if alive "$port"; then
+    printf '  :%s 已在运行\n' "$port"
+    return 0
+  fi
+
+  mkdir -p "$LOG_DIR"
+  # setsid 让服务脱离当前会话，避免终端退出时被一起回收
+  if command -v setsid >/dev/null 2>&1; then
+    ( cd "$API_DIR" && env "${platform:1}" PORT="$port" setsid nohup node app.js >>"$log" 2>&1 </dev/null & )
+  else
+    ( cd "$API_DIR" && env "${platform:1}" PORT="$port" nohup node app.js >>"$log" 2>&1 </dev/null & )
+  fi
+
+  for _ in $(seq 1 40); do
+    sleep 0.5
+    alive "$port" && break
+  done
+
+  if alive "$port"; then
+    printf '  \033[32m:%s 已就绪\033[0m\n' "$port"
+  else
+    printf '  \033[31m:%s 启动失败，日志：%s\033[0m\n' "$port" "$log" >&2
+    tail -n 10 "$log" >&2 || true
+    return 1
+  fi
+}
+
+case "${1:-start}" in
+  start)
+    printf '启动 KuGouMusicApi（%s）\n' "$API_DIR"
+    # 平台串以 " " 开头是为了让 env 把它当独立参数；标准版不设 platform
+    start_one "$STANDARD_PORT" " " "$LOG_DIR/api.log"
+    start_one "$LITE_PORT" " platform=lite" "$LOG_DIR/api-lite.log"
+    printf '标准版 :%s ／ 概念版 :%s\n' "$STANDARD_PORT" "$LITE_PORT"
+    ;;
+
+  status)
+    for entry in "$STANDARD_PORT:标准版" "$LITE_PORT:概念版"; do
+      port="${entry%%:*}"
+      name="${entry##*:}"
+      if alive "$port"; then
+        printf '  \033[32m●\033[0m %s :%s 运行中\n' "$name" "$port"
+      else
+        printf '  \033[31m○\033[0m %s :%s 未运行\n' "$name" "$port"
+      fi
+    done
+    ;;
+
+  stop)
+    # 只杀本目录下的 app.js，避免误伤其它 Node 进程
+    pkill -f "node app.js" 2>/dev/null || true
+    printf '已停止两个实例\n'
+    ;;
+
+  *)
+    printf '用法：kugou-api [start|status|stop]\n' >&2
+    exit 1
+    ;;
+esac

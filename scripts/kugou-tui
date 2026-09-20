@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+#
+# kugou-tui —— 启动器：确保 KuGouMusicApi 在跑，然后进入播放器。
+#
+# 为什么需要它：kugou-tui 只是客户端，数据全来自 KuGouMusicApi。服务没起时界面能开
+# 但什么都搜不到，容易让人以为程序坏了。这里把「检查 → 拉起 → 等待就绪」收进一条命令；
+# 服务已经在跑时它只是一次本地探测，开销可忽略。
+#
+# 用法：
+#   kugou-tui                 # 打开播放器
+#   kugou-tui -s 海阔天空      # 启动即搜索（其余参数原样透传）
+#   KUGOU_API_BASE=http://other:3000 kugou-tui
+#
+set -euo pipefail
+
+API_BASE="${KUGOU_API_BASE:-http://127.0.0.1:3000}"
+API_DIR="${KUGOU_API_DIR:-$HOME/KuGouMusicApi}"
+API_LOG="${KUGOU_API_LOG:-${XDG_CACHE_HOME:-$HOME/.cache}/kugou-tui/api.log}"
+
+# 定位二进制：优先环境变量，其次脚本所在仓库的 target/release。
+# 用 readlink -f 解析软链接，这样把脚本软链到 ~/.local/bin 也能找对地方。
+if [ -n "${KUGOU_TUI_BIN:-}" ]; then
+  BIN="$KUGOU_TUI_BIN"
+else
+  self_path=$(readlink -f -- "${BASH_SOURCE[0]}")
+  BIN="$(dirname -- "$self_path")/../target/release/kugou-tui"
+fi
+
+if [ ! -x "$BIN" ]; then
+  printf '\033[31m找不到可执行文件：%s\033[0m\n' "$BIN" >&2
+  printf '先编译：cd "%s" && cargo build --release\n' "$(dirname -- "$BIN")/.." >&2
+  exit 1
+fi
+
+# 用本地静态页做健康检查：/register/dev 会真的去请求酷狗服务器（冷缓存时 1 秒以上），
+# 而 `/` 由 express.static 直接吐出来，是纯本地操作。顺手校验内容，确认监听的是本服务。
+api_alive() { curl -sf --max-time 2 "$API_BASE/" 2>/dev/null | grep -q '酷狗'; }
+
+if ! api_alive; then
+  if [ ! -d "$API_DIR" ]; then
+    printf '\033[33mKuGouMusicApi 未运行，且目录不存在：%s\033[0m\n' "$API_DIR" >&2
+    printf '先执行：\n  git clone https://github.com/MakcRe/KuGouMusicApi.git "%s"\n  cd "%s" && npm install --omit=dev\n' \
+      "$API_DIR" "$API_DIR" >&2
+    exit 1
+  fi
+
+  printf '\033[36mKuGouMusicApi 未运行，正在启动…\033[0m\n' >&2
+  mkdir -p "$(dirname "$API_LOG")"
+  # setsid 让服务脱离当前会话，避免终端或父进程退出时被一起回收；没有就退回 nohup。
+  if command -v setsid >/dev/null 2>&1; then
+    ( cd "$API_DIR" && setsid nohup node app.js >>"$API_LOG" 2>&1 </dev/null & )
+  else
+    ( cd "$API_DIR" && nohup node app.js >>"$API_LOG" 2>&1 </dev/null & )
+  fi
+
+  for _ in $(seq 1 40); do
+    sleep 0.5
+    api_alive && break
+  done
+
+  if ! api_alive; then
+    printf '\033[31m服务启动失败，日志尾部：\033[0m\n' >&2
+    tail -n 15 "$API_LOG" >&2 || true
+    exit 1
+  fi
+  printf '\033[32m服务已就绪：%s\033[0m\n' "$API_BASE" >&2
+fi
+
+# 用户自己传了 --api-base 就完全尊重，不再叠加（否则 clap 会因重复参数报错）
+for arg in "$@"; do
+  case "$arg" in
+    -a|--api-base|--api-base=*) exec "$BIN" "$@" ;;
+  esac
+done
+
+exec "$BIN" --api-base "$API_BASE" "$@"

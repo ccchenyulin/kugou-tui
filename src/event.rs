@@ -1,0 +1,191 @@
+//! 全进程唯一的事件总线。
+//!
+//! # 为什么只留一条通道
+//!
+//! 参与方有三个：键盘输入线程、音频线程、Tokio 网络任务。如果各自维护一条通道，
+//! 主循环就要做多路复用（`select!`），而 Tokio 的 `mpsc` 与 crossbeam 的
+//! `select!` 无法直接混用，代码会迅速变脏。
+//!
+//! 所以统一成一条 `crossbeam_channel::unbounded::<Event>()`：
+//!
+//! * `unbounded` —— 发送端永不阻塞，因此可以从异步任务里同步调用，不需要 `await`；
+//! * 主循环 `recv_timeout(tick)` —— 有事件立刻醒（按键零延迟），无事件就按 tick 刷新。
+//!
+//! 队列长度由「用户按键速率 + 音频 4Hz 位置上报 + 网络任务完成」决定，天然有界。
+
+use std::path::PathBuf;
+
+use crossbeam_channel::{Receiver, Sender, unbounded};
+use ratatui::crossterm::event::{KeyEvent, MouseEvent};
+
+use crate::api::model::{Artist, Lyric, Playlist, RankBoard, Song};
+use crate::audio::engine::AudioEvent;
+use crate::error::AppError;
+
+/// 歌单歌曲请求的发起方。
+///
+/// 歌单广场与云端歌单共用同一条请求路径，但结果要落到各自的歌曲面板。
+/// 用枚举记录发起方、而不是在结果回来时读「当前标签页」，是因为请求是异步的——
+/// 用户完全可能在结果回来之前切走标签页，那样结果就会写错面板。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaylistSource {
+    /// 歌单广场。
+    Plaza,
+    /// 云端（个人）歌单。
+    Cloud,
+}
+
+/// 一次异步任务的产出。
+///
+/// 每个变体都自带「这次请求是针对什么」的上下文（关键词、歌单、歌手、歌曲 hash），
+/// 这样即使用户在结果返回前已经切歌或切换视图，主循环也能判断该不该消费这批数据。
+#[derive(Debug)]
+pub enum Loaded {
+    Search {
+        keyword: String,
+        songs: Vec<Song>,
+    },
+    /// 歌单广场 / 搜索结果里的歌单列表。
+    Playlists {
+        title: String,
+        items: Vec<Playlist>,
+    },
+    PlaylistTracks {
+        playlist: Playlist,
+        songs: Vec<Song>,
+        source: PlaylistSource,
+    },
+    Artists(Vec<Artist>),
+    ArtistSongs {
+        artist: Artist,
+        songs: Vec<Song>,
+    },
+    RankBoards(Vec<RankBoard>),
+    RankTracks {
+        board: RankBoard,
+        songs: Vec<Song>,
+    },
+    /// 当前登录用户的云端歌单。
+    CloudPlaylists(Vec<Playlist>),
+    Lyric {
+        hash: String,
+        lyric: Lyric,
+    },
+    /// 已经拿到播放直链。
+    StreamReady {
+        song: Box<Song>,
+        url: String,
+        start_at_ms: u64,
+        /// 是否为试听片段。为真时播完不应被当作「正常结束」而自动切歌。
+        is_trial: bool,
+        /// 完整版拿不到的原因（如「需要开通会员或单独购买该专辑」）。
+        reason: Option<String>,
+    },
+    /// 下载进度。已按 256 KiB 节流，不会淹没事件通道。
+    DownloadProgress {
+        received: u64,
+        total: Option<u64>,
+    },
+    /// 音频已落盘，可以交给音频线程播放。
+    StreamCached {
+        song: Box<Song>,
+        path: PathBuf,
+        start_at_ms: u64,
+    },
+    /// 自动探测到的设备指纹，需要回写配置。
+    DeviceFingerprint(String),
+    /// 音频缓存已占用字节数。
+    CacheUsage(u64),
+    /// 登录二维码已就绪：`content` 是二维码内容（一段 URL）。
+    LoginQr {
+        key: String,
+        content: String,
+    },
+    /// 扫码状态提示（等待扫码 / 待确认 / 已过期）。
+    LoginStatus {
+        message: String,
+    },
+    /// 扫码成功，带回登录令牌。
+    LoginSucceeded {
+        token: String,
+        userid: String,
+    },
+    /// 登录失败。
+    LoginFailed {
+        message: String,
+    },
+    /// 当前账号的会员信息摘要（用于界面显示）。
+    VipStatus {
+        label: String,
+    },
+    /// 云端写操作（加歌/删歌）的提示信息。
+    CloudNotice(String),
+    /// 异步任务失败。
+    Failed {
+        context: String,
+        error: AppError,
+    },
+}
+
+#[derive(Debug)]
+pub enum Event {
+    /// 原始按键。
+    ///
+    /// 刻意不在输入线程里翻译成语义动作：按键的含义取决于当前是否在输入框里，
+    /// 只有主循环知道这个状态。让输入线程保持「哑」的，也避免了共享可变状态。
+    Key(KeyEvent),
+    /// 终端尺寸变化。
+    ///
+    /// 不携带尺寸：布局每帧都从 `Frame::area()` 重算，这个事件的作用只是把主循环
+    /// 从 `recv_timeout` 里立刻唤醒，让用户拖动窗口时画面马上跟上。
+    Resize,
+    /// 鼠标事件（点击 / 滚轮 / 拖动）。
+    Mouse(MouseEvent),
+    /// 音频线程上报。
+    Audio(AudioEvent),
+    /// 网络任务完成。
+    Loaded(Box<Loaded>),
+    /// 定时心跳：推进进度条与歌词，没有事件时也会到达。
+    Tick,
+}
+
+/// 事件总线的发送端。可以自由克隆，跨线程移动。
+///
+/// 接收端不放在这里——它只属于主循环。crossbeam 的通道在接收端全部丢弃后才
+/// 断开，把接收端也塞进可克隆的总线里会让「断开」永远不发生。
+#[derive(Debug, Clone)]
+pub struct EventBus {
+    sender: Sender<Event>,
+}
+
+impl EventBus {
+    /// 创建总线，返回发送端与唯一的接收端。
+    pub fn new() -> (Self, Receiver<Event>) {
+        let (sender, receiver) = unbounded();
+        (Self { sender }, receiver)
+    }
+
+    /// 发送一个事件。接收端已关闭（进程正在退出）时静默忽略。
+    pub fn send(&self, event: Event) {
+        let _ = self.sender.send(event);
+    }
+
+    /// 发送一次异步产出。
+    pub fn emit(&self, loaded: Loaded) {
+        self.send(Event::Loaded(Box::new(loaded)));
+    }
+
+    /// 上报一次异步失败，`context` 说明是哪个操作失败了。
+    pub fn fail(&self, context: impl Into<String>, error: AppError) {
+        self.emit(Loaded::Failed {
+            context: context.into(),
+            error,
+        });
+    }
+}
+
+impl Default for EventBus {
+    fn default() -> Self {
+        Self::new().0
+    }
+}
