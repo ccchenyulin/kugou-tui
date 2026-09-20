@@ -585,21 +585,39 @@ impl ApiClient {
 
     /// 发一次 `/song/url`。`free_part` 决定是否只要试听片段。
     ///
-    /// 调参历史：之前会传 `album_id` / `album_audio_id`，但服务端没有就默认 0，
-    /// 反而干扰服务端做 hash 候选匹配——MoeKoeMusic 客户端就不传。这里去掉。
-    /// `ppage_id` 是「官方客户端指纹」，缺这个酷狗会按非官方客户端降级处理，
-    /// VIP 歌曲直接给空 url。**这是之前 VIP 歌曲「没资源」的真凶之一**。
+    /// # 别自己编 `ppage_id`
+    ///
+    /// 服务端 `song_url.js` 里是这样取客户端指纹的：
+    /// ```js
+    /// const ppage_id = isLite
+    ///   ? (params.ppage_id || '356753938,823673182,967485191')  // 概念版：用客户端传的
+    ///   : '463467626,350369493,788954147';                       // 标准版：硬编码，忽略客户端
+    /// ```
+    /// **概念版会用客户端传的值**，标准版则完全忽略。我们既不知道用户跑的是哪个
+    /// 平台（`platform` 是服务端的环境变量，客户端看不到），也就无从给对——
+    /// 一旦传了错的（标准版的指纹喂给概念版服务端），指纹与平台不匹配，酷狗直接
+    /// 拒绝，错误码 31863，表现是「所有歌都拿不到地址」。
+    ///
+    /// 所以**不传**，让服务端各用各的默认值：标准版拿它的硬编码、概念版拿它的
+    /// 默认串，两种都对。
+    ///
+    /// # 别省 `album_id` / `album_audio_id`
+    ///
+    /// 服务端会用它们补 `dataMap`，实测能显著提高命中率（见 [`Song::album_audio_id`]
+    /// 的注释）。MoeKoeMusic 不传是因为它先查了 `/privilege/lite` 拿到可用 hash，
+    /// 而我们未登录时那一步走不通，只能靠这两个字段兜底。
     async fn request_song_url_with_hash(
         &self,
-        _song: &Song,
+        song: &Song,
         hash: &str,
         quality: &str,
         free_part: bool,
     ) -> Result<Value> {
         let mut query = vec![
             ("hash", hash.to_string()),
+            ("album_id", song.album_id.clone()),
+            ("album_audio_id", song.album_audio_id.to_string()),
             ("quality", quality.to_string()),
-            ("ppage_id", PPAGE_ID.to_string()),
         ];
         if free_part {
             query.push(("free_part", "true".to_string()));
@@ -608,17 +626,6 @@ impl ApiClient {
         self.get_json_uncached("/song/url", &query).await
     }
 }
-
-/// 「官方客户端指纹」。酷狗的服务端按这个识别调用方是不是真客户端，
-/// 缺这个或值不对，VIP 歌曲就拿不到直链。
-///
-/// 来源是 [`KuGouMusicApi` 模块 song_url.js](https://github.com/MakcRe/KuGouMusicApi/blob/main/module/song_url.js)：
-/// 概念版与正式版各有一组。`kugou-tui` 默认按用户当前音源选择：
-/// `KugouConcept`（即 `lite`）用那一组，其它用标准版。
-/// （实际只有一组写在这里——这里给的是标准版那组，概念版的差异是 page_id。）
-///
-/// 之前没传这个，所以 VIP 歌曲在 `status` 上就被识别为非官方客户端而拒绝。
-const PPAGE_ID: &str = "463467626,350369493,788954147";
 
 /// `/privilege/lite` 询问服务端「这账号能听哪几档音质」时一并查询的品质列表。
 ///
