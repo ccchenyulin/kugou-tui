@@ -288,19 +288,6 @@ impl SourceSet {
             .filter(|kind| self.profile(*kind).enabled)
             .collect()
     }
-
-    /// 下一个已启用的音源（切换用）。没有其它可用音源时返回 `None`。
-    pub fn next_enabled(&self, current: SourceKind) -> Option<SourceKind> {
-        let enabled = self.enabled();
-        if enabled.len() < 2 {
-            return None;
-        }
-        let position = enabled
-            .iter()
-            .position(|kind| *kind == current)
-            .unwrap_or(0);
-        Some(enabled[(position + 1) % enabled.len()])
-    }
 }
 
 // ============================================================================

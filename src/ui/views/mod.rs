@@ -9,6 +9,7 @@
 
 pub mod lists;
 pub mod player;
+pub mod sources;
 pub mod visualizer;
 
 pub use lists::SongView;
@@ -17,6 +18,7 @@ pub use lists::{
     render_search_input, render_song_list,
 };
 pub use player::{QueueView, render_lyric, render_player, render_queue};
+pub use sources::render_sources;
 pub use visualizer::render_visualizer;
 
 use ratatui::Frame;

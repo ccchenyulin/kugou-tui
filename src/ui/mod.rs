@@ -159,8 +159,8 @@ fn render_main(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Them
             Tab::Artists => state.artists.list.len(),
             Tab::Ranks => state.ranks.list.len(),
             Tab::Cloud => state.cloud.list.len(),
-            // 搜索页与可视化页都没有条目列表
-            Tab::Search | Tab::Visualizer => 0,
+            // 搜索页、可视化页、音源页都没有条目列表
+            Tab::Search | Tab::Visualizer | Tab::Sources => 0,
         };
         state.add_hit_zone(
             Rect::new(
@@ -251,8 +251,8 @@ impl AppState {
             Tab::Artists => self.artists.list.cursor.offset(),
             Tab::Ranks => self.ranks.list.cursor.offset(),
             Tab::Cloud => self.cloud.list.cursor.offset(),
-            // 搜索页与可视化页都没有条目列表
-            Tab::Search | Tab::Visualizer => 0,
+            // 搜索页、可视化页、音源页都没有条目列表
+            Tab::Search | Tab::Visualizer | Tab::Sources => 0,
         }
     }
 
@@ -302,6 +302,7 @@ fn render_primary(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &T
         Tab::Cloud => {
             views::render_cloud_entries(frame, area, &mut state.cloud.list, focused, theme)
         }
+        Tab::Sources => views::render_sources(frame, area, state, focused, theme),
         // 可视化页由 render_main 直接整屏渲染，不会走到这里
         Tab::Visualizer => {}
     }
@@ -328,7 +329,8 @@ fn render_song_pane(
         Tab::Artists => Some(&mut state.artists.songs),
         Tab::Ranks => Some(&mut state.ranks.songs),
         Tab::Cloud => Some(&mut state.cloud.songs),
-        Tab::Visualizer => None,
+        // 音源页没有歌曲列表
+        Tab::Visualizer | Tab::Sources => None,
     }) else {
         return;
     };

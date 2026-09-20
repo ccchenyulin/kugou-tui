@@ -28,16 +28,22 @@ pub enum Tab {
     Cloud,
     /// 音频可视化。不承载列表，整块主区都用来画实时频谱。
     Visualizer,
+    /// 音源管理：启用/禁用、设默认、调优先级、查看可用状态。
+    ///
+    /// 刻意排在最后：前面 6 个的顺序是从第一版就定下来的，老用户已经形成
+    /// 肌肉记忆，插队会让所有数字键错位。
+    Sources,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 6] = [
+    pub const ALL: [Tab; 7] = [
         Tab::Search,
         Tab::Playlists,
         Tab::Artists,
         Tab::Ranks,
         Tab::Cloud,
         Tab::Visualizer,
+        Tab::Sources,
     ];
 
     pub fn title(self) -> &'static str {
@@ -48,6 +54,7 @@ impl Tab {
             Self::Ranks => "排行榜",
             Self::Cloud => "云端",
             Self::Visualizer => "可视化",
+            Self::Sources => "音源",
         }
     }
 
@@ -529,6 +536,8 @@ pub struct AppState {
     // ---- 播放 ----
     pub queue: crate::app::queue::PlayQueue,
     pub queue_cursor: ListState,
+    /// 音源管理页里选中的行。
+    pub sources_cursor: ListState,
     pub current: Option<Song>,
     /// 当前播放的是否为试听片段。
     ///
@@ -702,6 +711,7 @@ impl AppState {
             cloud: CloudPane::default(),
             queue: crate::app::queue::PlayQueue::new(playback_mode),
             queue_cursor: ListState::default(),
+            sources_cursor: ListState::default(),
             current: None,
             current_is_trial: false,
             playback: PlaybackState::Stopped,
@@ -807,8 +817,8 @@ impl AppState {
             Tab::Artists => self.artists.list.select(index),
             Tab::Ranks => self.ranks.list.select(index),
             Tab::Cloud => self.cloud.list.select(index),
-            // 搜索页与可视化页都没有条目列表
-            Tab::Search | Tab::Visualizer => {}
+            // 搜索页、可视化页、音源页都没有条目列表
+            Tab::Search | Tab::Visualizer | Tab::Sources => {}
         }
     }
 
@@ -828,7 +838,7 @@ impl AppState {
             Tab::Artists => Some(&self.artists.songs),
             Tab::Ranks => Some(&self.ranks.songs),
             Tab::Cloud => Some(&self.cloud.songs),
-            Tab::Visualizer => None,
+            Tab::Visualizer | Tab::Sources => None,
         }
     }
 
@@ -840,7 +850,7 @@ impl AppState {
             Tab::Artists => Some(&mut self.artists.songs),
             Tab::Ranks => Some(&mut self.ranks.songs),
             Tab::Cloud => Some(&mut self.cloud.songs),
-            Tab::Visualizer => None,
+            Tab::Visualizer | Tab::Sources => None,
         }
     }
 

@@ -122,8 +122,13 @@ pub enum Action {
     NewCloudPlaylist,
     /// 切换左侧导航栏的可见性（小窗口下腾出空间）。
     ToggleSidebar,
-    /// 切换到下一个音源（酷狗 ↔ 酷狗概念版）。
+    /// 打开音源管理页。
     SwitchSource,
+    /// 音源管理页：把选中音源设为默认。
+    SetDefaultSource,
+    /// 音源管理页：把选中音源的优先级往上 / 往下调。
+    RaiseSourcePriority,
+    LowerSourcePriority,
     /// 数字键切换顶层标签页。
     SwitchTab(u8),
 
@@ -224,7 +229,12 @@ fn resolve_normal(key: KeyEvent) -> Action {
         KeyCode::Char('D') => Action::DeleteCloudPlaylist,
         KeyCode::Char('N') => Action::NewCloudPlaylist,
         KeyCode::Char('\\') => Action::ToggleSidebar,
+        // `v` 不再循环切换音源：改为打开音源管理页，在那里面挑更直观
         KeyCode::Char('v') => Action::SwitchSource,
+        // 音源管理页专用。用大写是为了避开已经占满的小写键位。
+        KeyCode::Char('E') => Action::SetDefaultSource,
+        KeyCode::Char('K') => Action::RaiseSourcePriority,
+        KeyCode::Char('J') => Action::LowerSourcePriority,
 
         KeyCode::Char(digit @ '1'..='6') => Action::SwitchTab(digit as u8 - b'0'),
         // Shift 组合的字母键已被上面的显式分支吃掉，这里兜底避免误触发

@@ -21,6 +21,7 @@ use crate::app::state::{
     Tab, move_selection, select_first, select_last,
 };
 use crate::config::Config;
+use crate::source::SourceKind;
 
 use crate::audio::download::Downloader;
 use crate::audio::engine::{AudioEvent, PlaybackState, SEEK_STEP_MS, VOLUME_STEP};
@@ -339,7 +340,10 @@ impl App {
                 self.state.force_quit = true;
             }
             Action::Help => self.state.show_help = true,
-            Action::SwitchSource => self.switch_source(),
+            Action::SwitchSource => self.open_sources_page(),
+            Action::SetDefaultSource => self.set_default_source(),
+            Action::RaiseSourcePriority => self.shift_source_priority(true),
+            Action::LowerSourcePriority => self.shift_source_priority(false),
             Action::ToggleSidebar => {
                 self.state.sidebar_visible = !self.state.sidebar_visible;
             }
@@ -540,6 +544,11 @@ impl App {
             (Tab::Artists, Focus::Primary) => self.state.artists.list.move_by(delta),
             (Tab::Ranks, Focus::Primary) => self.state.ranks.list.move_by(delta),
             (Tab::Cloud, Focus::Primary) => self.state.cloud.list.move_by(delta),
+            // 音源页有自己的列表（音源条目），单独走一套
+            (Tab::Sources, Focus::Primary) => {
+                let len = self.state.config.sources.ordered().len();
+                move_selection(&mut self.state.sources_cursor, len, delta);
+            }
             // Secondary 一律是当前标签页的歌曲列表。走 `songs_mut()` 而不是逐个
             // 枚举标签，新增标签页时这里不用跟着改。
             (_, Focus::Secondary) => {
@@ -582,6 +591,14 @@ impl App {
             (Tab::Cloud, Focus::Primary) => {
                 Self::select_entry_edge(&mut self.state.cloud.list, to_first);
             }
+            (Tab::Sources, Focus::Primary) => {
+                let len = self.state.config.sources.ordered().len();
+                if to_first {
+                    select_first(&mut self.state.sources_cursor, len);
+                } else {
+                    select_last(&mut self.state.sources_cursor, len);
+                }
+            }
             (_, Focus::Secondary) => {
                 if let Some(list) = self.state.songs_mut() {
                     if to_first {
@@ -599,6 +616,8 @@ impl App {
         match (self.state.tab, self.state.focus) {
             // 可视化页没有列表，方向键与 Enter 在它上面没有意义
             (Tab::Visualizer, _) => {}
+            // 音源页：Enter = 启用 / 禁用
+            (Tab::Sources, _) => self.toggle_source_enabled(),
             // 搜索框还没进入编辑态时，Enter 先聚焦输入框
             (Tab::Search, Focus::Primary) => {
                 if self.state.search.editing {
@@ -1286,6 +1305,7 @@ impl App {
             Tab::Ranks => self.load_ranks(),
             Tab::Cloud => self.load_cloud_playlists(),
             Tab::Visualizer => self.state.info("可视化页面没有需要刷新的数据"),
+            Tab::Sources => self.state.info("音源状态会在切换与启动时自动探测"),
         }
     }
 
@@ -1505,31 +1525,144 @@ impl App {
     ///
     /// 只换「去哪儿请求 + 带什么身份」，**不碰播放队列、不打断当前曲目**——
     /// 正在放的音频已经在本地缓存里，换音源没有理由把它停掉。
-    pub fn switch_source(&mut self) {
-        // 只在**已启用**的音源之间轮转：禁用的不参与，顺序按配置里的优先级。
-        let Some(next) = self
-            .state
-            .config
-            .sources
-            .next_enabled(self.state.config.active_source_kind())
-        else {
-            self.state
-                .warn("没有其它已启用的音源（可在「音源」页启用更多）");
+    /// `v`：打开音源管理页。
+    ///
+    /// 以前这个键是「循环切到下一个音源」，但音源多了之后循环切很盲目——用户
+    /// 不知道下一个是谁，切错了还得再切一圈回来。改为打开管理页，把选择摆出来。
+    /// 真正的切换动作（`switch_source_to`）由页面里的操作触发。
+    fn open_sources_page(&mut self) {
+        if self.state.tab == Tab::Sources {
+            // 已在音源页，再按一次回到搜索页，省得去找数字键
+            self.switch_tab(Tab::Search);
+            return;
+        }
+        self.switch_tab(Tab::Sources);
+        self.state
+            .info("音源管理：Enter 启用/禁用 · E 设为默认 · K/J 调优先级");
+    }
+
+    /// 当前在音源页选中的是哪个音源。
+    fn selected_source(&self) -> Option<SourceKind> {
+        let kinds = self.state.config.sources.ordered();
+        let index = self.state.sources_cursor.selected().unwrap_or(0);
+        kinds.get(index).copied()
+    }
+
+    /// 启用 / 禁用选中的音源。
+    fn toggle_source_enabled(&mut self) {
+        let Some(kind) = self.selected_source() else {
             return;
         };
+        let profile = self.state.config.sources.profile_mut(kind);
+        profile.enabled = !profile.enabled;
+        let enabled = profile.enabled;
+
+        // 不能把当前正在用的音源关掉：那样界面会处于「有音源但没选中」的状态。
+        if !enabled && self.state.config.active_source_kind() == kind {
+            if let Some(fallback) = self.state.config.sources.enabled().first().copied() {
+                self.state.config.sync_active_source();
+                self.state.config.switch_source(fallback);
+                self.state.warn(format!(
+                    "已禁用「{}」，当前音源切到「{}」",
+                    kind.label(),
+                    fallback.label()
+                ));
+            } else {
+                self.state.config.sources.profile_mut(kind).enabled = true;
+                self.state.error("至少要保留一个启用的音源");
+                return;
+            }
+        } else {
+            self.state.success(format!(
+                "「{}」已{}",
+                kind.label(),
+                if enabled { "启用" } else { "禁用" }
+            ));
+        }
+
+        self.persist_source_config();
+    }
+
+    /// 把选中的音源设为默认（即当前音源）。
+    fn set_default_source(&mut self) {
+        let Some(kind) = self.selected_source() else {
+            return;
+        };
+        if self.state.config.active_source_kind() == kind {
+            self.state
+                .info(format!("「{}」已经是当前音源", kind.label()));
+            return;
+        }
+        if !self.state.config.sources.profile(kind).enabled {
+            self.state
+                .warn(format!("「{}」已禁用，先按 Enter 启用", kind.label()));
+            return;
+        }
+        self.switch_source_to(kind);
+    }
+
+    /// 调整选中音源的优先级（`raise = true` 表示往前排）。
+    ///
+    /// 直接交换相邻两项的 priority：比「整体重排」改动小，也更符合直觉。
+    fn shift_source_priority(&mut self, raise: bool) {
+        let Some(kind) = self.selected_source() else {
+            return;
+        };
+        let mut kinds = self.state.config.sources.ordered();
+        let Some(position) = kinds.iter().position(|candidate| *candidate == kind) else {
+            return;
+        };
+        let target = if raise {
+            position.checked_sub(1)
+        } else {
+            (position + 1 < kinds.len()).then_some(position + 1)
+        };
+        let Some(target) = target else {
+            self.state.info(if raise {
+                "已经是第一个"
+            } else {
+                "已经是最后一个"
+            });
+            return;
+        };
+        kinds.swap(position, target);
+
+        // 按新顺序重排 priority，间隔 10 方便以后往中间插
+        for (index, kind) in kinds.iter().enumerate() {
+            self.state.config.sources.profile_mut(*kind).priority = (index as u32 + 1) * 10;
+        }
+        self.state.success(format!(
+            "「{}」优先级已{}（第 {} 位）",
+            kind.label(),
+            if raise { "上调" } else { "下调" },
+            target + 1
+        ));
+        self.persist_source_config();
+    }
+
+    /// 音源配置改动后落盘。失败只提示，不阻断操作。
+    fn persist_source_config(&mut self) {
+        if let Err(error) = self.state.config.save() {
+            self.state.error(format!("保存音源配置失败：{error}"));
+        }
+    }
+
+    /// 切换到指定音源，并重建 HTTP 客户端。
+    pub fn switch_source_to(&mut self, kind: SourceKind) {
+        let previous = self.state.config.active_source_kind();
+        if previous == kind {
+            return;
+        }
 
         // 先把当前身份存回档案，否则切走再切回来时登录态和 dfid 就丢了
         self.state.config.sync_active_source();
-        self.state.config.switch_source(next);
+        self.state.config.switch_source(kind);
 
         if let Err(error) = self.state.config.save() {
             self.state
                 .warn(format!("音源已切换，但保存配置失败：{error}"));
         }
 
-        // 用新音源的地址与身份重建 HTTP 客户端。
-        // cookie 必须走 `cookie_header()`（而不是 `config.cookie`）：前者会带上 dfid，
-        // 缺了它 `/song/url` 会返回 errcode 20028「本次请求需要验证」。
         match crate::api::ApiClient::new(
             &self.state.config.api_base,
             self.state.config.cookie_header(),
@@ -1537,41 +1670,32 @@ impl App {
         ) {
             Ok(client) => {
                 self.api = client;
-                // 身份可能变了，会员信息要重新取
                 self.state.vip_label = None;
                 self.fetch_vip_status();
-                // dfid 是平台相关的：新音源的档案里可能还没有，不补一个的话
-                // 该音源在本会话内取链会一直失败（启动时的探测只跑一次）。
                 self.ensure_device_fingerprint();
-                let capability = next.capability();
+                let capability = kind.capability();
                 if !capability.catalog {
-                    // 第三方音源只有搜索与播放：不说清楚的话，用户切过去发现
-                    // 歌单/榜单全空，只会以为是加载失败。
                     self.state.warn(format!(
                         "已切换到「{}」，该音源仅支持搜索与播放（歌单/榜单/云端歌单不可用）",
-                        next.label()
+                        kind.label()
                     ));
                 } else if self.state.config.cookie.is_none() {
-                    // 两个平台的登录态不通用：切过去若是空的，得明确告诉用户重新扫码，
-                    // 否则他会以为「切了概念版还是只能试听」——其实只是没登录。
                     self.state.warn(format!(
                         "已切换到「{}」，但该音源还没登录——按 L 重新扫码（两个平台账号不通用）",
-                        next.label()
+                        kind.label()
                     ));
                 } else {
                     self.state.success(format!(
                         "已切换到「{}」音源，当前播放不受影响",
-                        next.label()
+                        kind.label()
                     ));
                 }
             }
             Err(error) => {
-                // 多半是对应的第三方服务没起，把服务名和地址一起说清楚，
-                // 省得用户去翻文档。
                 self.state.error(format!(
                     "切换到「{}」失败：{error}（需要 {} 服务运行在 {}）",
-                    next.label(),
-                    next.service_name(),
+                    kind.label(),
+                    kind.service_name(),
                     self.state.config.api_base
                 ));
             }
