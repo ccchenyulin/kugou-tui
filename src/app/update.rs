@@ -801,6 +801,7 @@ impl App {
         }
 
         let api = self.api.clone();
+        let active_source = self.state.config.active_source_kind();
         let bus = self.bus.clone();
         let page_size = self.state.config.page_size;
         self.state.busy = Some(format!("加载「{keyword}」第 {next_page} 页"));
@@ -808,7 +809,10 @@ impl App {
         self.state.search.page = next_page;
 
         self.runtime.spawn(async move {
-            match api.search_songs(&keyword, next_page, page_size).await {
+            match active_source
+                .search_songs(&api, &keyword, next_page, page_size)
+                .await
+            {
                 Ok(songs) => bus.emit(Loaded::Search {
                     keyword,
                     songs,
@@ -920,11 +924,12 @@ impl App {
         }
 
         let api = self.api.clone();
+        let active_source = self.state.config.active_source_kind();
         let bus = self.bus.clone();
         let quality = self.state.config.quality.clone();
 
         self.runtime.spawn(async move {
-            match api.song_stream_url(&song, &quality).await {
+            match active_source.song_stream_url(&api, &song, &quality).await {
                 Ok(stream) => bus.emit(Loaded::StreamReady {
                     song: Box::new(song),
                     url: stream.url,
@@ -939,11 +944,12 @@ impl App {
 
     fn request_lyric(&mut self, song: Song) {
         let api = self.api.clone();
+        let active_source = self.state.config.active_source_kind();
         let bus = self.bus.clone();
 
         self.state.lyric.loading = true;
         self.runtime.spawn(async move {
-            match api.fetch_lyric(&song).await {
+            match active_source.fetch_lyric(&api, &song).await {
                 Ok(lyric) => bus.emit(Loaded::Lyric {
                     hash: song.hash.clone(),
                     lyric,
@@ -989,6 +995,7 @@ impl App {
         self.state.busy = Some(format!("搜索 {keyword}"));
 
         let api = self.api.clone();
+        let active_source = self.state.config.active_source_kind();
         let bus = self.bus.clone();
         let page_size = self.state.config.page_size;
 
@@ -1000,7 +1007,10 @@ impl App {
             // 全量合并会把相关结果淹没在垃圾里。MoeKoeMusic 也是分页浏览
             // （`searchResults.value = response.data.lists` 只放当前页）。
             // 想看更多按 `M` 一页页追加，顺序保持服务端的相关性。
-            match api.search_songs(&keyword, 1, page_size).await {
+            match active_source
+                .search_songs(&api, &keyword, 1, page_size)
+                .await
+            {
                 Ok(songs) => bus.emit(Loaded::Search {
                     keyword,
                     songs,
@@ -1013,6 +1023,7 @@ impl App {
 
     pub fn load_plaza_playlists(&mut self) {
         let api = self.api.clone();
+        let active_source = self.state.config.active_source_kind();
         let bus = self.bus.clone();
         let (category, page_size) = (self.state.playlists.category, self.state.config.page_size);
 
@@ -1020,7 +1031,10 @@ impl App {
         self.state.busy = Some("载入歌单广场".to_string());
 
         self.runtime.spawn(async move {
-            match api.plaza_playlists(category, 1, page_size).await {
+            match active_source
+                .plaza_playlists(&api, category, 1, page_size)
+                .await
+            {
                 Ok(items) => bus.emit(Loaded::Playlists {
                     title: "歌单广场".to_string(),
                     items,
@@ -1032,6 +1046,7 @@ impl App {
 
     pub fn load_artists(&mut self) {
         let api = self.api.clone();
+        let active_source = self.state.config.active_source_kind();
         let bus = self.bus.clone();
         let kind = self.state.artists.kind;
 
@@ -1039,7 +1054,10 @@ impl App {
         self.state.busy = Some("载入歌手列表".to_string());
 
         self.runtime.spawn(async move {
-            match api.artist_list(kind, ARTIST_LIST_SIZE).await {
+            match active_source
+                .artist_list(&api, kind, ARTIST_LIST_SIZE)
+                .await
+            {
                 Ok(artists) => bus.emit(Loaded::Artists(artists)),
                 Err(error) => bus.fail("载入歌手列表失败", error),
             }
@@ -1081,13 +1099,14 @@ impl App {
 
     pub fn load_ranks(&mut self) {
         let api = self.api.clone();
+        let active_source = self.state.config.active_source_kind();
         let bus = self.bus.clone();
 
         self.state.ranks.list.loading = true;
         self.state.busy = Some("载入排行榜".to_string());
 
         self.runtime.spawn(async move {
-            match api.rank_boards().await {
+            match active_source.rank_boards(&api).await {
                 Ok(boards) => bus.emit(Loaded::RankBoards(boards)),
                 Err(error) => bus.fail("载入排行榜失败", error),
             }
@@ -1102,13 +1121,14 @@ impl App {
         }
 
         let api = self.api.clone();
+        let active_source = self.state.config.active_source_kind();
         let bus = self.bus.clone();
 
         self.state.cloud.list.loading = true;
         self.state.busy = Some("载入云端歌单".to_string());
 
         self.runtime.spawn(async move {
-            match api.user_playlists().await {
+            match active_source.user_playlists(&api).await {
                 Ok(items) => bus.emit(Loaded::CloudPlaylists(items)),
                 Err(error) => bus.fail("载入云端歌单失败", error),
             }
@@ -1141,6 +1161,7 @@ impl App {
     /// 但它们是两个独立的界面区域。
     fn load_playlist_songs(&mut self, playlist: Playlist, source: PlaylistSource) {
         let api = self.api.clone();
+        let active_source = self.state.config.active_source_kind();
         let bus = self.bus.clone();
 
         let pane = match source {
@@ -1189,8 +1210,8 @@ impl App {
             // 界面上会看到「30 首」变成「400 首」，是个不错的进度反馈，
             // 比干等一个"载入中"强。
             let result = match is_own {
-                Some(list_id) => api.user_playlist_tracks_all(list_id).await,
-                None => api.playlist_tracks_all(&playlist.id).await,
+                Some(list_id) => active_source.user_playlist_tracks_all(&api, list_id).await,
+                None => active_source.playlist_tracks_all(&api, &playlist.id).await,
             };
 
             match result {
@@ -1211,6 +1232,7 @@ impl App {
         };
 
         let api = self.api.clone();
+        let active_source = self.state.config.active_source_kind();
         let bus = self.bus.clone();
 
         self.state.artists.songs.loading = true;
@@ -1218,7 +1240,10 @@ impl App {
         self.state.busy = Some(format!("载入歌手 {}", artist.name));
 
         self.runtime.spawn(async move {
-            match api.artist_tracks_all(artist.id, "hot").await {
+            match active_source
+                .artist_tracks_all(&api, artist.id, "hot")
+                .await
+            {
                 Ok(songs) => bus.emit(Loaded::ArtistSongs { artist, songs }),
                 Err(error) => bus.fail(format!("载入歌手 {} 的歌曲失败", artist.name), error),
             }
@@ -1232,6 +1257,7 @@ impl App {
         };
 
         let api = self.api.clone();
+        let active_source = self.state.config.active_source_kind();
         let bus = self.bus.clone();
 
         self.state.ranks.songs.loading = true;
@@ -1239,7 +1265,7 @@ impl App {
         self.state.busy = Some(format!("载入榜单 {}", board.name));
 
         self.runtime.spawn(async move {
-            match api.rank_tracks_all(board.id).await {
+            match active_source.rank_tracks_all(&api, board.id).await {
                 Ok(songs) => bus.emit(Loaded::RankTracks { board, songs }),
                 Err(error) => bus.fail(format!("载入榜单 {} 失败", board.name), error),
             }
@@ -1480,7 +1506,17 @@ impl App {
     /// 只换「去哪儿请求 + 带什么身份」，**不碰播放队列、不打断当前曲目**——
     /// 正在放的音频已经在本地缓存里，换音源没有理由把它停掉。
     pub fn switch_source(&mut self) {
-        let next = self.state.config.active_source_kind().next();
+        // 只在**已启用**的音源之间轮转：禁用的不参与，顺序按配置里的优先级。
+        let Some(next) = self
+            .state
+            .config
+            .sources
+            .next_enabled(self.state.config.active_source_kind())
+        else {
+            self.state
+                .warn("没有其它已启用的音源（可在「音源」页启用更多）");
+            return;
+        };
 
         // 先把当前身份存回档案，否则切走再切回来时登录态和 dfid 就丢了
         self.state.config.sync_active_source();
@@ -1507,9 +1543,17 @@ impl App {
                 // dfid 是平台相关的：新音源的档案里可能还没有，不补一个的话
                 // 该音源在本会话内取链会一直失败（启动时的探测只跑一次）。
                 self.ensure_device_fingerprint();
-                // 两个平台的登录态不通用：切过去若是空的，得明确告诉用户重新扫码，
-                // 否则他会以为「切了概念版还是只能试听」——其实只是没登录。
-                if self.state.config.cookie.is_none() {
+                let capability = next.capability();
+                if !capability.catalog {
+                    // 第三方音源只有搜索与播放：不说清楚的话，用户切过去发现
+                    // 歌单/榜单全空，只会以为是加载失败。
+                    self.state.warn(format!(
+                        "已切换到「{}」，该音源仅支持搜索与播放（歌单/榜单/云端歌单不可用）",
+                        next.label()
+                    ));
+                } else if self.state.config.cookie.is_none() {
+                    // 两个平台的登录态不通用：切过去若是空的，得明确告诉用户重新扫码，
+                    // 否则他会以为「切了概念版还是只能试听」——其实只是没登录。
                     self.state.warn(format!(
                         "已切换到「{}」，但该音源还没登录——按 L 重新扫码（两个平台账号不通用）",
                         next.label()
@@ -1522,8 +1566,14 @@ impl App {
                 }
             }
             Err(error) => {
-                self.state
-                    .error(format!("切换到「{}」失败：{error}", next.label()));
+                // 多半是对应的第三方服务没起，把服务名和地址一起说清楚，
+                // 省得用户去翻文档。
+                self.state.error(format!(
+                    "切换到「{}」失败：{error}（需要 {} 服务运行在 {}）",
+                    next.label(),
+                    next.service_name(),
+                    self.state.config.api_base
+                ));
             }
         }
     }

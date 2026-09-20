@@ -13,10 +13,12 @@
 //! 接口路径全部对照 <https://github.com/MakcRe/KuGouMusicApi> 的 `docs/README.md` 核对过。
 
 pub(crate) mod catalog;
-mod client;
+/// HTTP 层。音源模块（如网易云）需要用它发请求，因此提到 `pub(crate)`。
+pub(crate) mod client;
 /// 登录与云端歌单写操作。
 pub mod cloud;
-mod lyric;
+/// 歌词解析。`pub(crate)` 是因为音源模块（如网易云）要复用 `parse_lrc`。
+pub(crate) mod lyric;
 /// 领域模型要对 crate 内其它层可见（`app` / `ui` 都要用 `Song` 等类型）。
 pub mod model;
 
