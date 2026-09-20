@@ -72,6 +72,7 @@ clap = { version = "4", features = ["derive", "env"] }
 base64 = "0.23"
 crossbeam-channel = "0.5"
 qrcode = { version = "0.14.1", default-features = false }
+zbus = { version = "5.13.2", default-features = false, features = ["tokio"] }
 
 [profile.release]
 opt-level = "z"

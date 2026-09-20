@@ -26,39 +26,71 @@ use crate::error::{AppError, Result};
 
 impl ApiClient {
     /// 取某首歌的歌词。
+    ///
+    /// # 为什么要试多个候选
+    ///
+    /// 同一个 hash 酷狗往往提供多个 KRC 变体：**有的只带罗马音，有的带真正的中文译文**。
+    /// 只取第一个的话，日语歌很容易拿到罗马音版——界面就显示成一串拼音，等于没有翻译。
+    ///
+    /// 所以这里遍历候选，优先采用「[language:] 里有 CJK 译文」的那个；
+    /// 都没有才退回第一个能解析出内容的。
     pub async fn fetch_lyric(&self, song: &Song) -> Result<Lyric> {
-        let (lyric_id, access_key) = self.find_lyric_candidate(song).await?;
-
-        let query = [
-            ("id", lyric_id),
-            ("accesskey", access_key),
-            // 必须是 krc：翻译与音译只在 KRC 的 [language:] 标签里，lrc 没有。
-            // 参考 MoeKoeMusic 的实现。
-            ("fmt", "krc".to_string()),
-            ("decode", "true".to_string()),
-            ("charset", "utf8".to_string()),
-        ];
-
-        // 该接口在 `decode=true` 下返回 JSON；偶尔直接吐纯文本，两种都接住。
-        let body = self.get_text("/lyric", &query).await?;
-        let text = match serde_json::from_str::<Value>(&body) {
-            Ok(root) => {
-                crate::api::model::check_error_code("/lyric", &root)?;
-                extract_lyric_text(&root)
-            }
-            Err(_) => body,
-        };
-
-        let mut lyric = parse_lrc(&text);
-        attach_translations(&mut lyric, &text);
-        if lyric.is_empty() {
-            return Err(AppError::NotFound(format!("《{}》的歌词为空", song.name)));
+        let candidates = self.find_lyric_candidates(song).await?;
+        if candidates.is_empty() {
+            return Err(AppError::NotFound(format!("未找到《{}》的歌词", song.name)));
         }
-        Ok(lyric)
+
+        let mut fallback: Option<Lyric> = None;
+
+        for (lyric_id, access_key) in candidates {
+            let query = [
+                ("id", lyric_id),
+                ("accesskey", access_key),
+                // 必须是 krc：翻译与音译只在 KRC 的 [language:] 标签里，lrc 没有。
+                ("fmt", "krc".to_string()),
+                ("decode", "true".to_string()),
+                ("charset", "utf8".to_string()),
+            ];
+
+            // 该接口在 `decode=true` 下返回 JSON；偶尔直接吐纯文本，两种都接住。
+            let body = match self.get_text("/lyric", &query).await {
+                Ok(body) => body,
+                Err(_) => continue, // 这个候选取不到，试下一个
+            };
+            let text = match serde_json::from_str::<Value>(&body) {
+                Ok(root) => {
+                    if crate::api::model::check_error_code("/lyric", &root).is_err() {
+                        continue;
+                    }
+                    extract_lyric_text(&root)
+                }
+                Err(_) => body,
+            };
+
+            let mut lyric = parse_lrc(&text);
+            if lyric.is_empty() {
+                continue;
+            }
+            attach_translations(&mut lyric, &text);
+
+            // 命中「有 CJK 译文」的候选，直接用它
+            if translation_block_has_cjk(&text) {
+                return Ok(lyric);
+            }
+            // 否则留作兜底（只留第一个，避免覆盖成更差的）
+            if fallback.is_none() {
+                fallback = Some(lyric);
+            }
+        }
+
+        fallback.ok_or_else(|| AppError::NotFound(format!("《{}》的歌词为空", song.name)))
     }
 
-    /// 第一步：按 hash 找到歌词候选，拿到 `(id, accesskey)`。
-    async fn find_lyric_candidate(&self, song: &Song) -> Result<(String, String)> {
+    /// 第一步：按 hash 找到歌词候选，拿到若干 `(id, accesskey)`。
+    ///
+    /// `man=yes` 才会返回多个版本。上限 6 个：再往后质量通常更差，
+    /// 而每多一个候选就多一次请求。
+    async fn find_lyric_candidates(&self, song: &Song) -> Result<Vec<(String, String)>> {
         let root = self
             .get_json(
                 "/search/lyric",
@@ -69,19 +101,48 @@ impl ApiClient {
                         format!("{} - {}", song.singer_text(), song.name),
                     ),
                     ("duration", song.duration_ms.to_string()),
-                    // 只要一条，避免返回多个版本还得挑
-                    ("man", "no".to_string()),
+                    ("man", "yes".to_string()),
                 ],
             )
             .await?;
 
-        extract_first(&root, |value| {
+        let candidates = crate::api::extract_list(&root, &["candidates"], |value| {
             let id = pick_string(value, &["id", "lyric_id"])?;
             let access_key = pick_string(value, &["accesskey", "access_key"])?;
             Some((id, access_key))
-        })
-        .ok_or_else(|| AppError::NotFound(format!("未找到《{}》的歌词", song.name)))
+        });
+
+        Ok(candidates.into_iter().take(6).collect())
     }
+}
+
+/// `[language:]` 里是否存在**真正的 CJK 译文**块（而不是只有罗马音）。
+///
+/// 判定方式与桌面歌词脚本一致：逐块看有没有任一行含 CJK 字符。
+/// 罗马音是纯拉丁，会被排除；中文译文含汉字，会命中。
+fn translation_block_has_cjk(krc_text: &str) -> bool {
+    let Some(payload) = extract_language_payload(krc_text) else {
+        return false;
+    };
+    let Some(content) = payload.get("content").and_then(|value| value.as_array()) else {
+        return false;
+    };
+
+    for block in content {
+        let Some(items) = block.get("lyricContent").and_then(|value| value.as_array()) else {
+            continue;
+        };
+        for entry in items {
+            let Some(text) = flatten_lyric_content(entry) else {
+                continue;
+            };
+            // CJK 统一表意文字 + 扩展 A 区
+            if text.chars().any(|ch| matches!(ch, '\u{3400}'..='\u{9fff}')) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// 从 `/lyric` 的 JSON 响应里取出 LRC 正文。
