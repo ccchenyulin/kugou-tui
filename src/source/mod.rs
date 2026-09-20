@@ -134,6 +134,8 @@ impl SourceKind {
             },
             // 第三方服务：搜索/播放/歌词/封面可用，目录与云端同步暂不支持
             // 网易云：NeteaseCloudMusicApi 提供完整的扫码登录与云端歌单接口
+            // 云端歌单目前只做读取（列表 + 曲目）。写操作（加歌/删歌/建歌单）
+            // 等登录流程实测通过后再补，避免交付没验证过的功能。
             SourceKind::Netease => Capability {
                 stream: true,
                 lyric: true,
@@ -141,7 +143,7 @@ impl SourceKind {
                 login: true,
                 client_token: false,
                 catalog: false,
-                cloud: false,
+                cloud: true,
             },
             // QQ 音乐：服务端的登录接口未确认，先不开放
             SourceKind::QqMusic => Capability {
@@ -491,6 +493,7 @@ impl SourceKind {
     pub async fn user_playlists(self, client: &ApiClient) -> Result<Vec<Playlist>> {
         match self {
             Self::Kugou | Self::KugouConcept => client.user_playlists().await,
+            Self::Netease => netease::user_playlists(client).await,
             other => Err(unsupported(&format!("云端歌单（{}）", other.label()))),
         }
     }
@@ -502,6 +505,7 @@ impl SourceKind {
     ) -> Result<Vec<Song>> {
         match self {
             Self::Kugou | Self::KugouConcept => client.user_playlist_tracks_all(list_id).await,
+            Self::Netease => netease::user_playlist_tracks_all(client, list_id).await,
             other => Err(unsupported(&format!("云端歌单歌曲（{}）", other.label()))),
         }
     }

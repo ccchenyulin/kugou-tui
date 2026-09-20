@@ -328,3 +328,107 @@ pub async fn cover_url(client: &ApiClient, song: &Song) -> Result<Option<String>
 
     Ok(url)
 }
+
+// ============================================================================
+// 云端歌单（读取）
+// ============================================================================
+//
+// ⚠️ 与酷狗最大的差别：网易云的登录态由**服务端**持有，客户端必须先问
+// `/login/status` 才知道「当前是谁」，拿到 uid 才能查这个人的歌单。
+// 酷狗则是客户端自己保存 token，请求时带上即可。
+//
+// 实测（未登录时）：`/login/status` 返回 `{ code: 200, account: null, profile: null }`，
+// 此时取不到 uid，必须让用户先按 L 扫码。
+
+/// 当前登录用户的 uid。未登录返回 `Ok(None)`。
+async fn current_uid(client: &ApiClient) -> Result<Option<String>> {
+    let root = client.get_json_uncached("/login/status", &[]).await?;
+    let data = data_of(&root);
+
+    // 未登录时 account / profile 都是 null，取值会拿到 None
+    let uid = data
+        .get("profile")
+        .and_then(|profile| pick_i64(profile, &["userId"]))
+        .or_else(|| {
+            data.get("account")
+                .and_then(|account| pick_i64(account, &["id"]))
+        });
+
+    Ok(uid.map(|id| id.to_string()))
+}
+
+/// 取当前用户的云端歌单。
+///
+/// 未登录时给出明确的「先去登录」，而不是返回空列表——空列表会让人以为
+/// 是自己没有歌单。
+pub async fn user_playlists(client: &ApiClient) -> Result<Vec<crate::api::model::Playlist>> {
+    let Some(uid) = current_uid(client).await? else {
+        return Err(crate::error::AppError::Other(
+            "网易云尚未登录，请先按 L 选择「网易云」扫码".to_string(),
+        ));
+    };
+
+    let root = client
+        .get_json_uncached("/user/playlist", &[("uid", uid)])
+        .await?;
+
+    Ok(extract_list(
+        data_of(&root),
+        &["playlist"],
+        playlist_from_json,
+    ))
+}
+
+/// 从 `/user/playlist` 的一条记录解析出歌单。
+fn playlist_from_json(value: &Value) -> Option<crate::api::model::Playlist> {
+    let id = pick_i64(value, &["id"])?;
+    Some(crate::api::model::Playlist {
+        id: id.to_string(),
+        // 网易云的歌单 id 同时就是写操作要用的 list_id
+        list_id: Some(id),
+        name: pick_string(value, &["name"]).unwrap_or_else(|| "未命名歌单".to_string()),
+        cover: pick_string(value, &["coverImgUrl"]),
+        song_count: pick_u64(value, &["trackCount"]).unwrap_or(0) as u32,
+        creator: value
+            .get("creator")
+            .and_then(|creator| pick_string(creator, &["nickname"])),
+        description: pick_string(value, &["description"]),
+        is_own: true,
+    })
+}
+
+/// 取一个歌单里的全部歌曲。
+///
+/// `/playlist/track/all` 一次最多 500 条且可能分页，这里沿用酷狗那套
+/// 「翻页直到拿不到新数据」的做法。
+pub async fn user_playlist_tracks_all(client: &ApiClient, list_id: i64) -> Result<Vec<Song>> {
+    let mut songs = Vec::new();
+    let mut offset = 0u32;
+    const PAGE: u32 = 200;
+    const MAX_PAGES: u32 = 20;
+
+    for _ in 0..MAX_PAGES {
+        let root = client
+            .get_json_uncached(
+                "/playlist/track/all",
+                &[
+                    ("id", list_id.to_string()),
+                    ("limit", PAGE.to_string()),
+                    ("offset", offset.to_string()),
+                ],
+            )
+            .await?;
+        let data = data_of(&root);
+
+        let page = extract_list(data, &["songs"], song_from_json);
+        let got = page.len() as u32;
+        songs.extend(page);
+
+        if got < PAGE {
+            break;
+        }
+        offset += got;
+    }
+
+    Ok(songs)
+}
