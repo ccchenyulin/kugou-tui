@@ -90,12 +90,21 @@ fn shrink_horizontal(area: Rect, amount: u16) -> Rect {
     }
 }
 
-/// 每根柱子占几列：柱体 1 列 + 右侧 1 列空隙。
+/// 每根柱子占几列：由**可用宽度和频段数**算出来，而不是写死。
 ///
-/// 空隙是观感的关键。之前把频段直接铺满每一列，柱子之间**没有分隔**，
-/// 相邻柱子一旦都亮起来就粘成一整片——用户说的「糊在一起」就是这个。
-/// 空出一列之后，多密的频谱都能看清是一根一根的。
-const BAR_STRIDE: usize = 2;
+/// 以前固定 2 列（柱体 1 + 空隙 1），于是柱数 = 宽度/2，再被频段数（64）截断。
+/// 结果宽屏下 `宽度/2 > 64`，柱子只占左边一小段，**右边一大片空着**——全屏
+/// 看尤其明显。现在按「可用宽 ÷ 频段数」算，宽屏下柱子自然变宽铺满。
+///
+/// 空隙仍然是观感的关键：把频段直接铺满每一列，柱子之间**没有分隔**，相邻
+/// 柱子一旦都亮起来就粘成一整片。所以 stride >= 2 时留出 1 列空隙，只有窄到
+/// 放不下才让柱子贴着。
+fn bar_stride(area_width: usize, bands: usize) -> usize {
+    if bands == 0 {
+        return 1;
+    }
+    (area_width / bands).max(1)
+}
 
 /// 画柱状频谱：底部对齐，越高越亮，柱顶带一条缓慢下落的峰值刻度。
 ///
@@ -108,10 +117,13 @@ fn render_bars(frame: &mut Frame, area: Rect, levels: &[f32], peaks: &[f32], the
     }
 
     // 柱子数由列数决定，但不超过频段数——柱子比频段还多只会是同一根重复画
-    let bars = (area.width as usize / BAR_STRIDE).min(levels.len());
+    let stride = bar_stride(area.width as usize, levels.len());
+    let bars = (area.width as usize / stride).min(levels.len());
     if bars == 0 {
         return;
     }
+    // 柱体宽度：stride 够就留 1 列空隙，窄到放不下才让柱子贴着
+    let body = stride.saturating_sub(1).max(1);
 
     // 频段数通常多于柱子数，把一段频段压成一根柱子。
     // 取**最大值**而不是平均值：平均会把鼓点那一下的尖峰抹平，柱子就只剩一团钝钝的起伏。
@@ -136,20 +148,26 @@ fn render_bars(frame: &mut Frame, area: Rect, levels: &[f32], peaks: &[f32], the
         let from_bottom = height - row;
         let style = bar_style(row, height, theme);
 
-        let mut text = String::with_capacity(bars * BAR_STRIDE);
+        let mut text = String::with_capacity(bars * stride);
         for (bar, &level) in columns.iter().enumerate() {
             let filled = (level * height as f32).round() as usize;
             let cap = (caps[bar] * height as f32).round() as usize;
-            text.push(if filled > 0 && from_bottom <= filled {
+            let cell = if filled > 0 && from_bottom <= filled {
                 '█'
             } else if cap > 0 && from_bottom == cap {
                 '▔'
             } else {
                 ' '
-            });
+            };
+            // 柱体横向铺 `body` 列：宽屏下柱子变宽而不是右边留一片空白
+            for _ in 0..body {
+                text.push(cell);
+            }
             // 柱间空隙。最后一根后面不留，否则右边会多出一列空白
             if bar + 1 < bars {
-                text.push(' ');
+                for _ in body..stride {
+                    text.push(' ');
+                }
             }
         }
         lines.push(Line::from(Span::styled(text, style)));
@@ -293,11 +311,54 @@ mod tests {
     }
 
     /// 柱子数不超过频段数：比频段还多的柱子只能是同一根重复画，没有意义。
+    ///
+    /// 数的是**柱子块数**（靠柱间空隙分隔的连续段），不是填充的列数——柱宽
+    /// 会随可用宽度变，按列数断言会在宽屏下假失败。
     #[test]
     fn bar_count_is_capped_by_band_count() {
-        // 100 列够画 50 根，但只有 4 个频段 → 只画 4 根
+        // 100 列，只有 4 个频段 → 4 根柱子（每根会被拉宽铺满）
         let buffer = bars_of(100, 2, &[1.0; 4]);
-        let filled = (0..100).filter(|&x| buffer[(x, 1)].symbol() == "█").count();
-        assert_eq!(filled, 4, "柱子数应当等于频段数");
+        assert_eq!(count_blocks(&buffer, 100, 1), 4, "柱子数应当等于频段数");
+    }
+
+    /// 宽屏下柱子要横向铺满，而不是只占左边一段。
+    ///
+    /// 这是之前那个 bug：stride 写死 2，柱数被频段数（64）截断后，多出来的
+    /// 列全空着，全屏看右边一大片空白。
+    #[test]
+    fn bars_stretch_to_fill_wide_terminal() {
+        let width: usize = 100;
+        let buffer = bars_of(width as u16, 2, &[1.0; 4]);
+        let filled = (0..width as u16)
+            .filter(|&x| buffer[(x, 1)].symbol() == "█")
+            .count();
+        // 4 根柱子把 100 列几乎占满，只剩柱间空隙
+        assert!(
+            filled >= width - 8,
+            "宽屏下柱子该铺满：100 列里只填了 {filled} 列"
+        );
+    }
+
+    /// 窄屏放不下空隙时，柱子贴着画（不塌陷、不错位）。
+    #[test]
+    fn bars_degrade_gracefully_when_narrow() {
+        // 4 列画 4 个频段 → stride 1，没有空隙，但仍是 4 根
+        let buffer = bars_of(4, 2, &[1.0; 4]);
+        let filled = (0..4).filter(|&x| buffer[(x, 1)].symbol() == "█").count();
+        assert_eq!(filled, 4, "窄屏也该画满 4 列");
+    }
+
+    /// 数一行里被点亮的**连续段**数量。
+    fn count_blocks(buffer: &ratatui::buffer::Buffer, width: u16, row: u16) -> usize {
+        let mut blocks = 0;
+        let mut previous = false;
+        for x in 0..width {
+            let filled = buffer[(x, row)].symbol() == "█";
+            if filled && !previous {
+                blocks += 1;
+            }
+            previous = filled;
+        }
+        blocks
     }
 }
