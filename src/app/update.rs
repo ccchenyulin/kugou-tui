@@ -83,6 +83,23 @@ const MPRIS_COVER_SIZE: u32 = 400;
 const COVER_WIDTH: usize = 24;
 const COVER_HEIGHT: usize = 12;
 
+/// 图片真实宽高比（宽/高）。
+///
+/// 宽或高为 0、比值算出非有限值时按 1.0（方图）处理——宁可稍微变形，也别让
+/// 布局算出 0 列或 NaN 把面板撑坏。
+fn image_aspect(image: &image::DynamicImage) -> f32 {
+    let (width, height) = (image.width(), image.height());
+    if height == 0 || width == 0 {
+        return 1.0;
+    }
+    let aspect = width as f32 / height as f32;
+    if aspect.is_finite() && aspect > 0.0 {
+        aspect
+    } else {
+        1.0
+    }
+}
+
 /// 未登录时各音源该说什么——按音源分引导路径，否则把网易云用户怼到
 /// 「去配置 cookie」会让人无所适从（网易云没 cookie 这概念）。
 fn not_logged_in_hint(source: SourceKind) -> String {
@@ -3070,6 +3087,8 @@ impl App {
                 {
                     // 协议必须在主线程建：`Picker` 探测过终端能力，不是 Send，
                     // 不能挪到网络任务里。探测失败（picker 为 None）就只有字符画。
+                    // 宽高比要在 image 被 new_resize_protocol 消耗之前算出来
+                    let aspect = image_aspect(&image);
                     let protocol = self
                         .picker
                         .as_ref()
@@ -3078,6 +3097,7 @@ impl App {
                         hash: Some(hash),
                         lines,
                         protocol,
+                        aspect,
                     };
                 }
             }

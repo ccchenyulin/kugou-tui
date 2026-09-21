@@ -18,20 +18,18 @@ use crate::ui::theme::Theme;
 use crate::ui::views::{empty_placeholder, loading_placeholder};
 use crate::ui::widgets::{RowContext, panel, selection_list, song_row, truncate_to_width};
 
-/// 播放条高度：4 行内容 + 上下边框。
+/// 播放条高度：2 行内容 + 上下边框。
 ///
-/// 4 行内容 = 歌名 / 歌手·专辑 / 进度条 / 下一首。以前只有 2 行（信息和进度条
-/// 挤在一行，长歌名只能截断），现在封面能放下，信息也有了层次。
-pub const PLAYER_HEIGHT: u16 = 6;
-
-/// 播放条里的封面宽度（列）。高度固定 4 行，宽度按 2:1 的字符高宽比给 8 列。
-const PLAYER_COVER_WIDTH: u16 = 8;
-/// 内容区窄于这个宽度就不显示封面，把宽度全让给文字。
-const PLAYER_COVER_MIN_WIDTH: u16 = 52;
+/// 2 行 = 曲目信息 / 进度条。
+///
+/// 这里**刻意不放封面**：播放条总共才 4 行，给封面最多 8×4 格——那个尺寸下
+/// 专辑图只是一团糊色，既看不清又白占宽度。封面挪到「首页」和「歌词」页，
+/// 那里有整块区域可以按真实比例放大（见 `draw_cover_block`）。
+pub const PLAYER_HEIGHT: u16 = 4;
 
 /// 播放条：封面 + 曲目信息 + 进度条 + 下一首。
 pub fn render_player(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
-    if area.height < 5 || area.width < 20 {
+    if area.height < 3 || area.width < 20 {
         return;
     }
 
@@ -43,59 +41,22 @@ pub fn render_player(frame: &mut Frame, area: Rect, state: &mut AppState, theme:
         return;
     }
 
-    // 窄屏不画封面：8 列封面 + 1 列间隔，在 50 列宽的终端里是实打实的浪费
-    let show_cover = state.cover.is_drawable() && inner.width >= PLAYER_COVER_MIN_WIDTH;
-    let (cover_area, info_area) = if show_cover {
-        let [cover, info] =
-            Layout::horizontal([Constraint::Length(PLAYER_COVER_WIDTH), Constraint::Min(20)])
-                .spacing(1)
-                .areas(inner);
-        (Some(cover), info)
+    // 两行：曲目信息 / 进度条。高度只有 1 行时（极端窄终端）只给进度条。
+    if inner.height >= 2 {
+        let [info_area, gauge_area] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(inner);
+        render_song_info(frame, info_area, state, theme);
+        render_progress(frame, gauge_area, state, theme);
     } else {
-        (None, inner)
-    };
-
-    if let Some(cover_area) = cover_area {
-        draw_player_cover(frame, cover_area, state);
-    }
-
-    // 信息区固定 4 行；高度不够时（极端窄终端）从上往下给，进度条优先
-    let [name_area, meta_area, gauge_area, next_area] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .areas(info_area);
-
-    render_song_name(frame, name_area, state, theme);
-    render_song_meta(frame, meta_area, state, theme);
-    render_progress(frame, gauge_area, state, theme);
-    render_next_up(frame, next_area, state, theme);
-}
-
-/// 播放条里的封面缩略图。
-fn draw_player_cover(frame: &mut Frame, area: Rect, state: &mut AppState) {
-    if let Some(protocol) = state.cover.protocol.as_mut() {
-        frame.render_stateful_widget(StatefulImage::default(), area, protocol);
-        if let Some(Err(error)) = protocol.last_encoding_result() {
-            crate::logger::tlog!(crate::logger::LEVEL_WARN, "播放条封面编码失败：{error}");
-        }
-    } else {
-        // 没有图形协议时退回半块字符画，按区域高度截断
-        let lines: Vec<Line> = state
-            .cover
-            .lines
-            .iter()
-            .take(area.height as usize)
-            .map(|line| Line::from(truncate_to_width(line, area.width as usize)))
-            .collect();
-        frame.render_widget(Paragraph::new(lines), area);
+        render_progress(frame, inner, state, theme);
     }
 }
 
-/// 第 1 行：播放状态 + 歌名（加粗，独占一行不再被挤）。
-fn render_song_name(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+/// 第 1 行：播放状态 + 歌名 · 歌手 · 专辑（左），下一首与音量/模式（右）。
+///
+/// 播放条只有两行，所以把歌手、专辑并进歌名那一行——拆成独立一行的话进度条
+/// 就得再让一行出来，列表能显示的内容反而更少。右侧那一小段用暗色，不抢歌名。
+fn render_song_info(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     let marker = match state.playback {
         PlaybackState::Playing => crate::ui::icons::now_playing(true),
         PlaybackState::Paused => crate::ui::icons::now_playing(false),
@@ -103,45 +64,84 @@ fn render_song_name(frame: &mut Frame, area: Rect, state: &AppState, theme: &The
         PlaybackState::Stopped => crate::ui::icons::stopped(),
     };
 
-    let name = match state.current.as_ref() {
-        Some(song) => song.name.clone(),
-        None => "未在播放（在列表里按 Enter 播放）".to_string(),
+    let (left_text, emphasis) = match state.current.as_ref() {
+        Some(song) => {
+            let mut text = song.name.clone();
+            let singer = song.singer_text();
+            if !singer.is_empty() {
+                text.push_str(" · ");
+                text.push_str(&singer);
+            }
+            if !song.album_name.is_empty() {
+                text.push_str(" · ");
+                text.push_str(&song.album_name);
+            }
+            (text, theme.title())
+        }
+        None => ("未在播放（在列表里按 Enter 播放）".to_string(), theme.dim()),
     };
 
-    let line = Line::from(vec![
-        Span::styled(format!("{marker} "), theme.playback(state.playback)),
-        Span::styled(
-            truncate_to_width(&name, area.width.saturating_sub(3) as usize),
-            if state.current.is_some() {
-                theme.title()
-            } else {
-                theme.dim()
-            },
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
+    // 右侧：下一首 + 音量 + 循环模式。宽度不够就整段不画，别把歌名挤没了。
+    let right_text = next_up_text(state);
+    let right_width = (right_text.chars().count() as u16).min(area.width / 2);
+    let show_right = !right_text.is_empty() && area.width >= 60;
+
+    let (left_area, right_area) = if show_right {
+        let [left, right] =
+            Layout::horizontal([Constraint::Min(20), Constraint::Length(right_width)])
+                .spacing(1)
+                .areas(area);
+        (left, Some(right))
+    } else {
+        (area, None)
+    };
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!("{marker} "), theme.playback(state.playback)),
+            Span::styled(
+                truncate_to_width(&left_text, left_area.width.saturating_sub(3) as usize),
+                emphasis,
+            ),
+        ])),
+        left_area,
+    );
+
+    if let Some(right_area) = right_area {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                truncate_to_width(&right_text, right_area.width as usize),
+                theme.dim(),
+            )))
+            .alignment(Alignment::Right),
+            right_area,
+        );
+    }
 }
 
-/// 第 2 行：歌手 · 专辑（次要信息，用暗色）。
-fn render_song_meta(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
-    let meta = match state.current.as_ref() {
-        Some(song) => {
-            let singer = song.singer_text();
-            if song.album_name.is_empty() {
-                singer
-            } else {
-                format!("{singer} · {}", song.album_name)
-            }
-        }
-        None => String::new(),
-    };
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            truncate_to_width(&meta, area.width as usize),
-            theme.dim(),
-        ))),
-        area,
-    );
+/// 播放条右侧那一小段：「下一首 X · 播放中 · 音量 80% · 顺序」。
+///
+/// 拼一整串再整体截断，而不是各段分别截——分别截会出现「下一首 稻… · 播」这种
+/// 两半都被切坏的残句。
+fn next_up_text(state: &AppState) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(next) = state.queue.peek_next() {
+        parts.push(format!(
+            "{} 下一首 {}",
+            crate::ui::icons::next_up(),
+            next.name
+        ));
+    }
+    parts.push(state.playback.label().to_string());
+    parts.push(if state.is_muted() {
+        "静音".to_string()
+    } else {
+        format!("音量 {:.0}%", state.volume * 100.0)
+    });
+    parts.push(state.queue.mode().label().to_string());
+
+    parts.join(" · ")
 }
 
 /// 第 3 行：进度条。自带居中标签，把时间放在条上。
@@ -161,46 +161,6 @@ fn render_progress(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &
 
     // 点击进度条可跳转：登记命中区，由 app 层按 x 比例换算成目标时间。
     state.add_hit_zone(area, HitTarget::Progress, 0, 1);
-}
-
-/// 第 4 行：下一首 + 音量/循环模式（右侧）。
-fn render_next_up(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
-    let next = state
-        .queue
-        .peek_next()
-        .map(|song| format!("{} 下一首：{}", crate::ui::icons::next_up(), song.name))
-        .unwrap_or_default();
-
-    let volume = if state.is_muted() {
-        "静音".to_string()
-    } else {
-        format!("音量 {:.0}%", state.volume * 100.0)
-    };
-    let right = format!(
-        "{} · {} · {}",
-        state.playback.label(),
-        volume,
-        state.queue.mode().label()
-    );
-
-    let [left, right_area] =
-        Layout::horizontal([Constraint::Min(10), Constraint::Length(24)]).areas(area);
-
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            truncate_to_width(&next, left.width as usize),
-            theme.dim(),
-        ))),
-        left,
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            truncate_to_width(&right, right_area.width as usize),
-            theme.dim(),
-        )))
-        .alignment(Alignment::Right),
-        right_area,
-    );
 }
 
 /// 歌词面板。
@@ -396,7 +356,7 @@ pub fn render_queue(
 /// 上限不只是审美：图片协议按区域尺寸编码，区域越大单次编码的数据越多，
 /// 而封面页最宽也就 48 列左右，再大没有意义。
 const COVER_MIN_ROWS: u16 = 6;
-const COVER_MAX_ROWS: u16 = 24;
+const COVER_MAX_ROWS: u16 = 32;
 
 /// 在 `inner` 上方划出一块居中的方形封面区，返回（封面区, 剩余区）。
 ///
@@ -405,13 +365,25 @@ const COVER_MAX_ROWS: u16 = 24;
 ///
 /// 字符宽高比约 1:2，所以方形区域的列数取行数的两倍；最多占一半高，
 /// 剩下的留给下方内容。区域太小时返回 `None`，调用方把整块都留给内容。
-fn cover_layout(inner: Rect) -> Option<(Rect, Rect)> {
+fn cover_layout(inner: Rect, aspect: f32, cell_aspect: f32) -> Option<(Rect, Rect)> {
     if inner.width < 12 || inner.height < 8 {
         return None;
     }
 
-    let rows = (inner.height / 2).clamp(COVER_MIN_ROWS, COVER_MAX_ROWS);
-    let columns = (rows * 2).min(inner.width);
+    let mut rows = (inner.height / 2).clamp(COVER_MIN_ROWS, COVER_MAX_ROWS);
+    // 按「图片真实宽高比 × 字符高宽比」算列数（学 voicefox 的 CoverGeometry）。
+    // 以前写死 columns = rows * 2，等于假定所有封面都是正方形 + 字符 2:1——
+    // 碰到 16:9 的头图就会被压扁。
+    let mut columns = (f32::from(rows) * aspect * cell_aspect).round() as u16;
+    columns = columns.clamp(1, inner.width);
+
+    // 宽度不够就按宽度反推行数，别让封面横向溢出
+    if columns >= inner.width {
+        columns = inner.width;
+        rows = (f32::from(columns) / (aspect * cell_aspect)).round() as u16;
+        rows = rows.clamp(COVER_MIN_ROWS, inner.height.saturating_sub(1));
+    }
+
     let [cover_area, rest] =
         Layout::vertical([Constraint::Length(rows + 1), Constraint::Min(1)]).areas(inner);
 
@@ -436,7 +408,9 @@ fn draw_cover_block(frame: &mut Frame, inner: Rect, state: &mut AppState, theme:
     if !state.cover.is_drawable() {
         return inner;
     }
-    let Some((cover_area, rest)) = cover_layout(inner) else {
+    // 字符高宽比：配的 qr_aspect 就是「字符高:宽」，同一个概念，直接复用
+    let cell_aspect = state.config.qr_aspect.max(0.1);
+    let Some((cover_area, rest)) = cover_layout(inner, state.cover.aspect, cell_aspect) else {
         return inner;
     };
 
@@ -566,7 +540,7 @@ mod tests {
     #[test]
     fn cover_block_is_twice_as_wide_as_tall_and_centered() {
         let inner = Rect::new(0, 0, 60, 20);
-        let (cover, _rest) = cover_layout(inner).expect("60x20 够放封面");
+        let (cover, _rest) = cover_layout(inner, 1.0, 2.0).expect("60x20 够放封面");
 
         assert_eq!(cover.height, 10, "最多占一半高");
         assert_eq!(cover.width, 20, "列数是行数的两倍");
@@ -577,25 +551,46 @@ mod tests {
     /// 区域太小就整块留给内容——半个封面对阅读毫无帮助。
     #[test]
     fn cover_block_is_skipped_when_area_is_tiny() {
-        assert!(cover_layout(Rect::new(0, 0, 11, 20)).is_none());
-        assert!(cover_layout(Rect::new(0, 0, 60, 7)).is_none());
+        assert!(cover_layout(Rect::new(0, 0, 11, 20), 1.0, 2.0).is_none());
+        assert!(cover_layout(Rect::new(0, 0, 60, 7), 1.0, 2.0).is_none());
     }
 
     /// 行数被夹在 [6, 24]：矮区域不至于缩成一条，高区域也不会把内容挤没。
     #[test]
     fn cover_rows_are_clamped() {
-        let (short, _) = cover_layout(Rect::new(0, 0, 40, 8)).expect("8 行够放最小封面");
+        let (short, _) = cover_layout(Rect::new(0, 0, 40, 8), 1.0, 2.0).expect("8 行够放最小封面");
         assert_eq!(short.height, COVER_MIN_ROWS);
 
-        let (tall, _) = cover_layout(Rect::new(0, 0, 80, 100)).expect("100 行够放封面");
+        let (tall, _) = cover_layout(Rect::new(0, 0, 80, 100), 1.0, 2.0).expect("100 行够放封面");
         assert_eq!(tall.height, COVER_MAX_ROWS);
-        assert_eq!(tall.width, 48);
+        assert_eq!(tall.width, 64, "32 行 × 2（方图 + 字符 2:1）");
+    }
+
+    /// 非正方形封面按真实比例算列数——16:9 的头图不该被压成方的。
+    ///
+    /// 以前写死 `columns = rows * 2`，等于假定所有封面都是正方形。
+    #[test]
+    fn cover_respects_image_aspect_ratio() {
+        let (square, _) = cover_layout(Rect::new(0, 0, 80, 20), 1.0, 2.0).expect("80x20 够放封面");
+        let (wide, _) =
+            cover_layout(Rect::new(0, 0, 80, 20), 16.0 / 9.0, 2.0).expect("80x20 够放封面");
+
+        assert!(
+            wide.width > square.width,
+            "16:9 的图应该比方图宽：wide={} square={}",
+            wide.width,
+            square.width
+        );
+
+        // 竖图（比如 3:4 的歌手照）应该更窄
+        let (tall, _) = cover_layout(Rect::new(0, 0, 80, 20), 0.75, 2.0).expect("80x20 够放封面");
+        assert!(tall.width < square.width, "竖图应该比方图窄");
     }
 
     /// 窄区域里宽度是硬约束：宁可矮一点也不让封面超出边界。
     #[test]
     fn cover_width_is_capped_by_area_width() {
-        let (cover, _) = cover_layout(Rect::new(0, 0, 14, 20)).expect("14x20 够放封面");
+        let (cover, _) = cover_layout(Rect::new(0, 0, 14, 20), 1.0, 2.0).expect("14x20 够放封面");
         assert_eq!(cover.width, 14, "10 行本该要 20 列，被宽度压到 14");
         assert_eq!(cover.x, 0);
     }
@@ -622,6 +617,7 @@ mod tests {
         let mut state = AppState::new(crate::config::Config::default());
         state.cover = crate::app::state::CoverArt {
             hash: Some("test-hash".to_string()),
+            aspect: 1.0,
             lines: Vec::new(),
             protocol: Some(protocol),
         };
@@ -671,8 +667,8 @@ mod tests {
 
         // 交给 widget 的区域由纯函数算出，因此连续两帧必然是同一个矩形——
         // 区域稳定是「不重发」的前提
-        let (first_area, _) = cover_layout(Rect::new(0, 0, 60, 20)).expect("够放封面");
-        let (second_area, _) = cover_layout(Rect::new(0, 0, 60, 20)).expect("够放封面");
+        let (first_area, _) = cover_layout(Rect::new(0, 0, 60, 20), 1.0, 2.0).expect("够放封面");
+        let (second_area, _) = cover_layout(Rect::new(0, 0, 60, 20), 1.0, 2.0).expect("够放封面");
         assert_eq!(first_area, second_area);
 
         let mut first = Buffer::empty(first_area);
@@ -694,7 +690,7 @@ mod tests {
         );
 
         // 换到更大的区域才重新编码一次：切页 / 改窗口大小走的就是这条路
-        let (bigger, _) = cover_layout(Rect::new(0, 0, 60, 40)).expect("够放封面");
+        let (bigger, _) = cover_layout(Rect::new(0, 0, 60, 40), 1.0, 2.0).expect("够放封面");
         assert_ne!(bigger.height, first_area.height);
         let mut third = Buffer::empty(bigger);
         StatefulImage::default().render(bigger, &mut third, &mut protocol);
@@ -708,7 +704,7 @@ mod tests {
     #[test]
     fn remainder_sits_below_the_cover() {
         let inner = Rect::new(3, 5, 60, 20);
-        let (cover, rest) = cover_layout(inner).expect("60x20 够放封面");
+        let (cover, rest) = cover_layout(inner, 1.0, 2.0).expect("60x20 够放封面");
 
         // rows + 1：多留一行当间距，不然封面和下面的内容会糊在一起
         assert_eq!(rest.y, cover.y + cover.height + 1);
