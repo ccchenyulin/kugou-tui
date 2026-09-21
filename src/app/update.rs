@@ -1984,6 +1984,22 @@ impl App {
             }
         }
 
+        // 节流：每次取 key 都是向服务端申请一个新的登录会话，短时间内反复申请
+        // 会被判「登录频繁」，手机端就扫不了了（实测用户就是这么被限的）。
+        // 宁可让用户多等几秒，也别把账号搞限流。
+        const QR_KEY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
+        if let Some(last) = self.state.last_qr_key_at {
+            let waited = last.elapsed();
+            if waited < QR_KEY_COOLDOWN {
+                let left = (QR_KEY_COOLDOWN - waited).as_secs() + 1;
+                self.state.warn(format!(
+                    "取二维码太频繁了，请 {left} 秒后再按 L（频繁申请会被服务端限流）"
+                ));
+                return;
+            }
+        }
+        self.state.last_qr_key_at = Some(Instant::now());
+
         self.state.login = Some(LoginState {
             message: "正在获取二维码…".to_string(),
             ..Default::default()

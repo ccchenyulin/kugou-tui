@@ -691,6 +691,12 @@ pub struct AppState {
     pub cache_bytes: u64,
     /// 心跳计数，用于把「每 N 拍做一次」的低频任务错开。
     pub ticks: u64,
+    /// 上一次取登录二维码 key 的时刻。
+    ///
+    /// 每次取 key 都会向网易云申请一个新的登录会话。短时间内反复申请（比如
+    /// 二维码过期后连按几次 `L`）会被判为「登录频繁」，手机端直接扫不了——
+    /// 实测就是这个提示。用它把申请间隔拉住，别把用户的账号搞限流。
+    pub last_qr_key_at: Option<std::time::Instant>,
     /// 本帧的鼠标命中区，由 ui 层每帧清空后回填。
     pub hit_zones: Vec<HitZone>,
     /// 歌曲列表的排列顺序。
@@ -848,6 +854,7 @@ impl AppState {
             logged_in,
             tab: Tab::default(),
             focus: Focus::default(),
+            last_qr_key_at: None,
             sidebar_visible: true,
             show_help: false,
             show_lyric_panel: true,
