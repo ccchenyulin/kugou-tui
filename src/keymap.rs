@@ -47,6 +47,8 @@ pub enum Action {
     Submit,
     /// 返回上一层 / 取消输入。
     Cancel,
+    /// 打开当前歌曲的右键菜单（等同鼠标右键）。
+    ContextMenu,
 
     // ---- 文本编辑 ----
     Char(char),
@@ -424,6 +426,9 @@ fn resolve_normal(key: KeyEvent) -> Action {
         KeyCode::Char('x') => Action::RemoveFromQueue,
         KeyCode::Char('X') => Action::ClearQueue,
         KeyCode::Char('C') => Action::ClearCache,
+        // 右键菜单的键盘入口。m 已被静音占用，用分号——它在多数程序里就是
+        // 「命令/菜单」那个键
+        KeyCode::Char(';') => Action::ContextMenu,
         KeyCode::Char('M') => Action::LoadMoreSearch,
         KeyCode::Char('o') => Action::ToggleSortOrder,
         KeyCode::Char('b') => Action::OpenRanks,

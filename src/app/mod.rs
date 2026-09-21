@@ -51,6 +51,7 @@ fn detect_image_picker() -> ratatui_image::picker::Picker {
 }
 
 pub mod queue;
+pub mod session;
 pub mod settings;
 pub mod state;
 pub mod update;
@@ -154,6 +155,7 @@ impl App {
 
         app.picker = Some(detect_image_picker());
 
+        app.restore_session();
         app.announce_readiness();
         // 放在 announce_readiness 之后：这种故障比「未登录」严重，提示不能被覆盖
         if app.audio.spawn_failed() {
@@ -304,8 +306,63 @@ impl App {
             tlog!(crate::logger::LEVEL_INFO, "强制退出，跳过配置保存");
         } else {
             self.persist_config();
+            self.persist_session();
         }
         self.audio.shutdown();
+    }
+
+    /// 把「正在听什么」存下来，下次启动原样恢复。
+    ///
+    /// 队列 + 游标 + 播放位置。关掉终端再打开，不该从零开始。
+    fn persist_session(&mut self) {
+        let session = crate::app::session::Session {
+            queue: self.state.queue.items().to_vec(),
+            cursor: self.state.queue.cursor(),
+            position_ms: self.state.position_ms,
+        };
+        if session.is_empty() {
+            return;
+        }
+        session.save();
+        tlog!(
+            crate::logger::LEVEL_INFO,
+            "会话已保存：{} 首，位置 {} ms",
+            session.queue.len(),
+            session.position_ms
+        );
+    }
+
+    /// 恢复上次的会话。
+    ///
+    /// **刻意不自动播放**：一开程序就出声很吓人，而且可能是在不该出声的场合。
+    /// 只把队列和游标填回去，让用户自己按 Space。
+    fn restore_session(&mut self) {
+        let Some(session) = crate::app::session::Session::load() else {
+            return;
+        };
+        if session.is_empty() {
+            return;
+        }
+
+        let count = session.queue.len();
+        let mode = self.state.config.playback_mode;
+        // replace_with 会把游标定位到 cursor，并把 current 设成那首歌
+        if let Some(_song) = self
+            .state
+            .queue
+            .replace_with(session.queue, session.cursor.unwrap_or(0))
+        {
+            self.state.queue.set_mode(mode);
+            self.state.current = self.state.queue.current().cloned();
+            self.state.position_ms = session.position_ms;
+            self.state
+                .info(format!("已恢复上次会话：{count} 首 · 按 Space 继续播放"));
+            tlog!(
+                crate::logger::LEVEL_INFO,
+                "会话已恢复：{count} 首，位置 {} ms",
+                session.position_ms
+            );
+        }
     }
 
     fn persist_config(&mut self) {

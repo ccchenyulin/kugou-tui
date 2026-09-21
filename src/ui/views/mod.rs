@@ -28,6 +28,7 @@ pub use visualizer::render_visualizer;
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Rect};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Clear, Paragraph, Row, Table, Wrap};
 
@@ -364,6 +365,60 @@ pub fn render_confirm(frame: &mut Frame, action: ConfirmAction, theme: &Theme) {
             .wrap(Wrap { trim: true }),
         inner,
     );
+}
+
+/// 歌曲右键菜单。
+///
+/// 居中的小弹窗，每项右侧标出对应键位——菜单是**键盘动作的索引**而不是
+/// 另一套交互，标出来用户下次就能直接按。
+pub fn render_context_menu(
+    frame: &mut Frame,
+    menu: &crate::app::state::ContextMenu,
+    theme: &Theme,
+) {
+    use crate::app::state::MenuAction;
+
+    let height = (menu.items.len() as u16 + 4).min(frame.area().height);
+    let popup = crate::ui::widgets::centered_rect(frame.area(), 34, height);
+    frame.render_widget(Clear, popup);
+
+    // 标题带歌名：菜单是「对哪首歌操作」，不写清楚容易点错
+    let title = format!("《{}》", menu.song.name);
+    let block = panel(title, true, theme);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if inner.height == 0 {
+        return;
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (index, action) in menu.items.iter().enumerate() {
+        let selected = index == menu.cursor;
+        let pointer = if selected { ">" } else { " " };
+        let style = if selected {
+            theme.selection().add_modifier(Modifier::BOLD)
+        } else {
+            theme.body()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{pointer} {}", action.label()), style),
+            Span::styled(
+                format!("{:>width$}", action.key_hint(), width = 10),
+                if selected { style } else { theme.dim() },
+            ),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "↑↓ 选择 · Enter 执行 · Esc 关闭",
+        theme.dim(),
+    )));
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+
+    let _ = MenuAction::Play; // 类型已用于 items，这里仅为可读性
 }
 
 /// 帮助弹窗。

@@ -223,24 +223,116 @@ impl App {
             return;
         };
 
+        // 先把光标下那一行选中——菜单是「对这首歌操作」，选中的也必须是它
         match zone.target {
-            // 搜索结果 / 歌曲列表：选中该行并加进队列（等同 a）
-            HitTarget::Entries | HitTarget::Songs => {
-                match zone.target {
-                    HitTarget::Entries => self.state.select_entry_index(index),
-                    HitTarget::Songs => self.state.select_song_index(index),
-                    _ => {}
-                }
+            HitTarget::Entries => {
+                self.state.select_entry_index(index);
                 self.focus_hit_target(zone.target);
-                self.queue_focused_song(false);
             }
-            // 队列里：选中并从队列移除（等同 x）。队列行再加一次队列没有意义。
+            HitTarget::Songs => {
+                self.state.select_song_index(index);
+                self.focus_hit_target(zone.target);
+            }
             HitTarget::Queue => {
                 self.focus_hit_target(zone.target);
                 self.state.queue_cursor.select(Some(index));
-                self.remove_selected_from_queue();
             }
-            HitTarget::Tab(_) | HitTarget::Progress | HitTarget::Settings => {}
+            HitTarget::Tab(_) | HitTarget::Progress | HitTarget::Settings => return,
+        }
+
+        self.open_context_menu();
+    }
+
+    // ==================================================================
+    // 歌曲右键菜单
+    // ==================================================================
+
+    /// 菜单打开时的按键：移动、执行、关闭。
+    fn handle_menu_key(&mut self, action: Action) {
+        let Some(menu) = self.state.context_menu.as_mut() else {
+            return;
+        };
+
+        match action {
+            Action::MoveUp => menu.move_cursor(-1),
+            Action::MoveDown => menu.move_cursor(1),
+            Action::MoveTop => menu.cursor = 0,
+            Action::MoveBottom => menu.cursor = menu.items.len().saturating_sub(1),
+            Action::Cancel | Action::Help => self.state.context_menu = None,
+            Action::Submit | Action::PlayPause => {
+                let Some(selected) = menu.selected() else {
+                    return;
+                };
+                let song = menu.song.clone();
+                self.state.context_menu = None;
+                self.run_menu_action(selected, &song);
+            }
+            // 数字键直接选中并执行，和列表的 1-9 一个手感
+            Action::Char(digit @ '1'..='9') => {
+                let index = (digit as u8 - b'1') as usize;
+                if let Some(selected) = menu.items.get(index).copied() {
+                    let song = menu.song.clone();
+                    self.state.context_menu = None;
+                    self.run_menu_action(selected, &song);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// 打开当前焦点歌曲的菜单。
+    fn open_context_menu(&mut self) {
+        let Some(song) = self.state.selected_song() else {
+            self.state.info("这里没有可对它操作的歌曲");
+            return;
+        };
+        let in_queue = self.state.focus == crate::app::state::Focus::Queue;
+        self.state.context_menu = Some(crate::app::state::ContextMenu::new(song, in_queue));
+    }
+
+    /// 执行菜单项。每一项都转调已有的动作实现——菜单**不是**第二套逻辑，
+    /// 只是把键位集中到光标处，这样键盘和鼠标走的是同一条代码路径。
+    fn run_menu_action(&mut self, action: crate::app::state::MenuAction, song: &Song) {
+        use crate::app::state::MenuAction;
+
+        match action {
+            MenuAction::Play => self.start_playback(song.clone(), 0),
+            MenuAction::QueueAppend => {
+                let label = describe_song(song);
+                self.state.queue.append(song.clone());
+                self.clamp_queue_cursor();
+                self.state.success(format!("已加入队列：{label}"));
+            }
+            MenuAction::QueuePlayNext => {
+                let label = describe_song(song);
+                self.state.queue.insert_next(song.clone());
+                self.clamp_queue_cursor();
+                self.state.success(format!("已插入到下一首：{label}"));
+            }
+            // 打开菜单时焦点已经是这首歌，所以沿用「收藏焦点歌曲」那条路径
+            MenuAction::AddToCloud => self.add_focused_song_to_cloud(),
+            MenuAction::Download => self.download_song(song.clone()),
+            MenuAction::RemoveFromQueue => self.remove_song_from_queue(song),
+        }
+    }
+
+    /// 菜单里的「从队列移除」：按下标移除，而不是动当前游标。
+    ///
+    /// 菜单可以作用在队列里**任意**一首上，而 `x`（remove_selected_from_queue）
+    /// 只认当前选中那首——直接复用的话，右键第 5 首会删掉第 2 首。
+    fn remove_song_from_queue(&mut self, song: &Song) {
+        let Some(index) = self
+            .state
+            .queue
+            .items()
+            .iter()
+            .position(|item| item.hash == song.hash)
+        else {
+            self.state.warn("这首歌不在播放队列里");
+            return;
+        };
+        if let Some(removed) = self.state.queue.remove(index) {
+            self.state.info(format!("已从队列移除《{}》", removed.name));
         }
     }
 
@@ -377,6 +469,12 @@ impl App {
             self.state.warn("当前没有在播放的歌曲");
             return;
         };
+        self.download_song(song);
+    }
+
+    /// 下载指定歌曲。菜单里点的歌不一定是当前在放的那首，所以这里收一首歌
+    /// 而不是读 `state.current`。
+    fn download_song(&mut self, song: Song) {
         let dir =
             crate::app::settings::expand_download_dir(self.state.config.download_dir.as_deref());
         let target_dir = std::path::PathBuf::from(&dir);
@@ -602,6 +700,13 @@ impl App {
 
     /// 处理一个按键动作。
     pub fn handle_action(&mut self, action: Action) {
+        // 右键菜单是模态的：打开的期间所有按键都归它，避免菜单开着还能
+        // 操作底下的列表（那样选中的歌和菜单目标的歌会不一致）
+        if self.state.context_menu.is_some() {
+            self.handle_menu_key(action);
+            return;
+        }
+
         // 帮助面板是模态的：只允许关闭它
         if self.state.show_help {
             if matches!(
@@ -782,6 +887,7 @@ impl App {
                 self.state.force_quit = true;
             }
             Action::Help => self.state.show_help = true,
+            Action::ContextMenu => self.open_context_menu(),
             Action::SwitchSource => self.open_sources_page(),
             Action::SetDefaultSource => self.set_default_source(),
             Action::RaiseSourcePriority => self.shift_source_priority(true),

@@ -790,6 +790,8 @@ pub struct AppState {
     pub login_picker: Option<LoginPicker>,
     /// 文本输入弹窗；`None` 表示没有弹出的输入框。
     pub prompt: Option<PromptState>,
+    /// 歌曲右键菜单；\`None\` 表示没开菜单。
+    pub context_menu: Option<ContextMenu>,
     /// 设置页当前选中的条目下标。
     pub settings_cursor: usize,
     /// 当前封面，以及它属于哪首歌（避免切歌后继续显示上一张）。
@@ -880,6 +882,108 @@ pub enum ConfirmAction {
     Relogin,
 }
 
+/// 右键菜单里的一项对歌曲的动作。
+///
+/// 每一项都有对应的快捷键，菜单只是把它们集中到光标处——所以菜单里**不出现
+/// 没有对应键位的操作**，否则用户从菜单学会一个动作后，下次想用键盘却找不到。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuAction {
+    /// 播放（等同 `Enter`）。
+    Play,
+    /// 加到队列末尾（等同 `a`）。
+    QueueAppend,
+    /// 插播到下一首（等同 `i`）。
+    QueuePlayNext,
+    /// 收藏到云端歌单（等同 `s`）。
+    AddToCloud,
+    /// 下载到本地（等同 `w`）。
+    Download,
+    /// 从播放队列移除（等同 `x`）。
+    RemoveFromQueue,
+}
+
+impl MenuAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Play => "播放",
+            Self::QueueAppend => "加入队列",
+            Self::QueuePlayNext => "插播下一首",
+            Self::AddToCloud => "收藏到云端",
+            Self::Download => "下载到本地",
+            Self::RemoveFromQueue => "从队列移除",
+        }
+    }
+
+    /// 右侧标出对应的键位，让用户知道下次可以直接按。
+    pub fn key_hint(self) -> &'static str {
+        match self {
+            Self::Play => "Enter",
+            Self::QueueAppend => "a",
+            Self::QueuePlayNext => "i",
+            Self::AddToCloud => "s",
+            Self::Download => "w",
+            Self::RemoveFromQueue => "x",
+        }
+    }
+
+    /// 菜单项分两组装：队列内外能做的事不一样。
+    ///
+    /// `in_queue` 为 true 时（点在播放队列里），「加入队列」没有意义，换成
+    /// 「从队列移除」。
+    pub fn items_for(in_queue: bool) -> Vec<MenuAction> {
+        if in_queue {
+            vec![
+                Self::Play,
+                Self::QueuePlayNext,
+                Self::RemoveFromQueue,
+                Self::AddToCloud,
+                Self::Download,
+            ]
+        } else {
+            vec![
+                Self::Play,
+                Self::QueueAppend,
+                Self::QueuePlayNext,
+                Self::AddToCloud,
+                Self::Download,
+            ]
+        }
+    }
+}
+
+/// 打开的右键菜单。
+#[derive(Debug, Clone)]
+pub struct ContextMenu {
+    /// 菜单作用在哪首歌上。存整首歌而不是下标：切页、刷新列表之后下标会失效，
+    /// 而歌本身不会变。
+    pub song: crate::api::model::Song,
+    pub items: Vec<MenuAction>,
+    pub cursor: usize,
+}
+
+impl ContextMenu {
+    pub fn new(song: crate::api::model::Song, in_queue: bool) -> Self {
+        Self {
+            song,
+            items: MenuAction::items_for(in_queue),
+            cursor: 0,
+        }
+    }
+
+    pub fn selected(&self) -> Option<MenuAction> {
+        self.items.get(self.cursor).copied()
+    }
+
+    pub fn move_cursor(&mut self, delta: isize) {
+        if self.items.is_empty() {
+            return;
+        }
+        let len = self.items.len() as isize;
+        let next = (self.cursor as isize + delta).rem_euclid(len);
+        self.cursor = next as usize;
+    }
+}
+
 impl ConfirmAction {
     pub fn question(self) -> &'static str {
         match self {
@@ -932,6 +1036,7 @@ impl AppState {
             tab: Tab::default(),
             focus: Focus::default(),
             last_qr_key_at: None,
+            context_menu: None,
             sidebar_visible: true,
             show_help: false,
             show_lyric_panel: true,

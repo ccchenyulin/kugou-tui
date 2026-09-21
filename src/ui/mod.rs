@@ -137,6 +137,11 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
         views::render_prompt(frame, prompt, &theme);
     }
 
+    // 歌曲右键菜单：画在确认框之下（确认框是「要不要做」的最后一道闸）
+    if let Some(menu) = state.context_menu.as_ref() {
+        views::render_context_menu(frame, menu, &theme);
+    }
+
     // 确认对话框优先级最高，画在最上层
     if let Some(action) = state.pending_confirm {
         views::render_confirm(frame, action, &theme);

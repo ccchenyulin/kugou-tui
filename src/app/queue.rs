@@ -85,6 +85,16 @@ impl PlayQueue {
         self.cursor.and_then(|index| self.items.get(index))
     }
 
+    /// 当前游标位置。会话持久化要用它恢复「上次听到哪一首」。
+    pub fn cursor(&self) -> Option<usize> {
+        self.cursor
+    }
+
+    /// 直接设定播放模式（会话恢复时用，不轮转）。
+    pub fn set_mode(&mut self, mode: PlaybackMode) {
+        self.mode = mode;
+    }
+
     /// 队列里的下一首（**不移动游标**，纯粹看一眼）。
     ///
     /// 只按队列顺序取下一个，不套用随机 / 单曲循环的规则——那些是「真的要切
