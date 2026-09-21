@@ -499,6 +499,115 @@ pub fn render_cover_page(frame: &mut Frame, area: Rect, state: &mut AppState, th
 }
 
 /// 首页：正在播放的总览——封面在左，曲目信息与歌词在右。
+/// 首页账号区的高度：边框 2 行 + 内容 6 行。
+///
+/// 6 行是按头像定的：头像要能看清，2 行只能画出 4 列宽的小方块。
+const ACCOUNT_HEIGHT: u16 = 8;
+
+/// 头像占的列数：6 行内容 × 字符高宽比 2 = 12 列。
+const AVATAR_COLUMNS: u16 = 12;
+
+/// 首页左下角的账号区：头像 + 昵称 · 等级 · 累计听歌时长。
+///
+/// **刻意不放**粉丝数、关注数、访客、星座、勋章——`/user/detail` 返回十几个
+/// 字段，全摆上来这里就成了数据表，而首页要回答的是「在放什么」。只留一眼
+/// 能读完的三项。
+fn render_account(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
+    let block = panel("我的资料", false, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height == 0 || inner.width < 8 {
+        return;
+    }
+
+    let Some(info) = state.user_info.clone() else {
+        // 已登录但资料还没回来时显示「加载中」——直接写「未登录」会让人以为
+        // 登录掉了，其实只是这一秒还没到。
+        let text = if state.logged_in {
+            "加载中…"
+        } else {
+            "未登录（按 L 扫码）"
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                truncate_to_width(text, inner.width as usize),
+                theme.dim(),
+            )),
+            inner,
+        );
+        return;
+    };
+
+    // 左头像 / 右文字。窄到放不下头像就整块给文字
+    let (avatar_area, text_area) = if inner.width >= AVATAR_COLUMNS + 14 {
+        let [left, right] =
+            Layout::horizontal([Constraint::Length(AVATAR_COLUMNS), Constraint::Min(10)])
+                .spacing(1)
+                .areas(inner);
+        (Some(left), right)
+    } else {
+        (None, inner)
+    };
+
+    if let Some(avatar_area) = avatar_area {
+        if let Some(protocol) = state.avatar.protocol.as_mut() {
+            frame.render_stateful_widget(StatefulImage::default(), avatar_area, protocol);
+            if let Some(Err(error)) = protocol.last_encoding_result() {
+                crate::logger::tlog!(crate::logger::LEVEL_WARN, "头像编码失败：{error}");
+            }
+        } else if !state.avatar.lines.is_empty() {
+            // 没有图形协议时退回半块字符画
+            let lines: Vec<Line> = state
+                .avatar
+                .lines
+                .iter()
+                .take(avatar_area.height as usize)
+                .map(|line| Line::from(truncate_to_width(line, avatar_area.width as usize)))
+                .collect();
+            frame.render_widget(Paragraph::new(lines), avatar_area);
+        }
+    }
+
+    // 昵称 + 等级
+    let mut lines: Vec<Line> = Vec::new();
+    let name = if info.nickname.is_empty() {
+        "（无名）".to_string()
+    } else {
+        info.nickname.clone()
+    };
+    lines.push(Line::from(vec![
+        Span::styled(
+            truncate_to_width(&name, text_area.width.saturating_sub(8) as usize),
+            theme.title(),
+        ),
+        Span::styled(
+            info.grade
+                .map(|grade| format!("  Lv.{grade}"))
+                .unwrap_or_default(),
+            theme.dim(),
+        ),
+    ]));
+
+    // 会员摘要（有就显示）
+    if let Some(label) = state.vip_label.as_deref() {
+        lines.push(Line::from(Span::styled(
+            truncate_to_width(label, text_area.width as usize),
+            theme.now_playing(),
+        )));
+    }
+
+    // 累计听歌时长
+    if let Some(duration) = info.duration_text() {
+        lines.push(Line::from(Span::styled(
+            truncate_to_width(&format!("听过 {duration}"), text_area.width as usize),
+            theme.dim(),
+        )));
+    }
+
+    frame.render_widget(Paragraph::new(lines), text_area);
+}
+
 pub fn render_home(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
     let block = panel("正在播放", false, theme);
     let inner = block.inner(area);
@@ -520,10 +629,14 @@ pub fn render_home(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &
     if inner.width >= 60 {
         let [left, right] =
             Layout::horizontal([Constraint::Percentage(45), Constraint::Min(24)]).areas(inner);
+        // 左栏再竖着切：封面占大部分，底下给账号信息留一块固定高度
+        let [cover_col, account_col] =
+            Layout::vertical([Constraint::Min(6), Constraint::Length(ACCOUNT_HEIGHT)]).areas(left);
         let left_block = panel("封面", false, theme);
-        let left_inner = left_block.inner(left);
-        frame.render_widget(left_block, left);
+        let left_inner = left_block.inner(cover_col);
+        frame.render_widget(left_block, cover_col);
         let _ = draw_cover_block(frame, left_inner, state, theme);
+        render_account(frame, account_col, state, theme);
         render_lyric(frame, right, state, theme);
     } else {
         let rest = draw_cover_block(frame, inner, state, theme);

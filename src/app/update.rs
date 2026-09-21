@@ -82,6 +82,9 @@ const MPRIS_COVER_SIZE: u32 = 400;
 /// 封面的尺寸（列 x 行）。每个字符承载上下 2 个像素，所以实际是 24x24 像素。
 const COVER_WIDTH: usize = 24;
 const COVER_HEIGHT: usize = 12;
+/// 头像字符画的尺寸：账号区只有 2 行内容高，头像跟着小。
+const AVATAR_WIDTH: usize = 12;
+const AVATAR_HEIGHT: usize = 6;
 
 /// 图片真实宽高比（宽/高）。
 ///
@@ -2308,6 +2311,7 @@ impl App {
                 self.state.success("登录成功，按 Esc 关闭");
                 // 顺带取一次会员信息，界面上能直接看到服务端认定的会员形态
                 self.fetch_vip_status();
+                self.fetch_user_info();
             }
             Err(error) => {
                 self.finish_login(false, format!("保存登录凭据失败：{error}"));
@@ -2342,6 +2346,7 @@ impl App {
                 );
                 self.state.success("登录成功，按 Esc 关闭");
                 self.fetch_vip_status();
+                self.fetch_user_info();
             }
             Err(error) => {
                 self.finish_login(false, format!("保存登录凭据失败：{error}"));
@@ -2518,6 +2523,7 @@ impl App {
                 self.api = client;
                 self.state.vip_label = None;
                 self.fetch_vip_status();
+                self.fetch_user_info();
                 self.ensure_device_fingerprint();
                 let capability = kind.capability();
                 if !capability.catalog {
@@ -2552,6 +2558,52 @@ impl App {
     ///
     /// 这一步是排查「明明有会员却只能试听」的关键：界面上能直接看到服务端认定的
     /// 会员形态与到期时间，不用去翻日志或 curl。
+    /// 取当前登录用户的资料（昵称 / 头像 / 等级 / 听歌时长）。
+    ///
+    /// 跟会员信息一样，取不到不影响听歌，静默降级。
+    pub fn fetch_user_info(&mut self) {
+        if !self.state.logged_in {
+            self.state.user_info = None;
+            return;
+        }
+
+        let api = self.api.clone();
+        let bus = self.bus.clone();
+
+        self.runtime.spawn(async move {
+            match api.user_detail().await {
+                Ok(info) => bus.emit(Loaded::UserInfo(Box::new(info))),
+                Err(error) => tlog!(crate::logger::LEVEL_WARN, "获取用户资料失败：{error}"),
+            }
+        });
+    }
+
+    /// 下载并解码头像。
+    ///
+    /// 走和封面同一条管线，但**不复用** \`state.cover\`——那是当前歌曲的专辑图，
+    /// 会被切歌换掉；头像得单独存一份。
+    fn load_avatar(&mut self, url: String) {
+        if self.state.config.lite_mode {
+            return;
+        }
+        let downloader = self.downloader.clone();
+        let bus = self.bus.clone();
+
+        self.runtime.spawn(async move {
+            let bytes = match downloader.fetch_bytes(&url).await {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    tlog!(crate::logger::LEVEL_WARN, "下载头像失败 {url}：{error}");
+                    return;
+                }
+            };
+            match image::load_from_memory(&bytes) {
+                Ok(image) => bus.emit(Loaded::AvatarReady { image }),
+                Err(error) => tlog!(crate::logger::LEVEL_WARN, "解码头像失败 {url}：{error}"),
+            }
+        });
+    }
+
     pub fn fetch_vip_status(&mut self) {
         if !self.state.logged_in {
             self.state.vip_label = None;
@@ -3254,6 +3306,26 @@ impl App {
                         aspect,
                     };
                 }
+            }
+
+            Loaded::UserInfo(info) => {
+                // 头像地址在资料里，拿到就去取图
+                if let Some(url) = info.pic.clone() {
+                    if !self.state.config.lite_mode {
+                        self.load_avatar(url);
+                    }
+                }
+                self.state.user_info = Some(*info);
+            }
+
+            Loaded::AvatarReady { image } => {
+                // 协议必须在主线程建：Picker 探测过终端能力，不是 Send
+                self.state.avatar.lines =
+                    crate::ui::cover::cover_lines(&image, AVATAR_WIDTH, AVATAR_HEIGHT);
+                self.state.avatar.protocol = self
+                    .picker
+                    .as_ref()
+                    .map(|picker| picker.new_resize_protocol(image));
             }
 
             Loaded::VipStatus { label } => {

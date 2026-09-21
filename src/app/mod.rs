@@ -164,6 +164,7 @@ impl App {
         app.ensure_device_fingerprint();
         app.refresh_cache_usage();
         app.fetch_vip_status();
+        app.fetch_user_info();
 
         let tab = app.state.tab;
         app.ensure_tab_loaded(tab);

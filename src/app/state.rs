@@ -680,6 +680,26 @@ impl std::fmt::Debug for CoverArt {
     }
 }
 
+/// 登录用户的头像。
+///
+/// 与 `CoverArt` 分开：封面是当前歌曲的专辑图，切歌就换；头像在登录期间不变。
+#[derive(Default)]
+pub struct Avatar {
+    /// 图形协议的图片状态，由 `ratatui-image` 管理。探测不到终端能力时为 None。
+    pub protocol: Option<ratatui_image::protocol::StatefulProtocol>,
+    /// 半块字符画兜底，只在没有图形协议时用。
+    pub lines: Vec<String>,
+}
+
+impl std::fmt::Debug for Avatar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Avatar")
+            .field("lines", &self.lines.len())
+            .field("protocol", &self.protocol.is_some())
+            .finish()
+    }
+}
+
 /// 歌词面板状态。
 #[derive(Debug, Default)]
 pub struct LyricPane {
@@ -798,6 +818,10 @@ pub struct AppState {
     pub cover: CoverArt,
     /// 当前账号的会员摘要（如「概念版 SVIP · 至 09-21」），未登录或未取到时为 None。
     pub vip_label: Option<String>,
+    /// 当前登录用户的资料（昵称 / 头像 / 等级 / 听歌时长）。
+    pub user_info: Option<crate::api::cloud::UserInfo>,
+    /// 登录用户的头像。和 `cover`（当前歌曲专辑图）分开存。
+    pub avatar: Avatar,
     /// 上次鼠标点击命中的（区域, 数据下标）。
     last_click: Option<(HitTarget, Option<usize>)>,
     last_click_at: std::time::Instant,
@@ -1037,6 +1061,8 @@ impl AppState {
             focus: Focus::default(),
             last_qr_key_at: None,
             context_menu: None,
+            user_info: None,
+            avatar: Avatar::default(),
             sidebar_visible: true,
             show_help: false,
             show_lyric_panel: true,

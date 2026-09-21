@@ -134,6 +134,15 @@ pub enum Loaded {
     VipStatus {
         label: String,
     },
+    /// 当前登录用户的资料（昵称 / 头像 / 等级 / 听歌时长）。
+    ///
+    /// 装箱：`UserInfo` 里几个 `String` 让它比别的变体大一圈，而 `Loaded`
+    /// 是每帧都要搬运的枚举。
+    UserInfo(Box<crate::api::cloud::UserInfo>),
+    /// 头像已下载并解码。协议要回到主线程才能建（\`Picker\` 不是 Send）。
+    AvatarReady {
+        image: image::DynamicImage,
+    },
     /// 云端写操作（加歌/删歌）的提示信息。
     CloudNotice(String),
     /// 云端歌单的内容变了（加歌 / 删歌成功），需要重新拉取。

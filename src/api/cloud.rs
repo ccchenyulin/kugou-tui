@@ -30,6 +30,42 @@ pub enum VipKind {
     Other(String),
 }
 
+/// 当前登录用户的公开资料（`/user/detail`）。
+///
+/// 接口文档里没写这个接口的返回字段，实际返回里昵称叫 `nickname`、头像叫
+/// `pic`、等级叫 `p_grade`。成功标志是 `status == 1` 而不是 `code == 200`——
+/// 酷狗这批接口用自己的 `status` 字段。
+#[derive(Debug, Clone, Default)]
+pub struct UserInfo {
+    /// 昵称。
+    pub nickname: String,
+    /// 头像图片地址。
+    pub pic: Option<String>,
+    /// 用户等级（`p_grade`）。
+    pub grade: Option<u32>,
+    /// 累计听歌时长（秒）。
+    pub duration_sec: Option<u64>,
+}
+
+impl UserInfo {
+    /// 听歌时长的人类可读形式：「22 小时 3 分」这种。
+    ///
+    /// 只保留两级单位：秒级的精度对「听了多久」没有意义，写全了反而像日志。
+    pub fn duration_text(&self) -> Option<String> {
+        let total = self.duration_sec?;
+        if total == 0 {
+            return None;
+        }
+        let hours = total / 3600;
+        let minutes = (total % 3600) / 60;
+        Some(if hours > 0 {
+            format!("{hours} 小时 {minutes} 分")
+        } else {
+            format!("{minutes} 分")
+        })
+    }
+}
+
 /// 会员信息摘要，用于界面显示。
 #[derive(Debug, Clone, Default)]
 pub struct VipInfo {
@@ -148,6 +184,22 @@ impl ApiClient {
     /// `data.busi_vip[]` 里，每项带 `busi_type`（如 `concept`）与 `product_type`
     /// （如 `svip` / `tvip`）。只认顶层字段会把真正的会员判成「没会员」——
     /// 实测某账号顶层 `is_vip: 0`，但 `busi_vip` 里概念版 SVIP 仍在有效期内。
+    /// 当前登录用户的公开资料。
+    ///
+    /// 成功标志是 \`status == 1\`（不是 \`code == 200\`）。取不到不影响听歌，
+    /// 调用方静默降级即可。
+    pub async fn user_detail(&self) -> Result<UserInfo> {
+        let root = self.get_json_uncached("/user/detail", &[]).await?;
+        let data = data_of(&root);
+
+        Ok(UserInfo {
+            nickname: pick_string(data, &["nickname"]).unwrap_or_default(),
+            pic: pick_string(data, &["pic"]).filter(|url| !url.trim().is_empty()),
+            grade: pick_i64(data, &["p_grade"]).and_then(|v| u32::try_from(v).ok()),
+            duration_sec: pick_i64(data, &["duration"]).and_then(|v| u64::try_from(v).ok()),
+        })
+    }
+
     pub async fn user_vip_detail(&self) -> Result<VipInfo> {
         let root = self.get_json_uncached("/user/vip/detail", &[]).await?;
         let data = data_of(&root);
