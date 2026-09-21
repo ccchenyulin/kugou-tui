@@ -541,6 +541,11 @@ pub struct RankPane {
 pub struct CloudPane {
     pub list: EntryList<Playlist>,
     pub songs: SongList,
+    /// 当前**打开**的是哪个歌单（`listid`）。
+    ///
+    /// 用来判断「云端内容变了要不要重载歌曲」：只有打开的就是变动的那个歌单才重载，
+    /// 否则会把用户正在看的另一个歌单给覆盖掉。`None` 表示云端页还没打开任何歌单。
+    pub open_list_id: Option<i64>,
 }
 
 /// 当前封面。

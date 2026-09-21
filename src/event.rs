@@ -133,6 +133,13 @@ pub enum Loaded {
     },
     /// 云端写操作（加歌/删歌）的提示信息。
     CloudNotice(String),
+    /// 云端歌单的内容变了（加歌 / 删歌成功），需要重新拉取。
+    ///
+    /// 少了这一步的表现是：提示「已收藏」，但歌单里看不到这首歌、歌曲数也不变
+    /// ——用户只能手动按 `R` 刷新。收到它时重新载入该歌单的歌曲，并刷新歌单列表。
+    CloudPlaylistChanged {
+        playlist: Box<crate::api::model::Playlist>,
+    },
     /// 异步任务失败。
     Failed {
         context: String,

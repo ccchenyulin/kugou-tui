@@ -1646,12 +1646,20 @@ impl App {
         let active_source = self.state.config.active_source_kind();
         let bus = self.bus.clone();
 
-        let pane = match source {
-            PlaylistSource::Plaza => &mut self.state.playlists.songs,
-            PlaylistSource::Cloud => &mut self.state.cloud.songs,
-        };
-        pane.loading = true;
-        pane.title = format!("{}（载入中…）", playlist.name);
+        match source {
+            PlaylistSource::Plaza => {
+                let pane = &mut self.state.playlists.songs;
+                pane.loading = true;
+                pane.title = format!("{}（载入中…）", playlist.name);
+            }
+            PlaylistSource::Cloud => {
+                // 记下打开了哪个歌单：云端内容变动时要靠它判断是否该重载这里
+                self.state.cloud.open_list_id = playlist.list_id;
+                let pane = &mut self.state.cloud.songs;
+                pane.loading = true;
+                pane.title = format!("{}（载入中…）", playlist.name);
+            }
+        }
         self.state.busy = Some(format!("载入歌单《{}》", playlist.name));
 
         self.runtime.spawn(async move {
@@ -2384,7 +2392,9 @@ impl App {
     ///
     /// 用的是歌单条目的 `fileid` 而不是 hash —— 歌单里同一首歌的 fileid 才是它在歌单里的位置标识。
     pub fn remove_focused_song_from_cloud(&mut self) {
-        let Some(target) = self.state.sync_target.as_ref() else {
+        // 取 owned 而不是借用：成功后要把它 move 进异步任务里去发刷新事件，
+        // 借用既不能 move 进 `'static` 闭包，也会和下面的 `self.state.warn` 抢借用。
+        let Some(target) = self.state.sync_target.clone() else {
             self.state.warn("请先在「云端」标签页选中一个歌单");
             return;
         };
@@ -2420,9 +2430,14 @@ impl App {
 
         self.runtime.spawn(async move {
             match api.remove_tracks_from_playlist(list_id, &[file_id]).await {
-                Ok(count) => bus.emit(Loaded::CloudNotice(format!(
-                    "已从《{name}》移除 {count} 首歌"
-                ))),
+                Ok(count) => {
+                    bus.emit(Loaded::CloudNotice(format!(
+                        "已从《{name}》移除 {count} 首歌"
+                    )));
+                    bus.emit(Loaded::CloudPlaylistChanged {
+                        playlist: Box::new(target.clone()),
+                    });
+                }
                 Err(error) => bus.fail(format!("从《{}》移除《{}》失败", name, label), error),
             }
         });
@@ -2516,9 +2531,15 @@ impl App {
                 .add_tracks_to_playlist(list_id, std::slice::from_ref(&song))
                 .await
             {
-                Ok(_) => bus.emit(Loaded::CloudNotice(format!(
-                    "已把《{label}》收藏到《{playlist_name}》"
-                ))),
+                Ok(_) => {
+                    bus.emit(Loaded::CloudNotice(format!(
+                        "已把《{label}》收藏到《{playlist_name}》"
+                    )));
+                    // 刷新：只提示成功而列表不动，用户会以为没生效
+                    bus.emit(Loaded::CloudPlaylistChanged {
+                        playlist: Box::new(target.clone()),
+                    });
+                }
                 Err(error) => bus.fail(format!("收藏《{label}》失败"), error),
             }
         });
@@ -2836,6 +2857,18 @@ impl App {
                 self.state.success(message);
                 // 刷新云端歌单，让新加入的歌曲数量反映出来
                 self.load_cloud_playlists();
+            }
+
+            Loaded::CloudPlaylistChanged { playlist } => {
+                // 歌单列表（歌曲数）已经在上面的 CloudNotice 里刷新了，这里补上
+                // **歌曲列表**——收藏/移除成功后当前歌单还显示旧内容，用户会以为没生效。
+                //
+                // 只在「云端页打开的就是这个歌单」时重载：否则用户正在看另一个歌单，
+                // 重载会把它的内容盖掉（数据没错，但界面莫名其妙跳到别的歌单了）。
+                let list_id = playlist.list_id;
+                if list_id.is_some() && self.state.cloud.open_list_id == list_id {
+                    self.load_playlist_songs(*playlist, PlaylistSource::Cloud);
+                }
             }
 
             Loaded::LoginQr { key, content } => {
