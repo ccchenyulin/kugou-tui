@@ -365,12 +365,24 @@ const COVER_MAX_ROWS: u16 = 32;
 ///
 /// 字符宽高比约 1:2，所以方形区域的列数取行数的两倍；最多占一半高，
 /// 剩下的留给下方内容。区域太小时返回 `None`，调用方把整块都留给内容。
-fn cover_layout(inner: Rect, aspect: f32, cell_aspect: f32) -> Option<(Rect, Rect)> {
+fn cover_layout(
+    inner: Rect,
+    aspect: f32,
+    cell_aspect: f32,
+    fill_height: bool,
+) -> Option<(Rect, Rect)> {
     if inner.width < 12 || inner.height < 8 {
         return None;
     }
 
-    let mut rows = (inner.height / 2).clamp(COVER_MIN_ROWS, COVER_MAX_ROWS);
+    // 上限由调用方决定：歌词面板要让位给歌词（只占一半），
+    // 首页/封面页则把整个 `inner` 都给封面（不留上方空白）。
+    let max_rows = if fill_height {
+        inner.height.saturating_sub(1)
+    } else {
+        inner.height / 2
+    };
+    let mut rows = max_rows.clamp(COVER_MIN_ROWS, COVER_MAX_ROWS);
     // 按「图片真实宽高比 × 字符高宽比」算列数（学 voicefox 的 CoverGeometry）。
     // 以前写死 columns = rows * 2，等于假定所有封面都是正方形 + 字符 2:1——
     // 碰到 16:9 的头图就会被压扁。
@@ -384,12 +396,20 @@ fn cover_layout(inner: Rect, aspect: f32, cell_aspect: f32) -> Option<(Rect, Rec
         rows = rows.clamp(COVER_MIN_ROWS, inner.height.saturating_sub(1));
     }
 
-    let [cover_area, rest] =
-        Layout::vertical([Constraint::Length(rows + 1), Constraint::Min(1)]).areas(inner);
+    // 填满模式：封面直接占满 inner 顶部（不再切两半，rest = inner 让调用方忽略）。
+    // 分两半模式：上方封面、下方 rest 留给歌词。
+    let cover_y = inner.y;
+    let rest = if fill_height {
+        inner
+    } else {
+        let [_cover_area, rest] =
+            Layout::vertical([Constraint::Length(rows + 1), Constraint::Min(1)]).areas(inner);
+        rest
+    };
 
     // 居中：封面比可用宽度窄时左右留白
-    let x = cover_area.x + cover_area.width.saturating_sub(columns) / 2;
-    Some((Rect::new(x, cover_area.y, columns, rows), rest))
+    let x = inner.x + inner.width.saturating_sub(columns) / 2;
+    Some((Rect::new(x, cover_y, columns, rows), rest))
 }
 
 /// 在当前区域的**上半部分**画封面，返回留给下方内容的区域。
@@ -404,13 +424,21 @@ fn cover_layout(inner: Rect, aspect: f32, cell_aspect: f32) -> Option<(Rect, Rec
 /// 用的是默认的 `Resize::Fit`：等比缩到区域里，**不放大**。所以封面页把区域
 /// 给得再大，一张 256 见方的图也只按原始像素铺开，不会被拉成糊图；代价是换
 /// 到不同大小的区域（切页、改窗口）要重新编码一次——每页最多一次，不是每帧。
-fn draw_cover_block(frame: &mut Frame, inner: Rect, state: &mut AppState, theme: &Theme) -> Rect {
+fn draw_cover_block(
+    frame: &mut Frame,
+    inner: Rect,
+    state: &mut AppState,
+    theme: &Theme,
+    fill_height: bool,
+) -> Rect {
     if !state.cover.is_drawable() {
         return inner;
     }
     // 字符高宽比：配的 qr_aspect 就是「字符高:宽」，同一个概念，直接复用
     let cell_aspect = state.config.qr_aspect.max(0.1);
-    let Some((cover_area, rest)) = cover_layout(inner, state.cover.aspect, cell_aspect) else {
+    let Some((cover_area, rest)) =
+        cover_layout(inner, state.cover.aspect, cell_aspect, fill_height)
+    else {
         return inner;
     };
 
@@ -445,7 +473,7 @@ pub fn render_lyric_panel(frame: &mut Frame, area: Rect, state: &mut AppState, t
     if area.height < 3 || area.width < 8 {
         return;
     }
-    let rest = draw_cover_block(frame, area, state, theme);
+    let rest = draw_cover_block(frame, area, state, theme, false);
     render_lyric(frame, rest, state, theme);
 }
 
@@ -462,7 +490,7 @@ pub fn render_lyrics_page(frame: &mut Frame, area: Rect, state: &mut AppState, t
         return;
     }
 
-    let rest = draw_cover_block(frame, inner, state, theme);
+    let rest = draw_cover_block(frame, inner, state, theme, false);
     render_lyric(frame, rest, state, theme);
 }
 
@@ -489,7 +517,7 @@ pub fn render_cover_page(frame: &mut Frame, area: Rect, state: &mut AppState, th
     let [cover_area, info_area] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).areas(inner);
 
-    let _ = draw_cover_block(frame, cover_area, state, theme);
+    let _ = draw_cover_block(frame, cover_area, state, theme, true);
 
     let info = vec![
         Line::from(Span::styled(title, theme.now_playing())),
@@ -635,11 +663,11 @@ pub fn render_home(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &
         let left_block = panel("封面", false, theme);
         let left_inner = left_block.inner(cover_col);
         frame.render_widget(left_block, cover_col);
-        let _ = draw_cover_block(frame, left_inner, state, theme);
+        let _ = draw_cover_block(frame, left_inner, state, theme, true);
         render_account(frame, account_col, state, theme);
         render_lyric(frame, right, state, theme);
     } else {
-        let rest = draw_cover_block(frame, inner, state, theme);
+        let rest = draw_cover_block(frame, inner, state, theme, false);
         render_lyric(frame, rest, state, theme);
     }
 }
@@ -653,7 +681,7 @@ mod tests {
     #[test]
     fn cover_block_is_twice_as_wide_as_tall_and_centered() {
         let inner = Rect::new(0, 0, 60, 20);
-        let (cover, _rest) = cover_layout(inner, 1.0, 2.0).expect("60x20 够放封面");
+        let (cover, _rest) = cover_layout(inner, 1.0, 2.0, false).expect("60x20 够放封面");
 
         assert_eq!(cover.height, 10, "最多占一半高");
         assert_eq!(cover.width, 20, "列数是行数的两倍");
@@ -664,17 +692,19 @@ mod tests {
     /// 区域太小就整块留给内容——半个封面对阅读毫无帮助。
     #[test]
     fn cover_block_is_skipped_when_area_is_tiny() {
-        assert!(cover_layout(Rect::new(0, 0, 11, 20), 1.0, 2.0).is_none());
-        assert!(cover_layout(Rect::new(0, 0, 60, 7), 1.0, 2.0).is_none());
+        assert!(cover_layout(Rect::new(0, 0, 11, 20), 1.0, 2.0, false).is_none());
+        assert!(cover_layout(Rect::new(0, 0, 60, 7), 1.0, 2.0, false).is_none());
     }
 
     /// 行数被夹在 [6, 24]：矮区域不至于缩成一条，高区域也不会把内容挤没。
     #[test]
     fn cover_rows_are_clamped() {
-        let (short, _) = cover_layout(Rect::new(0, 0, 40, 8), 1.0, 2.0).expect("8 行够放最小封面");
+        let (short, _) =
+            cover_layout(Rect::new(0, 0, 40, 8), 1.0, 2.0, false).expect("8 行够放最小封面");
         assert_eq!(short.height, COVER_MIN_ROWS);
 
-        let (tall, _) = cover_layout(Rect::new(0, 0, 80, 100), 1.0, 2.0).expect("100 行够放封面");
+        let (tall, _) =
+            cover_layout(Rect::new(0, 0, 80, 100), 1.0, 2.0, false).expect("100 行够放封面");
         assert_eq!(tall.height, COVER_MAX_ROWS);
         assert_eq!(tall.width, 64, "32 行 × 2（方图 + 字符 2:1）");
     }
@@ -684,9 +714,10 @@ mod tests {
     /// 以前写死 `columns = rows * 2`，等于假定所有封面都是正方形。
     #[test]
     fn cover_respects_image_aspect_ratio() {
-        let (square, _) = cover_layout(Rect::new(0, 0, 80, 20), 1.0, 2.0).expect("80x20 够放封面");
+        let (square, _) =
+            cover_layout(Rect::new(0, 0, 80, 20), 1.0, 2.0, false).expect("80x20 够放封面");
         let (wide, _) =
-            cover_layout(Rect::new(0, 0, 80, 20), 16.0 / 9.0, 2.0).expect("80x20 够放封面");
+            cover_layout(Rect::new(0, 0, 80, 20), 16.0 / 9.0, 2.0, false).expect("80x20 够放封面");
 
         assert!(
             wide.width > square.width,
@@ -696,14 +727,16 @@ mod tests {
         );
 
         // 竖图（比如 3:4 的歌手照）应该更窄
-        let (tall, _) = cover_layout(Rect::new(0, 0, 80, 20), 0.75, 2.0).expect("80x20 够放封面");
+        let (tall, _) =
+            cover_layout(Rect::new(0, 0, 80, 20), 0.75, 2.0, false).expect("80x20 够放封面");
         assert!(tall.width < square.width, "竖图应该比方图窄");
     }
 
     /// 窄区域里宽度是硬约束：宁可矮一点也不让封面超出边界。
     #[test]
     fn cover_width_is_capped_by_area_width() {
-        let (cover, _) = cover_layout(Rect::new(0, 0, 14, 20), 1.0, 2.0).expect("14x20 够放封面");
+        let (cover, _) =
+            cover_layout(Rect::new(0, 0, 14, 20), 1.0, 2.0, false).expect("14x20 够放封面");
         assert_eq!(cover.width, 14, "10 行本该要 20 列，被宽度压到 14");
         assert_eq!(cover.x, 0);
     }
@@ -741,7 +774,7 @@ mod tests {
         let drawn = terminal
             .draw(|frame| {
                 let theme = Theme::for_config(ThemeName::Default, false);
-                rest = draw_cover_block(frame, area, &mut state, &theme);
+                rest = draw_cover_block(frame, area, &mut state, &theme, false);
             })
             .expect("绘制成功");
 
@@ -780,8 +813,10 @@ mod tests {
 
         // 交给 widget 的区域由纯函数算出，因此连续两帧必然是同一个矩形——
         // 区域稳定是「不重发」的前提
-        let (first_area, _) = cover_layout(Rect::new(0, 0, 60, 20), 1.0, 2.0).expect("够放封面");
-        let (second_area, _) = cover_layout(Rect::new(0, 0, 60, 20), 1.0, 2.0).expect("够放封面");
+        let (first_area, _) =
+            cover_layout(Rect::new(0, 0, 60, 20), 1.0, 2.0, false).expect("够放封面");
+        let (second_area, _) =
+            cover_layout(Rect::new(0, 0, 60, 20), 1.0, 2.0, false).expect("够放封面");
         assert_eq!(first_area, second_area);
 
         let mut first = Buffer::empty(first_area);
@@ -803,7 +838,7 @@ mod tests {
         );
 
         // 换到更大的区域才重新编码一次：切页 / 改窗口大小走的就是这条路
-        let (bigger, _) = cover_layout(Rect::new(0, 0, 60, 40), 1.0, 2.0).expect("够放封面");
+        let (bigger, _) = cover_layout(Rect::new(0, 0, 60, 40), 1.0, 2.0, false).expect("够放封面");
         assert_ne!(bigger.height, first_area.height);
         let mut third = Buffer::empty(bigger);
         StatefulImage::default().render(bigger, &mut third, &mut protocol);
@@ -817,7 +852,7 @@ mod tests {
     #[test]
     fn remainder_sits_below_the_cover() {
         let inner = Rect::new(3, 5, 60, 20);
-        let (cover, rest) = cover_layout(inner, 1.0, 2.0).expect("60x20 够放封面");
+        let (cover, rest) = cover_layout(inner, 1.0, 2.0, false).expect("60x20 够放封面");
 
         // rows + 1：多留一行当间距，不然封面和下面的内容会糊在一起
         assert_eq!(rest.y, cover.y + cover.height + 1);
