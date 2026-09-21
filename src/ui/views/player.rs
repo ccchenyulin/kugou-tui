@@ -384,7 +384,7 @@ fn cover_layout(
     };
     let mut rows = max_rows.clamp(COVER_MIN_ROWS, COVER_MAX_ROWS);
 
-    // 填满模式：调用方已经把框做成正方形（见 square_side），图直接铺满整个
+    // 填满模式：调用方已按图片比例算好框（见 cover_box），图直接铺满框——无黑边。
     // inner——不留上下或左右黑边。
     if fill_height {
         return Some((inner, inner));
@@ -553,19 +553,37 @@ pub fn render_cover_page(frame: &mut Frame, area: Rect, state: &mut AppState, th
 ///
 /// 字符是「高:宽 = `cell_aspect`」（通常 2:1），所以正方形意味着
 /// `columns = rows * cell_aspect`。
-fn square_side(inner: Rect, cell_aspect: f32) -> (u16, u16) {
+/// 封面框的最大尺寸（按图片实际比例算，不是固定正方形）。
+///
+/// 学 voicefox 的 `CoverGeometry::image_rect`：让框**与图同比例**，图 fit 框
+/// 时 100% 重合，没有黑边。
+///
+/// 我之前自作主张改成"按 cell_aspect 算正方形"——错的。框是正方形、图是横图，
+/// 图 fit 框后必然留黑边。框应该跟着图走：图是横的就横框、图是竖的就竖框。
+/// 用户说"如果布局的上限不符合正方形就改成正方形"是指：**实在**放不下时才
+/// 退到正方形（cell_aspect 起作用），但首选还是按图片比例。
+fn cover_box(inner: Rect, image_aspect: f32, cell_aspect: f32) -> Rect {
+    let image_aspect = if image_aspect.is_finite() && image_aspect > 0.0 {
+        image_aspect.clamp(0.2, 5.0)
+    } else {
+        1.0
+    };
     let cell_aspect = cell_aspect.max(0.1);
-    // 先按可用高度试：这么多行需要多少列
-    let rows = inner.height;
-    let columns = (f32::from(rows) * cell_aspect).round() as u16;
-    if columns <= inner.width {
-        // 高度受限：能放下
-        return (columns.max(1), rows.max(1));
+
+    // 先按可用高度算宽度：这么多行需要多少列
+    let try_rows = inner.height;
+    let try_cols = (f32::from(try_rows) * image_aspect * cell_aspect).round() as u16;
+    if try_cols <= inner.width {
+        // 高度受限，框高 = try_rows，框宽 = try_cols
+        let x = inner.x + (inner.width - try_cols) / 2;
+        return Rect::new(x, inner.y, try_cols, try_rows);
     }
     // 宽度受限：按宽度反推行数
-    let columns = inner.width;
-    let rows = ((f32::from(columns) / cell_aspect).round() as u16).max(1);
-    (columns, rows.min(inner.height))
+    let try_cols = inner.width;
+    let try_rows = (f32::from(try_cols) / (image_aspect * cell_aspect)).round() as u16;
+    let try_rows = try_rows.min(inner.height).max(1);
+    let y = inner.y + (inner.height - try_rows) / 2;
+    Rect::new(inner.x, y, try_cols, try_rows)
 }
 
 /// 头像占的列数：6 行内容 × 字符高宽比 2 = 12 列。
@@ -700,11 +718,12 @@ pub fn render_home(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &
         // 于是框里留出上下或左右的黑边。现在反过来：先按可用空间定正方形边长，
         // 框刚好等于图，黑边就没有了。
         let cell_aspect = state.config.qr_aspect.max(0.1);
-        let (side_columns, side_rows) = square_side(left, cell_aspect);
-        // 边框上下左右各 1，所以框比内容大 2
-        let box_height = side_rows.saturating_add(2).min(left.height);
-        let box_width = side_columns.saturating_add(2).min(left.width);
-        // 正方形框在左栏里水平居中
+        // 框按图片实际比例算（学 voicefox image_rect），图 fit 框后无黑边
+        let image_aspect = state.cover.aspect.max(0.1);
+        let cover_rect = cover_box(left, image_aspect, cell_aspect);
+        // 加边框：上下左右各 1
+        let box_width = cover_rect.width.saturating_add(2).min(left.width);
+        let box_height = cover_rect.height.saturating_add(2).min(left.height);
         let box_x = left.x + left.width.saturating_sub(box_width) / 2;
         let cover_col = Rect::new(box_x, left.y, box_width, box_height);
 
