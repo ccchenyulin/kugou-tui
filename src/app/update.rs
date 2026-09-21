@@ -2434,6 +2434,8 @@ impl App {
                     bus.emit(Loaded::CloudNotice(format!(
                         "已从《{name}》移除 {count} 首歌"
                     )));
+                    // 同上：等服务端同步完再拉列表
+                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
                     bus.emit(Loaded::CloudPlaylistChanged {
                         playlist: Box::new(target.clone()),
                     });
@@ -2533,9 +2535,12 @@ impl App {
             {
                 Ok(_) => {
                     bus.emit(Loaded::CloudNotice(format!(
-                        "已把《{label}》收藏到《{playlist_name}》"
+                        "已把《{label}》收藏到《{playlist_name}》，正在刷新列表"
                     )));
-                    // 刷新：只提示成功而列表不动，用户会以为没生效
+                    // 先给提示，再等一会儿才去拉列表：服务端歌单同步有延迟，
+                    // 实测删完立刻读还是旧内容，约 5 秒后才反映出来。立刻重载
+                    // 会读到没变化的列表，用户就会以为刷新没生效。
+                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
                     bus.emit(Loaded::CloudPlaylistChanged {
                         playlist: Box::new(target.clone()),
                     });
