@@ -117,17 +117,19 @@ impl ApiClient {
         global_id: &str,
         page: u32,
         page_size: u32,
+        fresh: bool,
     ) -> Result<Vec<Song>> {
-        let root = self
-            .get_json(
-                "/playlist/track/all",
-                &[
-                    ("id", global_id.to_string()),
-                    ("page", page.to_string()),
-                    ("pagesize", page_size.to_string()),
-                ],
-            )
-            .await?;
+        let query = [
+            ("id", global_id.to_string()),
+            ("page", page.to_string()),
+            ("pagesize", page_size.to_string()),
+        ];
+        let root = if fresh {
+            self.get_json_uncached("/playlist/track/all", &query)
+                .await?
+        } else {
+            self.get_json("/playlist/track/all", &query).await?
+        };
         Ok(extract_songs(data_of(&root)))
     }
 
@@ -143,22 +145,28 @@ impl ApiClient {
     }
 
     /// 用户歌单内的歌曲（新版接口，按数字 `listid`）。
+    ///
+    /// `fresh` 为 `true` 时走 `get_json_uncached`（带一次性时间戳），
+    /// 绕开服务端那 2 分钟缓存——
+    /// 刷新、以及加歌/删歌之后重新拉取时必须为真，否则看到的是旧列表。
     pub async fn user_playlist_tracks(
         &self,
         list_id: i64,
         page: u32,
         page_size: u32,
+        fresh: bool,
     ) -> Result<Vec<Song>> {
-        let root = self
-            .get_json(
-                "/playlist/track/all/new",
-                &[
-                    ("listid", list_id.to_string()),
-                    ("page", page.to_string()),
-                    ("pagesize", page_size.to_string()),
-                ],
-            )
-            .await?;
+        let query = [
+            ("listid", list_id.to_string()),
+            ("page", page.to_string()),
+            ("pagesize", page_size.to_string()),
+        ];
+        let root = if fresh {
+            self.get_json_uncached("/playlist/track/all/new", &query)
+                .await?
+        } else {
+            self.get_json("/playlist/track/all/new", &query).await?
+        };
         Ok(extract_songs(data_of(&root)))
     }
 
@@ -338,18 +346,24 @@ impl ApiClient {
     }
 
     /// 歌单内**全部**歌曲（公开歌单）。
-    pub async fn playlist_tracks_all(&self, global_id: &str) -> Result<Vec<Song>> {
+    pub async fn playlist_tracks_all(&self, global_id: &str, fresh: bool) -> Result<Vec<Song>> {
         self.collect_all_pages(|client, page| {
             let global_id = global_id.to_string();
-            async move { client.playlist_tracks(&global_id, page, PAGE_LIMIT).await }
+            async move {
+                client
+                    .playlist_tracks(&global_id, page, PAGE_LIMIT, fresh)
+                    .await
+            }
         })
         .await
     }
 
     /// 用户歌单内**全部**歌曲（自建/收藏，按数字 `listid`）。
-    pub async fn user_playlist_tracks_all(&self, list_id: i64) -> Result<Vec<Song>> {
+    pub async fn user_playlist_tracks_all(&self, list_id: i64, fresh: bool) -> Result<Vec<Song>> {
         self.collect_all_pages(move |client, page| async move {
-            client.user_playlist_tracks(list_id, page, PAGE_LIMIT).await
+            client
+                .user_playlist_tracks(list_id, page, PAGE_LIMIT, fresh)
+                .await
         })
         .await
     }

@@ -1622,7 +1622,7 @@ impl App {
             self.state.warn("请先选择一个歌单");
             return;
         };
-        self.load_playlist_songs(playlist, PlaylistSource::Plaza);
+        self.load_playlist_songs(playlist, PlaylistSource::Plaza, false);
     }
 
     fn open_selected_cloud_playlist(&mut self) {
@@ -1634,14 +1634,16 @@ impl App {
         if playlist.is_writable() {
             self.state.sync_target = Some(playlist.clone());
         }
-        self.load_playlist_songs(playlist, PlaylistSource::Cloud);
+        self.load_playlist_songs(playlist, PlaylistSource::Cloud, false);
     }
 
     /// 载入歌单歌曲。
     ///
     /// `source` 决定结果落到哪个歌曲面板：歌单广场和云端歌单共用一个请求路径，
     /// 但它们是两个独立的界面区域。
-    fn load_playlist_songs(&mut self, playlist: Playlist, source: PlaylistSource) {
+    /// \`fresh\` 为真时绕过服务端 2 分钟缓存（见 \`ApiClient::cache_buster\`）。
+    /// 按 \`R\` 刷新、以及加歌/删歌之后重新拉取时必须为真，否则拿到的是旧列表。
+    fn load_playlist_songs(&mut self, playlist: Playlist, source: PlaylistSource, fresh: bool) {
         let api = self.api.clone();
         let active_source = self.state.config.active_source_kind();
         let bus = self.bus.clone();
@@ -1674,8 +1676,14 @@ impl App {
             // 体验很差。学 MoeKoeMusic 的做法：先给首屏，剩下的后台继续取。
             // 它那边是滚动到底再加载；我们一次性取完，但**先让用户看到东西**。
             let first = match is_own {
-                Some(list_id) => api.user_playlist_tracks(list_id, 1, PAGE_LIMIT).await,
-                None => api.playlist_tracks(&playlist.id, 1, PAGE_LIMIT).await,
+                Some(list_id) => {
+                    api.user_playlist_tracks(list_id, 1, PAGE_LIMIT, fresh)
+                        .await
+                }
+                None => {
+                    api.playlist_tracks(&playlist.id, 1, PAGE_LIMIT, fresh)
+                        .await
+                }
             };
 
             match first {
@@ -1702,8 +1710,16 @@ impl App {
             // 界面上会看到「30 首」变成「400 首」，是个不错的进度反馈，
             // 比干等一个"载入中"强。
             let result = match is_own {
-                Some(list_id) => active_source.user_playlist_tracks_all(&api, list_id).await,
-                None => active_source.playlist_tracks_all(&api, &playlist.id).await,
+                Some(list_id) => {
+                    active_source
+                        .user_playlist_tracks_all(&api, list_id, fresh)
+                        .await
+                }
+                None => {
+                    active_source
+                        .playlist_tracks_all(&api, &playlist.id, fresh)
+                        .await
+                }
             };
 
             match result {
@@ -1779,7 +1795,7 @@ impl App {
             Tab::Playlists => {
                 self.load_plaza_playlists();
                 if let Some(playlist) = self.state.playlists.open_playlist.clone() {
-                    self.load_playlist_songs(playlist, PlaylistSource::Plaza);
+                    self.load_playlist_songs(playlist, PlaylistSource::Plaza, true);
                 }
             }
             Tab::Artists => self.load_artists(),
@@ -1787,7 +1803,7 @@ impl App {
             Tab::Cloud => {
                 self.load_cloud_playlists();
                 if let Some(playlist) = self.state.cloud.open_playlist.clone() {
-                    self.load_playlist_songs(playlist, PlaylistSource::Cloud);
+                    self.load_playlist_songs(playlist, PlaylistSource::Cloud, true);
                 }
             }
             Tab::Visualizer => self.state.info("可视化页面没有需要刷新的数据"),
@@ -2449,8 +2465,8 @@ impl App {
                     bus.emit(Loaded::CloudNotice(format!(
                         "已从《{name}》移除 {count} 首歌"
                     )));
-                    // 同上：等服务端同步完再拉列表
-                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                    // 同上
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                     bus.emit(Loaded::CloudPlaylistChanged {
                         playlist: Box::new(target.clone()),
                     });
@@ -2562,10 +2578,9 @@ impl App {
                     bus.emit(Loaded::CloudNotice(format!(
                         "已把《{label}》收藏到《{playlist_name}》，正在刷新列表"
                     )));
-                    // 先给提示，再等一会儿才去拉列表：服务端歌单同步有延迟，
-                    // 实测删完立刻读还是旧内容，约 5 秒后才反映出来。立刻重载
-                    // 会读到没变化的列表，用户就会以为刷新没生效。
-                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                    // 先给提示，稍等一下再拉列表。真正让「刷新看不到新歌」的是服务端
+                    // 2 分钟缓存（已由 fresh=true 绕开），这里只留一点余量给写操作落定。
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                     bus.emit(Loaded::CloudPlaylistChanged {
                         playlist: Box::new(target.clone()),
                     });
@@ -2911,7 +2926,7 @@ impl App {
                     .as_ref()
                     .and_then(|open| open.list_id);
                 if list_id.is_some() && opened == list_id {
-                    self.load_playlist_songs(*playlist, PlaylistSource::Cloud);
+                    self.load_playlist_songs(*playlist, PlaylistSource::Cloud, true);
                 }
             }
 

@@ -465,9 +465,10 @@ impl SourceKind {
         self,
         client: &ApiClient,
         global_id: &str,
+        fresh: bool,
     ) -> Result<Vec<Song>> {
         let mut songs = match self {
-            Self::Kugou | Self::KugouConcept => client.playlist_tracks_all(global_id).await,
+            Self::Kugou | Self::KugouConcept => client.playlist_tracks_all(global_id, fresh).await,
             other => Err(unsupported(&format!("歌单歌曲（{}）", other.label()))),
         }?;
         stamp_songs(&mut songs, self);
@@ -527,9 +528,12 @@ impl SourceKind {
         self,
         client: &ApiClient,
         list_id: i64,
+        fresh: bool,
     ) -> Result<Vec<Song>> {
         let mut songs = match self {
-            Self::Kugou | Self::KugouConcept => client.user_playlist_tracks_all(list_id).await,
+            Self::Kugou | Self::KugouConcept => {
+                client.user_playlist_tracks_all(list_id, fresh).await
+            }
             Self::Netease => netease::user_playlist_tracks_all(client, list_id).await,
         }?;
         stamp_songs(&mut songs, self);
