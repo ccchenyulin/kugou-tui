@@ -41,7 +41,7 @@
 //! 将来接入**非酷狗**音源时，再按 [`SourceKind`] 分派各自的请求与解析实现，改动只在本文件与调用点。
 //!
 
-mod netease;
+pub mod netease;
 
 use serde::{Deserialize, Serialize};
 
@@ -127,10 +127,9 @@ impl SourceKind {
                 catalog: true,
                 cloud: true,
             },
-            // 第三方服务：搜索/播放/歌词/封面可用，目录与云端同步暂不支持
-            // 网易云：NeteaseCloudMusicApi 提供完整的扫码登录与云端歌单接口
-            // 云端歌单目前只做读取（列表 + 曲目）。写操作（加歌/删歌/建歌单）
-            // 等登录流程实测通过后再补，避免交付没验证过的功能。
+            // 网易云：NeteaseCloudMusicApi 提供扫码登录与完整的云端歌单接口，
+            // 读（列表 + 曲目）与写（加歌/删歌/建/删歌单）都已支持。
+            // 目录类（歌单广场、歌手、排行榜）不走这一套，仍然不可用。
             SourceKind::Netease => Capability {
                 stream: true,
                 lyric: true,

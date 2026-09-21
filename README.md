@@ -280,6 +280,36 @@ kugou-api stop     # 停止
 两个音源的**登录态与设备标识各自独立**：酷狗两个平台的 token 不通用，所以在 A 音源
 扫的码不会自动带到 B 音源。切换后若该音源还没登录，界面会提示，按 `L` 重新扫码即可。
 
+### 网易云音源（需要额外部署一个服务）
+
+网易云走的是 **NeteaseCloudMusicApi**，和酷狗的 KuGouMusicApi 完全是两套服务
+（SPlayer、YesPlayMusic 用的也是它）。要用的话得先把它跑起来：
+
+```bash
+git clone --depth 1 https://github.com/neteasecloudmusicapienhanced/api-enhanced.git NeteaseCloudMusicApi
+cd NeteaseCloudMusicApi && npm install
+env PORT=3002 node app.js          # 端口要与下面的 api_base 一致
+```
+
+把地址填进配置（默认就是 `3002`）：
+
+```toml
+[sources.netease]
+enabled = true
+api_base = "http://127.0.0.1:3002"
+```
+
+**必须再按 `L` 扫码登录**——没登录时云端接口一律返回 `需要登录`。
+
+| 能力 | 网易云 |
+|---|---|
+| 搜索 / 播放 / 歌词 / 封面 | ✔ |
+| 云端歌单：列表、曲目 | ✔ |
+| 云端歌单：加歌、删歌、新建、删除 | ✔ |
+| 歌单广场、歌手、排行榜 | ✘（目录类不走这一套接口） |
+
+写操作用的是歌曲 id（不是酷狗歌单条目的 `fileid`），所以从搜索结果也能直接收藏。
+
 配置按音源分别存：
 
 ```toml

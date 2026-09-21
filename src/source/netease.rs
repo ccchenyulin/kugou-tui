@@ -437,3 +437,141 @@ pub async fn user_playlist_tracks_all(client: &ApiClient, list_id: i64) -> Resul
 
     Ok(songs)
 }
+
+// ==================================================================
+// 云端歌单的写操作
+//
+// 网易云的接口与酷狗完全不是一套：`/playlist/track/add` 传 `pid` + `ids`，
+// 而删歌用 `/playlist/track/delete` 且参数名是 `id`（**不是** `pid`）——
+// 同一个模块的两个接口参数名不一致，写反了不会报错，只会静默删不掉。
+//
+// 另外这里用的是**歌曲 id**（存在 `Song::hash` 里），不是酷狗歌单条目的
+// `fileid`：网易云的歌单里一首歌就是按歌曲 id 定位的。
+// ==================================================================
+
+/// 检查 NeteaseCloudMusicApi 的业务状态码。
+///
+/// 它用 `code` 表示成败（`200` 成功），失败时给 `message`。**必须检查**：
+/// 这类写接口在参数不对时也会返回 HTTP 200，只看 HTTP 状态会误判成成功。
+fn check_write_result(path: &str, root: &Value) -> Result<()> {
+    let code = root.get("code").and_then(Value::as_i64).unwrap_or(200);
+    if code == 200 {
+        return Ok(());
+    }
+    // 先取 \`msg\`：NeteaseCloudMusicApi 失败时 \`message\` 常是没用的「系统错误」，
+    // 具体原因在 \`msg\` 里（例如「需要登录」）。取错字段用户就只能对着废话猜。
+    let message = pick_string(root, &["msg", "message"])
+        .unwrap_or_else(|| "服务端未提供错误描述".to_string());
+    Err(crate::error::AppError::Api {
+        path: path.to_string(),
+        code,
+        message,
+    })
+}
+
+/// 把歌曲加入歌单，返回提交的歌曲数。
+pub async fn add_tracks_to_playlist(
+    client: &ApiClient,
+    list_id: i64,
+    songs: &[Song],
+) -> Result<usize> {
+    if songs.is_empty() {
+        return Ok(0);
+    }
+    // 一次可以传多首（逗号分隔），但歌单容量与 URL 长度都有限，分批提交
+    const BATCH_SIZE: usize = 20;
+    let mut written = 0usize;
+    for chunk in songs.chunks(BATCH_SIZE) {
+        let ids = chunk
+            .iter()
+            .map(|song| song.hash.clone())
+            .collect::<Vec<_>>()
+            .join(",");
+        let root = client
+            .get_json_uncached(
+                "/playlist/track/add",
+                &[("pid", list_id.to_string()), ("ids", ids)],
+            )
+            .await?;
+        check_write_result("/playlist/track/add", &root)?;
+        written += chunk.len();
+    }
+    Ok(written)
+}
+
+/// 从歌单移除歌曲。
+///
+/// 注意参数名是 `id`（歌单），不是加歌那个 `pid`。
+pub async fn remove_tracks_from_playlist(
+    client: &ApiClient,
+    list_id: i64,
+    songs: &[Song],
+) -> Result<usize> {
+    if songs.is_empty() {
+        return Ok(0);
+    }
+    let ids = songs
+        .iter()
+        .map(|song| song.hash.clone())
+        .collect::<Vec<_>>()
+        .join(",");
+    let root = client
+        .get_json_uncached(
+            "/playlist/track/delete",
+            &[("id", list_id.to_string()), ("ids", ids)],
+        )
+        .await?;
+    check_write_result("/playlist/track/delete", &root)?;
+    Ok(songs.len())
+}
+
+/// 新建歌单，返回新歌单的 id（服务端没给时返回 `None`）。
+pub async fn create_playlist(client: &ApiClient, name: &str) -> Result<Option<i64>> {
+    let root = client
+        .get_json_uncached("/playlist/create", &[("name", name.to_string())])
+        .await?;
+    check_write_result("/playlist/create", &root)?;
+    Ok(pick_i64(&root, &["id"]).or_else(|| pick_i64(data_of(&root), &["id"])))
+}
+
+/// 删除（或取消收藏）歌单。
+pub async fn delete_playlist(client: &ApiClient, list_id: i64) -> Result<()> {
+    let root = client
+        .get_json_uncached("/playlist/delete", &[("id", list_id.to_string())])
+        .await?;
+    check_write_result("/playlist/delete", &root)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// HTTP 200 但 code 不是 200 时必须报错——否则界面会谎报「已收藏」。
+    #[test]
+    fn write_result_rejects_non_200_code() {
+        let root = json!({"code": 301, "message": "系统错误", "msg": "需要登录"});
+        let error =
+            check_write_result("/playlist/track/add", &root).expect_err("301 必须被当成失败");
+        // 具体原因在 msg 里，别给用户那句没用的「系统错误」
+        assert!(
+            error.user_hint().contains("需要登录"),
+            "错误提示要说清原因，实际：{}",
+            error.user_hint()
+        );
+    }
+
+    #[test]
+    fn write_result_accepts_200() {
+        let root = json!({"code": 200, "id": 123});
+        check_write_result("/playlist/create", &root).expect("200 表示成功");
+    }
+
+    /// 响应里没有 code 字段时按成功处理（部分接口只给数据）。
+    #[test]
+    fn write_result_tolerates_missing_code() {
+        let root = json!({"playlist": {"id": 1}});
+        check_write_result("/playlist/create", &root).expect("缺 code 视为成功");
+    }
+}

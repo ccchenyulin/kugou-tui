@@ -2445,12 +2445,15 @@ impl App {
             return;
         };
 
-        let Some(file_id) = song.file_id else {
-            // 只有歌单接口才给 fileid；搜索结果没有，无法定位歌单内的条目。
+        // 酷狗靠**歌单条目的 fileid** 定位，网易云靠**歌曲 id**（`Song::hash`），
+        // 所以只有前者需要 fileid——用一个统一的检查把网易云的歌也拦掉是错的。
+        let source = self.state.config.active_source_kind();
+        if !matches!(source, SourceKind::Netease) && song.file_id.is_none() {
+            // 只有歌单接口才给 fileid；搜索结果没有，无法定位酷狗歌单内的条目。
             self.state
                 .warn("这首歌不在歌单里（缺少 fileid），无法从歌单移除");
             return;
-        };
+        }
 
         let label = describe_song(&song);
         let name = target.name.clone();
@@ -2460,7 +2463,10 @@ impl App {
         self.state.busy = Some(format!("从《{name}》移除歌曲"));
 
         self.runtime.spawn(async move {
-            match api.remove_tracks_from_playlist(list_id, &[file_id]).await {
+            match api
+                .remove_tracks_from_playlist(source, list_id, std::slice::from_ref(&song))
+                .await
+            {
                 Ok(count) => {
                     bus.emit(Loaded::CloudNotice(format!(
                         "已从《{name}》移除 {count} 首歌"
@@ -2494,13 +2500,14 @@ impl App {
         }
 
         let name = target.name.clone();
+        let source = self.state.config.active_source_kind();
         let api = self.api.clone();
         let bus = self.bus.clone();
 
         self.state.busy = Some(format!("删除歌单《{name}》"));
 
         self.runtime.spawn(async move {
-            match api.delete_playlist(list_id).await {
+            match api.delete_playlist(source, list_id).await {
                 Ok(()) => bus.emit(Loaded::CloudNotice(format!("已删除歌单《{}》", name))),
                 Err(error) => bus.fail(format!("删除歌单《{}》失败", name), error),
             }
@@ -2519,12 +2526,13 @@ impl App {
             return;
         }
 
+        let source = self.state.config.active_source_kind();
         let api = self.api.clone();
         let bus = self.bus.clone();
         self.state.busy = Some("新建云端歌单".to_string());
 
         self.runtime.spawn(async move {
-            match api.create_playlist(&name).await {
+            match api.create_playlist(source, &name).await {
                 Ok(list_id) => bus.emit(Loaded::CloudNotice(match list_id {
                     Some(id) => format!("已新建歌单《{name}》（listid={id}）"),
                     None => format!("已新建歌单《{name}》"),
@@ -2564,6 +2572,7 @@ impl App {
 
         let label = describe_song(&song);
         let playlist_name = target.name.clone();
+        let source = self.state.config.active_source_kind();
         let api = self.api.clone();
         let bus = self.bus.clone();
 
@@ -2571,7 +2580,7 @@ impl App {
 
         self.runtime.spawn(async move {
             match api
-                .add_tracks_to_playlist(list_id, std::slice::from_ref(&song))
+                .add_tracks_to_playlist(source, list_id, std::slice::from_ref(&song))
                 .await
             {
                 Ok(_) => {
@@ -2612,13 +2621,14 @@ impl App {
         let songs = self.state.queue.items().to_vec();
         let count = songs.len();
         let playlist_name = target.name.clone();
+        let source = self.state.config.active_source_kind();
         let api = self.api.clone();
         let bus = self.bus.clone();
 
         self.state.busy = Some(format!("同步 {count} 首到《{playlist_name}》"));
 
         self.runtime.spawn(async move {
-            match api.add_tracks_to_playlist(list_id, &songs).await {
+            match api.add_tracks_to_playlist(source, list_id, &songs).await {
                 Ok(written) => bus.emit(Loaded::CloudNotice(format!(
                     "已把 {written} 首歌同步到《{playlist_name}》"
                 ))),

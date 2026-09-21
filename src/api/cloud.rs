@@ -223,9 +223,19 @@ impl ApiClient {
     /// 批量把歌曲加入云端歌单。
     ///
     /// 返回实际提交的歌曲数量，便于界面给出「已同步 N 首」的反馈。
-    pub async fn add_tracks_to_playlist(&self, list_id: i64, songs: &[Song]) -> Result<usize> {
+    pub async fn add_tracks_to_playlist(
+        &self,
+        source: crate::source::SourceKind,
+        list_id: i64,
+        songs: &[Song],
+    ) -> Result<usize> {
         if songs.is_empty() {
             return Ok(0);
+        }
+        // 网易云走的是另一套接口（`/playlist/track/add` 的 `pid` + `ids`），
+        // 与酷狗的「歌名|hash|专辑id」完全不通，必须按音源分派。
+        if let crate::source::SourceKind::Netease = source {
+            return crate::source::netease::add_tracks_to_playlist(self, list_id, songs).await;
         }
 
         // 服务端按逗号分隔多首、按竖线分隔字段，单次提交太多会被截断
@@ -257,12 +267,26 @@ impl ApiClient {
     ///
     /// `file_ids` 是**歌单条目的 `fileid`**，不是歌曲 hash —— 传 hash 会静默删不掉。
     /// fileid 只在歌单接口的返回里才有（见 `Song::file_id`）。
+    ///
+    /// 传 `Song` 而不是 id 列表，是因为两个音源定位一首歌用的东西不同：
+    /// 酷狗要歌单条目的 `file_id`，网易云要**歌曲 id**（存在 `Song::hash`）。
     pub async fn remove_tracks_from_playlist(
         &self,
+        source: crate::source::SourceKind,
         list_id: i64,
-        file_ids: &[i64],
+        songs: &[Song],
     ) -> Result<usize> {
+        if songs.is_empty() {
+            return Ok(0);
+        }
+
+        if let crate::source::SourceKind::Netease = source {
+            return crate::source::netease::remove_tracks_from_playlist(self, list_id, songs).await;
+        }
+
+        let file_ids: Vec<i64> = songs.iter().filter_map(|song| song.file_id).collect();
         if file_ids.is_empty() {
+            // 酷狗必须有 fileid 才能定位歌单条目，搜索结果里的歌没有它
             return Ok(0);
         }
 
@@ -284,7 +308,14 @@ impl ApiClient {
     }
 
     /// 删除（或取消收藏）一个云端歌单。
-    pub async fn delete_playlist(&self, list_id: i64) -> Result<()> {
+    pub async fn delete_playlist(
+        &self,
+        source: crate::source::SourceKind,
+        list_id: i64,
+    ) -> Result<()> {
+        if let crate::source::SourceKind::Netease = source {
+            return crate::source::netease::delete_playlist(self, list_id).await;
+        }
         self.get_json_uncached("/playlist/del", &[("listid", list_id.to_string())])
             .await?;
         Ok(())
@@ -294,7 +325,14 @@ impl ApiClient {
     ///
     /// 只传 `name` 与 `type=0`：文档把 `list_create_userid` / `list_create_listid` 列为必选，
     /// 但那两个是「收藏他人歌单」(`type=1`) 用的，自建歌单不适用。
-    pub async fn create_playlist(&self, name: &str) -> Result<Option<i64>> {
+    pub async fn create_playlist(
+        &self,
+        source: crate::source::SourceKind,
+        name: &str,
+    ) -> Result<Option<i64>> {
+        if let crate::source::SourceKind::Netease = source {
+            return crate::source::netease::create_playlist(self, name).await;
+        }
         let root = self
             .get_json_uncached(
                 "/playlist/add",
