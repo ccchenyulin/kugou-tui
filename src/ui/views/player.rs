@@ -461,11 +461,17 @@ fn draw_cover_block(
     };
 
     if let Some(protocol) = state.cover.protocol.as_mut() {
-        // 填满模式用 Crop：图铺满整个区域、多余部分裁掉。
-        // 默认的 Fit 是 contain——图按原比例缩到能放下为止，区域跟图比例
-        // 不一致时就留下黑边（用户说的「空了这么多」）。
+        // 填满模式用 Scale：永远把 image 拉伸到 area 一样大。
+        //
+        // 之前选 Crop 是错的——Crop 在 needs_resize 里和 Fit 一样有「image 比 area
+        // 小就不 resize」这条短路，结果 image 还是它的小尺寸，渲染时只画到
+        // protocol.size 那么大，area 多出来的地方全黑（用户说的「泳池只给左上
+        // 角注水」就是这个的另一个写法）。
+        //
+        // Scale 是 ratatui-image 里唯一无视 fits 判断、总是按 area 重 encode 的
+        // 模式。代价是图会拉伸（不保持比例），但用户要的就是「铺满」。
         let image = if fill_height {
-            StatefulImage::default().resize(Resize::Crop(None))
+            StatefulImage::default().resize(Resize::Scale(None))
         } else {
             StatefulImage::default()
         };
