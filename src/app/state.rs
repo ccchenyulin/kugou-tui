@@ -69,6 +69,30 @@ impl Tab {
     /// 数字键能直接够到的标签页数量（1-9 加 0）。
     pub const NUMBERED: usize = 10;
 
+    /// 侧边栏的显示顺序：按 [`Self::group`] 归类排好。
+    ///
+    /// 与 `ALL` **故意不同**——`ALL` 的顺序决定数字键 1-9/0 的落点，动它会让
+    /// 肌肉记忆全乱；而平铺 12 个标签的侧边栏像一堵文字墙。所以这里只改显示
+    /// 顺序，并在每个标签前标出它的数字键，用户照着按不会错。
+    pub const SIDEBAR_ORDER: [Tab; 12] = [
+        // 发现
+        Tab::Search,
+        Tab::Playlists,
+        Tab::Artists,
+        Tab::Ranks,
+        // 我的
+        Tab::Cloud,
+        Tab::Queue,
+        // 正在播放
+        Tab::Home,
+        Tab::Lyrics,
+        Tab::Cover,
+        Tab::Visualizer,
+        // 设置
+        Tab::Sources,
+        Tab::Settings,
+    ];
+
     pub fn title(self) -> &'static str {
         match self {
             Self::Home => "首页",
@@ -86,8 +110,56 @@ impl Tab {
         }
     }
 
+    /// 侧边栏图标。Nerd Font 与 ASCII 的取舍见 [`crate::ui::icons`]。
+    pub fn icon(self) -> &'static str {
+        use crate::ui::icons;
+        match self {
+            Self::Home => icons::home(),
+            Self::Search => icons::search(),
+            Self::Playlists => icons::playlists(),
+            Self::Artists => icons::artist(),
+            Self::Ranks => icons::rank(),
+            Self::Cloud => icons::cloud(),
+            Self::Queue => icons::queue(),
+            Self::Lyrics => icons::lyrics(),
+            Self::Cover => icons::cover(),
+            Self::Visualizer => icons::visualizer(),
+            Self::Sources => icons::sources(),
+            Self::Settings => icons::settings(),
+        }
+    }
+
+    /// 侧边栏分组标题。12 个标签平铺会让侧边栏像一堵文字墙，分组后才扫得动。
+    ///
+    /// 分组**不改变** `ALL` 的顺序——顺序决定数字键 1-9/0 的落点，动了会让
+    /// 用户肌肉记忆全乱。这里只是显示时插一行标题。
+    pub fn group(self) -> &'static str {
+        match self {
+            Self::Search | Self::Playlists | Self::Artists | Self::Ranks => "发现",
+            Self::Cloud | Self::Queue => "我的",
+            Self::Home | Self::Lyrics | Self::Cover | Self::Visualizer => "正在播放",
+            Self::Sources | Self::Settings => "设置",
+        }
+    }
+
     pub fn index(self) -> usize {
         Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0)
+    }
+
+    /// 该标签对应的数字键（`1`..`9` / `0`），超出了返回 `None`。
+    ///
+    /// 侧边栏按分组重排后显示顺序与数字键落点不再一致，得把键标出来。
+    pub fn number_key(self) -> Option<char> {
+        let index = self.index();
+        if index >= Self::NUMBERED {
+            return None;
+        }
+        // 第 10 个（下标 9）是 0 键
+        Some(if index == 9 {
+            '0'
+        } else {
+            (b'1' + index as u8) as char
+        })
     }
 
     /// 侧边栏与状态栏共用的「第 N 个标签」文本。

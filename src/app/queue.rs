@@ -85,6 +85,16 @@ impl PlayQueue {
         self.cursor.and_then(|index| self.items.get(index))
     }
 
+    /// 队列里的下一首（**不移动游标**，纯粹看一眼）。
+    ///
+    /// 只按队列顺序取下一个，不套用随机 / 单曲循环的规则——那些是「真的要切
+    /// 下一首时」才该算的事（见 `advance`）。这里只用于界面上「下一首：X」
+    /// 的提示：提示要反映队列顺序，而不是提前剧透随机结果。
+    pub fn peek_next(&self) -> Option<&Song> {
+        let index = self.cursor?;
+        self.items.get(index + 1)
+    }
+
     /// 用一批歌曲替换整个队列，并把游标定位到 `index`。
     ///
     /// 用户从任意列表点歌都走这条路径，保证「下一首」的语义符合直觉。

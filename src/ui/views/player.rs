@@ -18,12 +18,20 @@ use crate::ui::theme::Theme;
 use crate::ui::views::{empty_placeholder, loading_placeholder};
 use crate::ui::widgets::{RowContext, panel, selection_list, song_row, truncate_to_width};
 
-/// 播放条高度：2 行内容 + 上下边框。
-pub const PLAYER_HEIGHT: u16 = 4;
+/// 播放条高度：4 行内容 + 上下边框。
+///
+/// 4 行内容 = 歌名 / 歌手·专辑 / 进度条 / 下一首。以前只有 2 行（信息和进度条
+/// 挤在一行，长歌名只能截断），现在封面能放下，信息也有了层次。
+pub const PLAYER_HEIGHT: u16 = 6;
 
-/// 播放条：曲目信息 + 进度条。
+/// 播放条里的封面宽度（列）。高度固定 4 行，宽度按 2:1 的字符高宽比给 8 列。
+const PLAYER_COVER_WIDTH: u16 = 8;
+/// 内容区窄于这个宽度就不显示封面，把宽度全让给文字。
+const PLAYER_COVER_MIN_WIDTH: u16 = 52;
+
+/// 播放条：封面 + 曲目信息 + 进度条 + 下一首。
 pub fn render_player(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
-    if area.height < 3 || area.width < 20 {
+    if area.height < 5 || area.width < 20 {
         return;
     }
 
@@ -35,12 +43,109 @@ pub fn render_player(frame: &mut Frame, area: Rect, state: &mut AppState, theme:
         return;
     }
 
-    let [header_area, gauge_area] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(inner);
+    // 窄屏不画封面：8 列封面 + 1 列间隔，在 50 列宽的终端里是实打实的浪费
+    let show_cover = state.cover.is_drawable() && inner.width >= PLAYER_COVER_MIN_WIDTH;
+    let (cover_area, info_area) = if show_cover {
+        let [cover, info] =
+            Layout::horizontal([Constraint::Length(PLAYER_COVER_WIDTH), Constraint::Min(20)])
+                .spacing(1)
+                .areas(inner);
+        (Some(cover), info)
+    } else {
+        (None, inner)
+    };
 
-    render_player_header(frame, header_area, state, theme);
+    if let Some(cover_area) = cover_area {
+        draw_player_cover(frame, cover_area, state);
+    }
 
-    // 进度条自带居中标签，把时间放在条上，省下一整行
+    // 信息区固定 4 行；高度不够时（极端窄终端）从上往下给，进度条优先
+    let [name_area, meta_area, gauge_area, next_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(info_area);
+
+    render_song_name(frame, name_area, state, theme);
+    render_song_meta(frame, meta_area, state, theme);
+    render_progress(frame, gauge_area, state, theme);
+    render_next_up(frame, next_area, state, theme);
+}
+
+/// 播放条里的封面缩略图。
+fn draw_player_cover(frame: &mut Frame, area: Rect, state: &mut AppState) {
+    if let Some(protocol) = state.cover.protocol.as_mut() {
+        frame.render_stateful_widget(StatefulImage::default(), area, protocol);
+        if let Some(Err(error)) = protocol.last_encoding_result() {
+            crate::logger::tlog!(crate::logger::LEVEL_WARN, "播放条封面编码失败：{error}");
+        }
+    } else {
+        // 没有图形协议时退回半块字符画，按区域高度截断
+        let lines: Vec<Line> = state
+            .cover
+            .lines
+            .iter()
+            .take(area.height as usize)
+            .map(|line| Line::from(truncate_to_width(line, area.width as usize)))
+            .collect();
+        frame.render_widget(Paragraph::new(lines), area);
+    }
+}
+
+/// 第 1 行：播放状态 + 歌名（加粗，独占一行不再被挤）。
+fn render_song_name(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+    let marker = match state.playback {
+        PlaybackState::Playing => crate::ui::icons::now_playing(true),
+        PlaybackState::Paused => crate::ui::icons::now_playing(false),
+        PlaybackState::Loading => crate::ui::icons::loading(),
+        PlaybackState::Stopped => crate::ui::icons::stopped(),
+    };
+
+    let name = match state.current.as_ref() {
+        Some(song) => song.name.clone(),
+        None => "未在播放（在列表里按 Enter 播放）".to_string(),
+    };
+
+    let line = Line::from(vec![
+        Span::styled(format!("{marker} "), theme.playback(state.playback)),
+        Span::styled(
+            truncate_to_width(&name, area.width.saturating_sub(3) as usize),
+            if state.current.is_some() {
+                theme.title()
+            } else {
+                theme.dim()
+            },
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+/// 第 2 行：歌手 · 专辑（次要信息，用暗色）。
+fn render_song_meta(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+    let meta = match state.current.as_ref() {
+        Some(song) => {
+            let singer = song.singer_text();
+            if song.album_name.is_empty() {
+                singer
+            } else {
+                format!("{singer} · {}", song.album_name)
+            }
+        }
+        None => String::new(),
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            truncate_to_width(&meta, area.width as usize),
+            theme.dim(),
+        ))),
+        area,
+    );
+}
+
+/// 第 3 行：进度条。自带居中标签，把时间放在条上。
+fn render_progress(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
     let label = format!(
         "{} / {}",
         format_duration_ms(state.position_ms),
@@ -51,61 +156,50 @@ pub fn render_player(frame: &mut Frame, area: Rect, state: &mut AppState, theme:
             .gauge_style(Style::default().fg(theme.progress).bg(theme.progress_bg))
             .ratio(state.progress_ratio())
             .label(Span::styled(label, theme.body())),
-        gauge_area,
+        area,
     );
 
     // 点击进度条可跳转：登记命中区，由 app 层按 x 比例换算成目标时间。
-    state.add_hit_zone(gauge_area, HitTarget::Progress, 0, 1);
+    state.add_hit_zone(area, HitTarget::Progress, 0, 1);
 }
 
-/// 播放条第一行：左侧曲目，右侧状态。
-fn render_player_header(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
-    let [left, right] =
-        Layout::horizontal([Constraint::Min(20), Constraint::Length(34)]).areas(area);
-
-    // 用 ASCII 标记表示播放状态，避免字体缺字
-    let marker = match state.playback {
-        PlaybackState::Playing => ">>",
-        PlaybackState::Paused => "||",
-        PlaybackState::Loading => "..",
-        PlaybackState::Stopped => "--",
-    };
-
-    let title = match state.current.as_ref() {
-        Some(song) => format!("{} - {}", song.singer_text(), song.name),
-        None => "未在播放（在列表里按 Enter 播放）".to_string(),
-    };
-
-    let title_line = Line::from(vec![
-        Span::styled(format!("{marker} "), theme.playback(state.playback)),
-        Span::styled(
-            truncate_to_width(&title, left.width.saturating_sub(4) as usize),
-            if state.current.is_some() {
-                theme.body()
-            } else {
-                theme.dim()
-            },
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(title_line), left);
+/// 第 4 行：下一首 + 音量/循环模式（右侧）。
+fn render_next_up(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+    let next = state
+        .queue
+        .peek_next()
+        .map(|song| format!("{} 下一首：{}", crate::ui::icons::next_up(), song.name))
+        .unwrap_or_default();
 
     let volume = if state.is_muted() {
         "静音".to_string()
     } else {
         format!("音量 {:.0}%", state.volume * 100.0)
     };
-    let meta = format!(
+    let right = format!(
         "{} · {} · {}",
         state.playback.label(),
         volume,
         state.queue.mode().label()
     );
+
+    let [left, right_area] =
+        Layout::horizontal([Constraint::Min(10), Constraint::Length(24)]).areas(area);
+
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            truncate_to_width(&meta, right.width as usize),
+            truncate_to_width(&next, left.width as usize),
             theme.dim(),
         ))),
-        right,
+        left,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            truncate_to_width(&right, right_area.width as usize),
+            theme.dim(),
+        )))
+        .alignment(Alignment::Right),
+        right_area,
     );
 }
 

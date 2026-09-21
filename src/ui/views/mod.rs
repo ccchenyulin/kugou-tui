@@ -87,12 +87,24 @@ pub fn render_sidebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &T
     }
 
     let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(vec![
-        Span::styled("── 导航 ", theme.dim()),
-        Span::styled(state.tab.position_text(), theme.dim()),
-    ]));
+    lines.push(Line::from(Span::styled(
+        format!("kugou-tui {}", state.tab.position_text()),
+        theme.dim(),
+    )));
 
-    for tab in Tab::ALL {
+    // 按分组渲染：12 个标签平铺会像一堵文字墙，分组后才扫得动。
+    // 每个标签前标出数字键——显示顺序与 `Tab::ALL`（数字键落点）不同，
+    // 不标出来的话用户按 1 却跳到别的页。
+    let mut current_group: Option<&'static str> = None;
+    for tab in Tab::SIDEBAR_ORDER {
+        if Some(tab.group()) != current_group {
+            current_group = Some(tab.group());
+            lines.push(Line::from(Span::styled(
+                format!("── {} ──", tab.group()),
+                theme.dim(),
+            )));
+        }
+
         let selected = tab == state.tab;
         let pointer = if selected { ">" } else { " " };
         let style = if selected {
@@ -100,8 +112,12 @@ pub fn render_sidebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &T
         } else {
             theme.body()
         };
+        let key = match tab.number_key() {
+            Some(key) => key.to_string(),
+            None => " ".to_string(),
+        };
         lines.push(Line::from(Span::styled(
-            format!("{pointer} {}", tab.title()),
+            format!("{pointer} {key} {} {}", tab.icon(), tab.title()),
             style,
         )));
     }
