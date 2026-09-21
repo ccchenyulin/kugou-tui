@@ -142,6 +142,11 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
         views::render_context_menu(frame, menu, &theme);
     }
 
+    // 下载音质选择框：画在右键菜单之上（它是从菜单里点出来的）
+    if let Some(picker) = state.quality_picker.as_ref() {
+        views::render_quality_picker(frame, picker, &theme);
+    }
+
     // 确认对话框优先级最高，画在最上层
     if let Some(action) = state.pending_confirm {
         views::render_confirm(frame, action, &theme);

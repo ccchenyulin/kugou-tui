@@ -808,6 +808,8 @@ pub struct AppState {
     pub login: Option<LoginState>,
     /// 登录前的音源选择器。非空时它是模态的，会拦截所有按键。
     pub login_picker: Option<LoginPicker>,
+    /// 下载到文件夹时的音质选择框（模态）。
+    pub quality_picker: Option<QualityPicker>,
     /// 文本输入弹窗；`None` 表示没有弹出的输入框。
     pub prompt: Option<PromptState>,
     /// 歌曲右键菜单；\`None\` 表示没开菜单。
@@ -848,6 +850,57 @@ impl LoginPicker {
     pub fn selected(&self) -> Option<crate::source::SourceKind> {
         let index = self.cursor.selected().unwrap_or(0);
         self.candidates.get(index).copied()
+    }
+
+    /// 上下移动选中。
+    pub fn move_by(&mut self, delta: isize) {
+        if self.candidates.is_empty() {
+            return;
+        }
+        let len = self.candidates.len();
+        let current = self.cursor.selected().unwrap_or(0) as isize;
+        let next = (current + delta).clamp(0, len as isize - 1) as usize;
+        self.cursor.select(Some(next));
+    }
+}
+
+/// 下载歌曲时的音质选择框。
+///
+/// 和全局 `config.quality` 分开：全局那个是**播放**音质（要照顾流量和缓冲），
+/// 下载到文件夹往往想要无损——每次为了下一首歌去改全局设置太别扭。
+#[derive(Debug)]
+pub struct QualityPicker {
+    /// 要下载的歌。
+    pub song: crate::api::model::Song,
+    /// 候选音质，取自 `config::SUPPORTED_QUALITIES`。
+    pub candidates: Vec<String>,
+    pub cursor: ListState,
+}
+
+impl QualityPicker {
+    /// 默认选中项落在**当前全局音质**上：多数人下载就是想要现在听的这个档。
+    pub fn new(song: crate::api::model::Song, current: &str) -> Self {
+        let candidates: Vec<String> = crate::config::SUPPORTED_QUALITIES
+            .iter()
+            .map(|quality| (*quality).to_string())
+            .collect();
+        let start = candidates
+            .iter()
+            .position(|quality| quality == current)
+            .unwrap_or(0);
+        let mut cursor = ListState::default();
+        cursor.select(Some(start));
+        Self {
+            song,
+            candidates,
+            cursor,
+        }
+    }
+
+    /// 当前选中的音质。
+    pub fn selected(&self) -> Option<&str> {
+        let index = self.cursor.selected().unwrap_or(0);
+        self.candidates.get(index).map(String::as_str)
     }
 
     /// 上下移动选中。
@@ -1111,6 +1164,7 @@ impl AppState {
             pending_confirm: None,
             login: None,
             login_picker: None,
+            quality_picker: None,
             prompt: None,
             vip_label: None,
         };
@@ -1688,5 +1742,72 @@ mod tests {
         state.duration_ms = 100;
         state.position_ms = 250;
         assert!((state.progress_ratio() - 1.0).abs() < f64::EPSILON);
+    }
+
+    fn sample_song() -> crate::api::model::Song {
+        crate::api::model::Song {
+            hash: "test-hash".to_string(),
+            name: "测试歌曲".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn quality_picker_defaults_to_current_quality() {
+        // 全局音质是 flac，框一打开就该停在 flac——多数人下载就是想要现在
+        // 听的这个档，不该每次都从第一项开始挑。
+        assert_eq!(
+            QualityPicker::new(sample_song(), "flac").selected(),
+            Some("flac")
+        );
+        assert_eq!(
+            QualityPicker::new(sample_song(), "320").selected(),
+            Some("320")
+        );
+    }
+
+    #[test]
+    fn quality_picker_handles_unknown_quality() {
+        // 配置里写了不在列表里的值（手改过或上游改名）不能越界
+        assert_eq!(
+            QualityPicker::new(sample_song(), "不存在的音质").selected(),
+            Some("128")
+        );
+    }
+
+    #[test]
+    fn quality_picker_move_stays_in_range() {
+        let mut picker = QualityPicker::new(sample_song(), "128");
+        // 已在第一项，再往上不跑负
+        picker.move_by(-1);
+        assert_eq!(picker.selected(), Some("128"));
+
+        picker.move_by(1);
+        assert_eq!(picker.selected(), Some("320"));
+
+        // 一直往下到末尾也不能越界
+        for _ in 0..20 {
+            picker.move_by(1);
+        }
+        assert_eq!(
+            picker.selected(),
+            Some("viper_tape"),
+            "应当停在最后一项而不是越界"
+        );
+    }
+
+    #[test]
+    fn quality_picker_covers_all_supported() {
+        let picker = QualityPicker::new(sample_song(), "128");
+        assert_eq!(
+            picker.candidates.len(),
+            crate::config::SUPPORTED_QUALITIES.len()
+        );
+        for quality in crate::config::SUPPORTED_QUALITIES {
+            assert!(
+                picker.candidates.iter().any(|c| c == quality),
+                "缺少音质 {quality}"
+            );
+        }
     }
 }

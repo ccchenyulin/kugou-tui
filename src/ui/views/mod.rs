@@ -421,6 +421,69 @@ pub fn render_context_menu(
     let _ = MenuAction::Play; // 类型已用于 items，这里仅为可读性
 }
 
+/// 下载音质选择框：列出可选音质，默认落在当前全局音质上。
+///
+/// 与右键菜单同样的浮层写法（Clear + panel + 居中），但内容换成音质列表。
+pub fn render_quality_picker(
+    frame: &mut Frame,
+    picker: &crate::app::state::QualityPicker,
+    theme: &Theme,
+) {
+    let height = (picker.candidates.len() as u16 + 6).min(frame.area().height);
+    // 宽度要放得下最长的那一行（「蝰蛇全景声  viper_atmos」），太窄会截断
+    let popup = crate::ui::widgets::centered_rect(frame.area(), 46, height);
+    frame.render_widget(Clear, popup);
+
+    let block = panel("下载音质", true, theme);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if inner.height == 0 {
+        return;
+    }
+
+    let selected_index = picker.cursor.selected().unwrap_or(0);
+    let mut lines: Vec<Line> = Vec::new();
+
+    lines.push(Line::from(Span::styled(
+        truncate_to_width(&picker.song.name, inner.width as usize),
+        theme.dim(),
+    )));
+    lines.push(Line::from(""));
+
+    for (index, quality) in picker.candidates.iter().enumerate() {
+        let selected = index == selected_index;
+        let pointer = if selected { ">" } else { " " };
+        let style = if selected {
+            theme.selection().add_modifier(Modifier::BOLD)
+        } else {
+            theme.body()
+        };
+        let label = crate::app::settings::quality_label(quality);
+        lines.push(Line::from(vec![
+            Span::styled(
+                truncate_to_width(
+                    &format!("{pointer} {label}"),
+                    inner.width.saturating_sub(8) as usize,
+                ),
+                style,
+            ),
+            Span::styled(
+                format!("{:>width$}", quality, width = 7),
+                if selected { style } else { theme.dim() },
+            ),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "↑↓ 选择 · Enter 下载 · Esc 取消",
+        theme.dim(),
+    )));
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
 /// 帮助弹窗。
 pub fn render_help(frame: &mut Frame, area: Rect, theme: &Theme) {
     let width = (area.width.saturating_sub(8)).min(76);

@@ -135,6 +135,8 @@ pub fn quality_label(quality: &str) -> String {
         "high" => "高品".to_string(),
         "super" => "超高".to_string(),
         "viper_clear" => "蝰蛇母带".to_string(),
+        "viper_atmos" => "蝰蛇全景声".to_string(),
+        "viper_tape" => "蝰蛇磁带".to_string(),
         other => other.to_string(),
     }
 }

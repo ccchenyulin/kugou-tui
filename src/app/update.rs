@@ -18,7 +18,7 @@ use crate::api::model::{Artist, Playlist, RankBoard, Song};
 use crate::app::App;
 use crate::app::state::{
     ConfirmAction, CoverArt, EntryList, Focus, HitTarget, HitZone, LoginPicker, LoginState,
-    PromptAction, PromptState, Tab, move_selection, select_first, select_last,
+    PromptAction, PromptState, QualityPicker, Tab, move_selection, select_first, select_last,
 };
 use crate::audio::cache::AudioCache;
 use crate::audio::engine::AudioSource;
@@ -316,7 +316,7 @@ impl App {
             }
             // 打开菜单时焦点已经是这首歌，所以沿用「收藏焦点歌曲」那条路径
             MenuAction::AddToCloud => self.add_focused_song_to_cloud(),
-            MenuAction::Download => self.download_song(song.clone()),
+            MenuAction::Download => self.open_quality_picker(song.clone()),
             MenuAction::RemoveFromQueue => self.remove_song_from_queue(song),
         }
     }
@@ -474,12 +474,33 @@ impl App {
             self.state.warn("当前没有在播放的歌曲");
             return;
         };
-        self.download_song(song);
+        self.open_quality_picker(song);
     }
 
     /// 下载指定歌曲。菜单里点的歌不一定是当前在放的那首，所以这里收一首歌
     /// 而不是读 `state.current`。
-    fn download_song(&mut self, song: Song) {
+    /// 打开音质选择框。选完之后走 [`Self::download_song`]。
+    ///
+    /// 不直接用全局音质：那个是**播放**音质（要照顾流量和缓冲），下载到
+    /// 文件夹通常想要无损——为下一首歌去改全局设置太别扭。
+    fn open_quality_picker(&mut self, song: Song) {
+        let current = self.state.config.quality.trim().to_string();
+        self.state.quality_picker = Some(QualityPicker::new(song, &current));
+    }
+
+    /// 用选中的音质下载。
+    fn confirm_quality_picker(&mut self) {
+        let Some(picker) = self.state.quality_picker.take() else {
+            return;
+        };
+        let Some(quality) = picker.selected().map(str::to_string) else {
+            return;
+        };
+        let song = picker.song.clone();
+        self.download_song(song, quality);
+    }
+
+    fn download_song(&mut self, song: Song, quality: String) {
         let dir =
             crate::app::settings::expand_download_dir(self.state.config.download_dir.as_deref());
         let target_dir = std::path::PathBuf::from(&dir);
@@ -498,7 +519,6 @@ impl App {
             }
         };
         let downloader = self.downloader.clone();
-        let quality = self.state.config.quality.clone();
         let bus = self.bus.clone();
 
         self.runtime.spawn(async move {
@@ -724,6 +744,35 @@ impl App {
                     self.state.should_quit = true;
                     self.state.force_quit = matches!(action, Action::ForceQuit);
                 }
+            }
+            return;
+        }
+
+        // 下载音质选择框是模态的：只放行移动、确认、取消与退出。
+        // 和登录选择器同样的处理方式——不持有 picker 的借用再去调 self 的方法。
+        if self.state.quality_picker.is_some() {
+            match action {
+                Action::MoveUp => {
+                    if let Some(picker) = self.state.quality_picker.as_mut() {
+                        picker.move_by(-1);
+                    }
+                }
+                Action::MoveDown => {
+                    if let Some(picker) = self.state.quality_picker.as_mut() {
+                        picker.move_by(1);
+                    }
+                }
+                Action::Submit => self.confirm_quality_picker(),
+                Action::Cancel => {
+                    self.state.quality_picker = None;
+                    self.state.info("已取消下载");
+                }
+                Action::Quit => self.state.should_quit = true,
+                Action::ForceQuit => {
+                    self.state.should_quit = true;
+                    self.state.force_quit = true;
+                }
+                _ => {}
             }
             return;
         }
