@@ -649,18 +649,16 @@ impl App {
         if self.state.login.is_some() {
             match action {
                 Action::Cancel => {
-                    // 已经登录成功时，Esc 只是**关掉结果弹窗**——不能再报
-                    // 「已取消登录」。凭证都存好了却弹出这么一句，用户会以为
-                    // 刚才白扫了。
-                    let succeeded = self
+                    // 弹窗里已经有结果消息了（成功 / 失败 / 二维码过期）的话，
+                    // Esc 只是关掉弹窗——别再追加一句「已取消登录」，跟原文打架。
+                    // 真正「用户在二维码未完成时主动取消」是更早的状态。
+                    let finished = self
                         .state
                         .login
                         .as_ref()
-                        .is_some_and(|state| state.succeeded);
+                        .is_some_and(|state| state.finished);
                     self.state.login = None;
-                    if succeeded {
-                        self.state.success("登录成功");
-                    } else {
+                    if !finished {
                         self.state.info("已取消登录");
                     }
                 }
@@ -2953,7 +2951,8 @@ impl App {
             }
 
             Loaded::LoginQr { key, content } => {
-                let qr = crate::ui::widgets::qr_lines(&content).unwrap_or_default();
+                let qr = crate::ui::widgets::qr_lines(&content, self.state.config.qr_aspect)
+                    .unwrap_or_default();
                 let login = self.state.login.get_or_insert_with(LoginState::default);
                 login.qr = qr;
                 login.key = key;

@@ -24,7 +24,12 @@ use crate::ui::theme::Theme;
 /// 四分之一。
 ///
 /// 返回 `None` 表示内容过长无法编码（登录场景不会发生）。
-pub fn qr_lines(content: &str) -> Option<Vec<String>> {
+/// 把二维码画成终端字符行。
+///
+/// \`aspect\` 是终端「字符高:宽」比：标准终端是 2:1，用半块字符（一个字符
+/// 承载上下两行模块）正好正方形；低于 1.5 时（宽字符字体）改用一字符一行的
+/// 全块字符，避免被横向拉长。
+pub fn qr_lines(content: &str, aspect: f32) -> Option<Vec<String>> {
     /// 静默区（二维码外围留白）的模块数。
     ///
     /// 规范要求 4 个模块，但终端里每多一圈就多占半行。这里取 2——配合固定的
@@ -58,6 +63,29 @@ pub fn qr_lines(content: &str) -> Option<Vec<String>> {
         modules.push(vec![false; width]);
     }
 
+    if aspect < 1.5 {
+        return Some(render_full_blocks(&modules));
+    }
+    Some(render_half_blocks(&modules))
+}
+
+/// 每个模块占 1 个字符、1 行。用全块字符（\`█\`/\` \`）——视觉上每个模块是「高:宽 = 1:aspect」。
+fn render_full_blocks(modules: &[Vec<bool>]) -> Vec<String> {
+    modules
+        .iter()
+        .map(|row| {
+            let mut line = String::with_capacity(row.len());
+            for dark in row {
+                line.push(if *dark { '█' } else { ' ' });
+            }
+            line
+        })
+        .collect()
+}
+
+/// 每个模块占 1 个字符、½ 行。用半块字符（▀▄█/空格）——视觉上每个模块
+/// 是「高:宽 = (aspect/2):1」，aspect=2.0 时正好正方形。
+fn render_half_blocks(modules: &[Vec<bool>]) -> Vec<String> {
     let mut lines = Vec::with_capacity(modules.len().div_ceil(2));
     let mut row = 0;
     while row < modules.len() {
@@ -77,8 +105,7 @@ pub fn qr_lines(content: &str) -> Option<Vec<String>> {
         lines.push(line);
         row += 2;
     }
-
-    Some(lines)
+    lines
 }
 
 /// 构造带**统一选中表现**的列表。

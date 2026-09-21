@@ -104,11 +104,32 @@ pub struct Config {
     #[serde(default)]
     pub keymap: std::collections::BTreeMap<String, String>,
 
+    /// 终端字符的「高:宽」比，用来矫正登录二维码的视觉形状。
+    ///
+    /// `2.0`（默认）表示一个字符的视觉高度约为宽度的两倍——此时用半块字符
+    /// （▀▀ ▄▄ ██，一个字符承载两行模块）正好把二维码画成正方形。
+    ///
+    /// 但**字符高宽比并不总是 2:1**——某些宽字符字体（Nerd Font、CJK 等）的
+    /// 字符会更扁/更方。如果你觉得二维码被拉长或压扁，把这个值改成自己实测
+    /// 的字符高:宽比即可（按 L 出现二维码后，用尺子量一个字符就行）：
+    ///
+    /// * 比实际大 → 二维被纵向压扁（横向被"拉长"）
+    /// * 比实际小 → 二维被纵向拉长（横向被"压扁"）
+    ///
+    /// 不会改字符、只用来切半块/全块模式：小于 1.5 用全块字符（一个模块一字符），
+    /// 大于等于 1.5 用半块字符。
+    #[serde(default = "default_qr_aspect")]
+    pub qr_aspect: f32,
+
     /// 各音源的连接与身份配置，以及当前选中的音源。
     ///
     /// 切换音源时，`api_base` / `cookie` / `dfid` 会从选中的音源同步过来。
     /// 这三个字段仍是运行时实际读取的值，这样改动面最小，也不会漏掉某处引用。
     pub sources: SourceSet,
+}
+
+fn default_qr_aspect() -> f32 {
+    2.0
 }
 
 impl Default for Config {
@@ -130,6 +151,7 @@ impl Default for Config {
             theme: ThemeName::default(),
             download_dir: None,
             keymap: std::collections::BTreeMap::new(),
+            qr_aspect: default_qr_aspect(),
             sources: SourceSet::default(),
         }
     }
