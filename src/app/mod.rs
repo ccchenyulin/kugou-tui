@@ -355,6 +355,15 @@ impl App {
         {
             self.state.queue.set_mode(mode);
             self.state.current = self.state.queue.current().cloned();
+            // 时长也要恢复：进度条是 position / duration 算的，只设 position
+            // 而 duration 还是 0 的话，进度条就是空的、时间也显示 00:00 / 00:00——
+            // 看着像没恢复，其实位置已经在了。
+            self.state.duration_ms = self
+                .state
+                .current
+                .as_ref()
+                .map(|song| song.duration_ms)
+                .unwrap_or(0);
             self.state.position_ms = session.position_ms;
             // 记住「这首歌播到哪了」，按 Space 时从这里续（见 toggle_playback）。
             // 位置为 0 就不记，免得续播逻辑白白多一条分支。
