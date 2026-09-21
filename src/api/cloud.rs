@@ -188,6 +188,38 @@ impl ApiClient {
             .ok_or_else(|| AppError::NotFound("`/register/dev` 未返回 dfid".to_string()))
     }
 
+    /// 检查云端写操作（加歌 / 删歌）的响应。
+    ///
+    /// # 为什么不能只 `?` 掉
+    ///
+    /// 实测往**别人的**歌单加歌时，接口 HTTP 是 200，但业务上失败：
+    /// ```json
+    /// {"status":0,"error_code":30205}
+    /// ```
+    /// 只 `?`（我们原来的写法）会把它当成成功，于是界面提示「已收藏」而歌单里
+    /// 根本没有这首歌——用户以为程序坏了，其实是它撒了谎。
+    ///
+    /// 另外这些错误码**没有**附带描述（没有 `error_msg`），所以这里把实测遇到的
+    /// 几个翻译成人话，别让用户对着一串数字猜。
+    fn check_write_result(path: &str, root: &Value) -> Result<()> {
+        let Some(code) = root.get("error_code").and_then(Value::as_i64) else {
+            return Ok(());
+        };
+        if code == 0 {
+            return Ok(());
+        }
+        let message = match code {
+            // 实测：歌单的 `list_create_userid` 不是自己时（收藏的别人的歌单）返回它
+            30205 => "该歌单不是你自己的，无法往别人的歌单里加歌",
+            _ => "服务端未提供错误描述",
+        };
+        Err(AppError::Api {
+            path: path.to_string(),
+            code,
+            message: message.to_string(),
+        })
+    }
+
     /// 批量把歌曲加入云端歌单。
     ///
     /// 返回实际提交的歌曲数量，便于界面给出「已同步 N 首」的反馈。
@@ -207,11 +239,13 @@ impl ApiClient {
                 .collect::<Vec<_>>()
                 .join(",");
 
-            self.get_json_uncached(
-                "/playlist/tracks/add",
-                &[("listid", list_id.to_string()), ("data", payload)],
-            )
-            .await?;
+            let root = self
+                .get_json_uncached(
+                    "/playlist/tracks/add",
+                    &[("listid", list_id.to_string()), ("data", payload)],
+                )
+                .await?;
+            Self::check_write_result("/playlist/tracks/add", &root)?;
 
             written += chunk.len();
         }
@@ -238,11 +272,13 @@ impl ApiClient {
             .collect::<Vec<_>>()
             .join(",");
 
-        self.get_json_uncached(
-            "/playlist/tracks/del",
-            &[("listid", list_id.to_string()), ("fileids", payload)],
-        )
-        .await?;
+        let root = self
+            .get_json_uncached(
+                "/playlist/tracks/del",
+                &[("listid", list_id.to_string()), ("fileids", payload)],
+            )
+            .await?;
+        Self::check_write_result("/playlist/tracks/del", &root)?;
 
         Ok(file_ids.len())
     }
@@ -284,6 +320,34 @@ fn encode_track_entry(song: &Song) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    /// HTTP 200 但业务失败时必须报错——否则界面会谎报「已收藏」。
+    #[test]
+    fn write_result_rejects_non_zero_error_code() {
+        let root = json!({"status": 0, "error_code": 30205});
+        let error = ApiClient::check_write_result("/playlist/tracks/add", &root)
+            .expect_err("30205 必须被当成失败");
+        assert!(
+            error.user_hint().contains("不是你自己的"),
+            "错误提示要说清原因，实际：{}",
+            error.user_hint()
+        );
+    }
+
+    /// 成功（`error_code: 0`）不能误判成失败。
+    #[test]
+    fn write_result_accepts_zero_error_code() {
+        let root = json!({"status": 1, "error_code": 0, "data": {}});
+        ApiClient::check_write_result("/playlist/tracks/add", &root).expect("0 表示成功");
+    }
+
+    /// 没有 `error_code` 字段的响应（部分接口只给 `data`）不该被拦下。
+    #[test]
+    fn write_result_tolerates_missing_error_code() {
+        let root = json!({"data": {"status": 1}});
+        ApiClient::check_write_result("/playlist/tracks/del", &root).expect("缺字段视为成功");
+    }
 
     #[test]
     fn encodes_track_entry_with_expected_field_order() {
