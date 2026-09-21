@@ -1100,9 +1100,12 @@ impl AppState {
     /// 而不是「这一页没有列表所以什么都不做」。
     pub fn selected_song(&self) -> Option<Song> {
         if self.focus == Focus::Queue {
-            let index = self.queue_cursor.selected()?;
-            if let Some(song) = self.queue.items().get(index) {
-                return Some(song.clone());
+            // 注意这里**不能**用 `?`：焦点在队列但队列里没选中任何一首时应该继续
+            // 往下找（比如回退到正在播放的这首），而不是直接宣告「没有选中的歌曲」。
+            if let Some(index) = self.queue_cursor.selected() {
+                if let Some(song) = self.queue.items().get(index) {
+                    return Some(song.clone());
+                }
             }
         }
 
