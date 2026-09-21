@@ -356,6 +356,13 @@ impl App {
             self.state.queue.set_mode(mode);
             self.state.current = self.state.queue.current().cloned();
             self.state.position_ms = session.position_ms;
+            // 记住「这首歌播到哪了」，按 Space 时从这里续（见 toggle_playback）。
+            // 位置为 0 就不记，免得续播逻辑白白多一条分支。
+            if session.position_ms > 0 {
+                if let Some(song) = self.state.current.as_ref() {
+                    self.state.resume = Some((song.hash.clone(), session.position_ms));
+                }
+            }
             self.state
                 .info(format!("已恢复上次会话：{count} 首 · 按 Space 继续播放"));
             tlog!(

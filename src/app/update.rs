@@ -1314,7 +1314,13 @@ impl App {
             PlaybackState::Playing | PlaybackState::Paused => self.audio.toggle(),
             PlaybackState::Stopped => {
                 if let Some(song) = self.state.queue.current().cloned() {
-                    self.start_playback(song, 0);
+                    // 会话恢复的那首：从上次的位置续播，而不是从头。
+                    // hash 对不上就说明用户换了歌，这个位置作废。
+                    let resume = match self.state.resume.take() {
+                        Some((hash, ms)) if hash == song.hash => ms,
+                        _ => 0,
+                    };
+                    self.start_playback(song, resume);
                 } else {
                     self.play_from_focused_songs();
                 }

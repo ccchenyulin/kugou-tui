@@ -822,6 +822,11 @@ pub struct AppState {
     pub user_info: Option<crate::api::cloud::UserInfo>,
     /// 登录用户的头像。和 `cover`（当前歌曲专辑图）分开存。
     pub avatar: Avatar,
+    /// 会话恢复待续播的位置：(歌曲 hash, 毫秒)。
+    ///
+    /// 只在播放**这首歌**时才用——用户要是先去播别的，这个位置就该作废，
+    /// 否则下次停在任意一首上按播放都会从上次的位置开始。
+    pub resume: Option<(String, u64)>,
     /// 上次鼠标点击命中的（区域, 数据下标）。
     last_click: Option<(HitTarget, Option<usize>)>,
     last_click_at: std::time::Instant,
@@ -1063,6 +1068,7 @@ impl AppState {
             context_menu: None,
             user_info: None,
             avatar: Avatar::default(),
+            resume: None,
             sidebar_visible: true,
             show_help: false,
             show_lyric_panel: true,
