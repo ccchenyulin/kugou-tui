@@ -27,7 +27,7 @@
 //!
 //! 只有**离散事件**（装载完成、播放结束、出错）才走 channel。
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
@@ -107,12 +107,23 @@ pub enum AudioEvent {
     Failed(String),
 }
 
+/// 播放来源：缓存文件，或边下边播的流式缓冲。
+#[derive(Debug)]
+pub enum AudioSource {
+    /// 缓存里已经下完的文件。可以随便 seek。
+    File(PathBuf),
+    /// 正在下载的缓冲。读指针跑在下载前面时会阻塞等数据。
+    Stream(crate::audio::streaming::StreamingBuffer),
+}
+
 /// 主线程 → 音频线程的命令。
 #[derive(Debug)]
 enum AudioCmd {
-    /// 装载本地文件。`start_at_ms` 用于「恢复上次播放位置」。
+    /// 装载一段音频。`start_at_ms` 用于「恢复上次播放位置」。
+    ///
+    /// 两种来源：缓存里已有的本地文件，或正在下载的流式缓冲（边下边播）。
     Load {
-        path: PathBuf,
+        source: AudioSource,
         start_at_ms: u64,
         /// 解码器报不出时长时的兜底，来自列表数据。
         expected_duration_ms: u64,
@@ -259,13 +270,13 @@ impl AudioHandle {
         self.shared.position_ms.store(0, Ordering::Relaxed);
     }
 
-    /// 装载并播放本地音频文件。
-    pub fn load(&self, path: PathBuf, start_at_ms: u64, expected_duration_ms: u64) {
+    /// 装载并播放一段音频（本地文件，或边下边播的流式缓冲）。
+    pub fn load(&self, source: AudioSource, start_at_ms: u64, expected_duration_ms: u64) {
         self.shared
             .duration_ms
             .store(expected_duration_ms, Ordering::Relaxed);
         self.send(AudioCmd::Load {
-            path,
+            source,
             start_at_ms,
             expected_duration_ms,
         });
@@ -416,10 +427,10 @@ impl Runtime {
     fn handle(&mut self, command: AudioCmd) {
         match command {
             AudioCmd::Load {
-                path,
+                source,
                 start_at_ms,
                 expected_duration_ms,
-            } => self.load(&path, start_at_ms, expected_duration_ms),
+            } => self.load(source, start_at_ms, expected_duration_ms),
             AudioCmd::Toggle => {
                 if self.player.is_paused() {
                     self.resume();
@@ -443,30 +454,51 @@ impl Runtime {
         }
     }
 
-    fn load(&mut self, path: &Path, start_at_ms: u64, expected_duration_ms: u64) {
+    fn load(&mut self, source: AudioSource, start_at_ms: u64, expected_duration_ms: u64) {
         self.player.stop();
         self.player.clear();
         self.loaded = false;
         // 装载期间先屏蔽「结束」上报，避免旧的 empty 状态误触发切歌
         self.finished_reported = true;
 
-        let file = match std::fs::File::open(path) {
-            Ok(file) => file,
-            Err(error) => {
-                self.report_failure(format!("打开音频文件 {} 失败：{error}", path.display()));
-                return;
+        // rodio::Decoder 要的是 `Read + Seek`，文件和流式缓冲都满足，
+        // 差别只在「读不到时是 EOF 还是阻塞等下载」。
+        //
+        // 但 `Decoder<File>` 和 `Decoder<StreamingBuffer>` 是两个不同类型，没法放进
+        // 同一个变量——统一装箱成 `Box<dyn Source>`（rodio 为 Box<dyn Source> 实现了
+        // Source，可以照样 append 给播放器）。
+        let decoder: Box<dyn Source<Item = f32> + Send> = match source {
+            AudioSource::File(path) => {
+                let file = match std::fs::File::open(&path) {
+                    Ok(file) => file,
+                    Err(error) => {
+                        self.report_failure(format!(
+                            "打开音频文件 {} 失败：{error}",
+                            path.display()
+                        ));
+                        return;
+                    }
+                };
+                match rodio::Decoder::try_from(file) {
+                    Ok(decoder) => Box::new(decoder),
+                    Err(error) => {
+                        self.report_failure(format!(
+                            "解码 {} 失败：{error}。该文件可能不是有效音频，或格式不受支持。",
+                            path.display()
+                        ));
+                        return;
+                    }
+                }
             }
-        };
-
-        let decoder = match rodio::Decoder::try_from(file) {
-            Ok(decoder) => decoder,
-            Err(error) => {
-                self.report_failure(format!(
-                    "解码 {} 失败：{error}。该文件可能不是有效音频，或格式不受支持。",
-                    path.display()
-                ));
-                return;
-            }
+            AudioSource::Stream(buffer) => match rodio::Decoder::new(buffer) {
+                Ok(decoder) => Box::new(decoder),
+                Err(error) => {
+                    self.report_failure(format!(
+                        "解码流失败：{error}。数据可能不是有效音频，或格式不受支持。"
+                    ));
+                    return;
+                }
+            },
         };
 
         // 解码器报出的时长最准；拿不到就用列表里的时长兜底，保证进度条可用

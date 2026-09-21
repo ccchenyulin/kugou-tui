@@ -21,10 +21,12 @@ use crate::app::state::{
     PromptAction, PromptState, Tab, move_selection, select_first, select_last,
 };
 use crate::audio::cache::AudioCache;
+use crate::audio::engine::AudioSource;
 use crate::config::{Config, SUPPORTED_QUALITIES};
+use crate::error::AppError;
 use crate::source::SourceKind;
 
-use crate::audio::download::Downloader;
+use crate::audio::download::{Downloader, PREROLL_BYTES};
 use crate::audio::engine::{AudioEvent, PlaybackState, SEEK_STEP_MS, VOLUME_STEP};
 use crate::audio::spectrum::BAND_COUNT;
 use crate::event::{Event, Loaded, PlaylistSource};
@@ -1570,7 +1572,8 @@ impl App {
         // 缓存命中直接播，零网络开销
         if let Some(path) = self.cache.find(&key) {
             tlog!(crate::logger::LEVEL_DEBUG, "缓存命中：{}", path.display());
-            self.audio.load(path, start_at_ms, song.duration_ms);
+            self.audio
+                .load(AudioSource::File(path), start_at_ms, song.duration_ms);
             return;
         }
 
@@ -3155,6 +3158,21 @@ impl App {
                 self.start_download(*song, url, start_at_ms, is_trial);
             }
 
+            Loaded::StreamPrerolled {
+                song,
+                buffer,
+                start_at_ms,
+            } => {
+                if !self.is_current(&song) {
+                    return;
+                }
+                // 攒够开头就开播——不用等整首下完（边下边播）
+                self.state.download_progress = None;
+                self.state.busy = None;
+                self.audio
+                    .load(AudioSource::Stream(buffer), start_at_ms, song.duration_ms);
+            }
+
             Loaded::DownloadProgress { received, total } => {
                 self.state.download_progress = Some((received, total));
             }
@@ -3178,7 +3196,8 @@ impl App {
 
                 self.state.download_progress = None;
                 self.state.busy = None;
-                self.audio.load(path, start_at_ms, song.duration_ms);
+                self.audio
+                    .load(AudioSource::File(path), start_at_ms, song.duration_ms);
 
                 // 当前这首已经在放了——趁这会儿把**下一首**悄悄下下来。
                 //
@@ -3391,13 +3410,49 @@ impl App {
                 bus.emit(Loaded::DownloadProgress { received, total });
             };
 
-            match downloader.fetch_to(&url, &target, &progress).await {
-                Ok(_) => bus.emit(Loaded::StreamCached {
-                    song: Box::new(song),
-                    path: target,
-                    start_at_ms,
+            // 边下边播：先起流式下载（立即返回缓冲），攒够开头就开播，
+            // 剩下的在后台继续下并落盘到缓存。
+            //
+            // 之前是 `fetch_to` 下完整个文件才 `load`——一首 Hi-Res 几十 MB，
+            // 等待时间全押在下载上。现在只等开头那 128 KB。
+            let bus_for_done = bus.clone();
+            let song_for_done = song.clone();
+            let target_for_done = target.clone();
+            let start_for_done = start_at_ms;
+            let label_for_done = label.clone();
+
+            let buffer = downloader.start_streaming(&url, target, move |result| match result {
+                Ok(()) => bus_for_done.emit(Loaded::StreamCached {
+                    song: Box::new(song_for_done),
+                    path: target_for_done,
+                    start_at_ms: start_for_done,
                 }),
-                Err(error) => bus.fail(format!("下载《{label}》失败"), error),
+                Err(message) => bus_for_done.fail(
+                    format!("下载《{label_for_done}》失败"),
+                    AppError::Audio(message),
+                ),
+            });
+
+            // 等攒够开头再开播。轮询而不是阻塞等——这是 async 任务，
+            // 阻塞会把 runtime 的线程占住。
+            let preroll = buffer.clone();
+            loop {
+                let got = preroll.buffered_bytes();
+                // 流式拿不到总长度，只能报已收到的字节——进度条照常工作
+                progress(got, None);
+                if got >= PREROLL_BYTES || preroll.is_complete() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+
+            // 一点都没下到（比如直链立刻失败）就别发了，等下载完成那条报错
+            if preroll.buffered_bytes() > 0 {
+                bus.emit(Loaded::StreamPrerolled {
+                    song: Box::new(song),
+                    buffer,
+                    start_at_ms,
+                });
             }
         });
     }

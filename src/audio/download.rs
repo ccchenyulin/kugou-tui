@@ -21,8 +21,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::io::{AsyncSeekExt, AsyncWriteExt, SeekFrom};
 
+use super::streaming::StreamingBuffer;
 use crate::error::{AppError, Result};
 use crate::logger::tlog;
+use std::io::Write;
 
 /// 走分块并发的门槛。小文件并发反而慢（每次分块都要建一次连接），不值得。
 const PARALLEL_MIN_BYTES: u64 = 512 * 1024;
@@ -400,6 +402,94 @@ fn temp_path_for(target: &Path) -> PathBuf {
     let mut name = target.file_name().unwrap_or_default().to_os_string();
     name.push(".part");
     target.with_file_name(name)
+}
+
+// ============================================================================
+// 流式下载（边下边播）
+// ============================================================================
+
+/// 开播前至少要攒够的字节数。
+///
+/// 太小（几 KB）：解码器刚探完格式就没数据，第一秒就卡住。
+/// 太大：等待时间又退回"下完才播"。按常见码率（128kbps ≈ 16 KB/s）取
+/// 128 KB ≈ 8 秒音频，够解码器稳定跑起来，等待又不明显。
+pub const PREROLL_BYTES: u64 = 128 * 1024;
+
+impl Downloader {
+    /// 开始流式下载，**立即返回**缓冲。
+    ///
+    /// 后台任务一边灌 buffer 一边写 `cache_path`：这次播完缓存就在了，
+    /// 下次直接走本地文件，不用再下。
+    ///
+    /// 返回的 buffer 可直接交给 `AudioEngine::load`——读指针跑到还没下载到的
+    /// 位置时会在 `read()` 里阻塞等数据，表现是声音停一下，而不是提前结束。
+    pub fn start_streaming(
+        &self,
+        url: &str,
+        cache_path: PathBuf,
+        on_done: impl FnOnce(std::result::Result<(), String>) + Send + 'static,
+    ) -> StreamingBuffer {
+        let buffer = StreamingBuffer::new(None);
+        let writer = buffer.clone();
+        let http = self.http.clone();
+        let url = url.to_string();
+
+        tokio::spawn(async move {
+            match stream_into(&http, &url, &writer, &cache_path).await {
+                Ok(()) => {
+                    writer.finish(None);
+                    on_done(Ok(()));
+                }
+                Err(error) => {
+                    tlog!(crate::logger::LEVEL_WARN, "流式下载 {url} 失败：{error}");
+                    let message = error.to_string();
+                    writer.finish(Some(message.clone()));
+                    on_done(Err(message));
+                }
+            }
+        });
+
+        buffer
+    }
+}
+
+async fn stream_into(
+    http: &reqwest::Client,
+    url: &str,
+    buffer: &StreamingBuffer,
+    cache_path: &Path,
+) -> Result<()> {
+    let mut response = http
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()
+        .map_err(|error| AppError::HttpStatus {
+            path: url.to_string(),
+            status: error.status().map(|status| status.as_u16()).unwrap_or(0),
+        })?;
+
+    // 边收边写：缓存文件同步落盘，即使没播完下次也能接着用
+    let mut file = std::fs::File::create(cache_path).map_err(|error| AppError::IoAt {
+        path: cache_path.display().to_string(),
+        source: error,
+    })?;
+
+    // 用 reqwest 自带的 chunk()，不引 futures_util——为一个循环加依赖不值当
+    while let Some(chunk) = response.chunk().await? {
+        buffer.push(&chunk);
+        file.write_all(&chunk).map_err(|error| AppError::IoAt {
+            path: cache_path.display().to_string(),
+            source: error,
+        })?;
+    }
+
+    file.flush().map_err(|error| AppError::IoAt {
+        path: cache_path.display().to_string(),
+        source: error,
+    })?;
+
+    Ok(())
 }
 
 #[cfg(test)]

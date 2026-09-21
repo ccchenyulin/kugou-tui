@@ -20,6 +20,7 @@ use ratatui::crossterm::event::{KeyEvent, MouseEvent};
 
 use crate::api::model::{Artist, Lyric, Playlist, RankBoard, Song};
 use crate::audio::engine::AudioEvent;
+use crate::audio::streaming::StreamingBuffer;
 use crate::error::AppError;
 
 /// 歌单歌曲请求的发起方。
@@ -142,6 +143,12 @@ pub enum Loaded {
     /// 头像已下载并解码。协议要回到主线程才能建（\`Picker\` 不是 Send）。
     AvatarReady {
         image: image::DynamicImage,
+    },
+    /// 流式缓冲已经攒够开头，可以开播了（边下边播）。
+    StreamPrerolled {
+        song: Box<Song>,
+        buffer: StreamingBuffer,
+        start_at_ms: u64,
     },
     /// 云端写操作（加歌/删歌）的提示信息。
     CloudNotice(String),
