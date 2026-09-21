@@ -521,6 +521,9 @@ pub struct PlaylistPane {
     pub songs: SongList,
     /// 歌单广场分类 id，`0` 为推荐。
     pub category: i64,
+    /// 当前打开的是哪个歌单。按 `R` 刷新时要连它的歌曲一起重载——只刷左侧
+    /// 列表的话，右侧歌曲永远是旧的（与 [`CloudPane::open_playlist`] 同因）。
+    pub open_playlist: Option<Playlist>,
 }
 
 #[derive(Debug, Default)]

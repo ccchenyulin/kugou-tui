@@ -1648,6 +1648,7 @@ impl App {
 
         match source {
             PlaylistSource::Plaza => {
+                self.state.playlists.open_playlist = Some(playlist.clone());
                 let pane = &mut self.state.playlists.songs;
                 pane.loading = true;
                 pane.title = format!("{}（载入中…）", playlist.name);
@@ -1772,10 +1773,23 @@ impl App {
                     self.run_search();
                 }
             }
-            Tab::Playlists => self.load_plaza_playlists(),
+            // 这两个页面是「左侧列表 + 右侧歌曲」两段式：只刷左侧列表的话，右边打开的
+            // 歌单内容永远是旧的——用户按 R 看到的还是刚才那些歌，会以为没刷新。
+            // 所以列表和当前打开的歌单都要重载。
+            Tab::Playlists => {
+                self.load_plaza_playlists();
+                if let Some(playlist) = self.state.playlists.open_playlist.clone() {
+                    self.load_playlist_songs(playlist, PlaylistSource::Plaza);
+                }
+            }
             Tab::Artists => self.load_artists(),
             Tab::Ranks => self.load_ranks(),
-            Tab::Cloud => self.load_cloud_playlists(),
+            Tab::Cloud => {
+                self.load_cloud_playlists();
+                if let Some(playlist) = self.state.cloud.open_playlist.clone() {
+                    self.load_playlist_songs(playlist, PlaylistSource::Cloud);
+                }
+            }
             Tab::Visualizer => self.state.info("可视化页面没有需要刷新的数据"),
             Tab::Sources => self.state.info("音源状态会在切换与启动时自动探测"),
             Tab::Home | Tab::Lyrics | Tab::Cover | Tab::Queue => self
