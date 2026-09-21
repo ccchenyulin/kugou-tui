@@ -768,7 +768,7 @@ pub fn rank_board_from_json(value: &Value) -> Option<RankBoard> {
     })
 }
 
-fn pick_u32(object: &Value, keys: &[&str]) -> Option<u32> {
+pub fn pick_u32(object: &Value, keys: &[&str]) -> Option<u32> {
     keys.iter()
         .find_map(|key| object.get(*key).and_then(value_to_u32))
 }

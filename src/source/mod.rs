@@ -136,7 +136,7 @@ impl SourceKind {
                 cover: true,
                 login: true,
                 client_token: false,
-                catalog: false,
+                catalog: true,
                 cloud: true,
             },
         }
@@ -358,11 +358,6 @@ fn stamp_songs(songs: &mut [Song], kind: SourceKind) {
     }
 }
 
-/// 音源不支持某能力时的统一报错。
-fn unsupported(what: &str) -> crate::error::AppError {
-    crate::error::AppError::Other(format!("当前音源不支持{what}"))
-}
-
 impl SourceKind {
     /// 单曲搜索。
     pub async fn search_songs(
@@ -456,7 +451,7 @@ impl SourceKind {
             Self::Kugou | Self::KugouConcept => {
                 client.plaza_playlists(category_id, page, page_size).await
             }
-            other => Err(unsupported(&format!("歌单广场（{}）", other.label()))),
+            Self::Netease => netease::plaza_playlists(client, category_id, page, page_size).await,
         }
     }
 
@@ -468,7 +463,7 @@ impl SourceKind {
     ) -> Result<Vec<Song>> {
         let mut songs = match self {
             Self::Kugou | Self::KugouConcept => client.playlist_tracks_all(global_id, fresh).await,
-            other => Err(unsupported(&format!("歌单歌曲（{}）", other.label()))),
+            Self::Netease => netease::playlist_tracks_all(client, global_id).await,
         }?;
         stamp_songs(&mut songs, self);
         Ok(songs)
@@ -482,7 +477,7 @@ impl SourceKind {
     ) -> Result<Vec<Artist>> {
         match self {
             Self::Kugou | Self::KugouConcept => client.artist_list(kind, hot_size).await,
-            other => Err(unsupported(&format!("歌手列表（{}）", other.label()))),
+            Self::Netease => netease::artist_list(client, kind, hot_size).await,
         }
     }
 
@@ -494,7 +489,7 @@ impl SourceKind {
     ) -> Result<Vec<Song>> {
         let mut songs = match self {
             Self::Kugou | Self::KugouConcept => client.artist_tracks_all(artist_id, sort).await,
-            other => Err(unsupported(&format!("歌手歌曲（{}）", other.label()))),
+            Self::Netease => netease::artist_tracks_all(client, artist_id).await,
         }?;
         stamp_songs(&mut songs, self);
         Ok(songs)
@@ -503,14 +498,14 @@ impl SourceKind {
     pub async fn rank_boards(self, client: &ApiClient) -> Result<Vec<RankBoard>> {
         match self {
             Self::Kugou | Self::KugouConcept => client.rank_boards().await,
-            other => Err(unsupported(&format!("排行榜（{}）", other.label()))),
+            Self::Netease => netease::rank_boards(client).await,
         }
     }
 
     pub async fn rank_tracks_all(self, client: &ApiClient, rank_id: i64) -> Result<Vec<Song>> {
         let mut songs = match self {
             Self::Kugou | Self::KugouConcept => client.rank_tracks_all(rank_id).await,
-            other => Err(unsupported(&format!("榜单歌曲（{}）", other.label()))),
+            Self::Netease => netease::rank_tracks_all(client, rank_id).await,
         }?;
         stamp_songs(&mut songs, self);
         Ok(songs)

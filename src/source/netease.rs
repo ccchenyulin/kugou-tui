@@ -18,12 +18,18 @@
 use serde_json::Value;
 
 use crate::api::client::ApiClient;
-use crate::api::model::{Lyric, Singer, Song, pick_i64, pick_string, pick_u64};
+use crate::api::model::{Lyric, Singer, Song, pick_i64, pick_string, pick_u32, pick_u64};
 use crate::api::{data_of, extract_list};
 use crate::error::Result;
 
 /// 搜索结果里每页取多少条。与酷狗保持一致，便于 UI 分页逻辑复用。
 const DEFAULT_PAGE_SIZE: u32 = 30;
+
+/// 取歌单/榜单曲目时最多翻多少页。
+///
+/// 榜单一般就 100 首（一页够），歌单可能上千首。上限取 20 页 × 100 = 2000 首，
+/// 再大的歌单也够用了，同时避免服务端分页异常时无限翻下去。
+const MAX_TRACK_PAGES: u32 = 20;
 
 /// 单曲搜索。
 ///
@@ -553,6 +559,157 @@ pub async fn delete_playlist(client: &ApiClient, list_id: i64) -> Result<()> {
         .await?;
     check_write_result("/playlist/delete", &root)?;
     Ok(())
+}
+
+// ==================================================================
+// 目录类（歌单广场 / 歌手 / 排行榜）
+//
+// 网易云的这几个接口跟酷狗不是一套：分页用 `offset` + `limit` 而不是
+// `page` + `pagesize`，歌单主键是**数字 id 的字符串**（`/playlist/detail`
+// 之类的接口都按数字 id 取），榜单本身就是一张歌单。
+// ==================================================================
+
+/// 歌单广场（热门歌单）。
+pub async fn plaza_playlists(
+    client: &ApiClient,
+    _category_id: i64,
+    page: u32,
+    page_size: u32,
+) -> Result<Vec<crate::api::model::Playlist>> {
+    let limit = if page_size == 0 {
+        DEFAULT_PAGE_SIZE
+    } else {
+        page_size
+    };
+    let offset = page.saturating_sub(1).saturating_mul(limit);
+
+    let root = client
+        .get_json_uncached(
+            "/top/playlist",
+            &[("limit", limit.to_string()), ("offset", offset.to_string())],
+        )
+        .await?;
+
+    Ok(extract_list(
+        data_of(&root),
+        &["playlists"],
+        plaza_playlist_from_json,
+    ))
+}
+
+fn plaza_playlist_from_json(value: &Value) -> Option<crate::api::model::Playlist> {
+    let id = pick_i64(value, &["id"])?;
+    Some(crate::api::model::Playlist {
+        id: id.to_string(),
+        // 广场上的歌单都是别人的，没有可写的 listid
+        list_id: None,
+        name: pick_string(value, &["name"]).unwrap_or_else(|| "未命名歌单".to_string()),
+        cover: pick_string(value, &["coverImgUrl", "picUrl"]),
+        song_count: pick_u32(value, &["trackCount"]).unwrap_or(0),
+        creator: value
+            .get("creator")
+            .and_then(|creator| pick_string(creator, &["nickname"])),
+        description: pick_string(value, &["description"]),
+        is_own: false,
+    })
+}
+
+/// 热门歌手。
+pub async fn artist_list(
+    client: &ApiClient,
+    _kind: i64,
+    hot_size: u32,
+) -> Result<Vec<crate::api::model::Artist>> {
+    let limit = if hot_size == 0 {
+        DEFAULT_PAGE_SIZE
+    } else {
+        hot_size
+    };
+    let root = client
+        .get_json_uncached(
+            "/top/artists",
+            &[("limit", limit.to_string()), ("offset", "0".to_string())],
+        )
+        .await?;
+
+    Ok(extract_list(data_of(&root), &["artists"], artist_from_json))
+}
+
+fn artist_from_json(value: &Value) -> Option<crate::api::model::Artist> {
+    let id = pick_i64(value, &["id"])?;
+    Some(crate::api::model::Artist {
+        id,
+        name: pick_string(value, &["name"]).unwrap_or_else(|| "未知歌手".to_string()),
+        avatar: pick_string(value, &["picUrl", "img1v1Url"]).map(|url| {
+            if url.contains('?') {
+                url
+            } else {
+                format!("{url}?param=300y300")
+            }
+        }),
+        song_count: pick_u32(value, &["albumSize"]),
+        follower_count: None,
+    })
+}
+
+/// 歌手的全部歌曲。
+///
+/// `/artists` 一次最多给 50 首（`hotSongs`），要全得翻 `/artist/songs`。
+/// 这里先给热门的 50 首——比直接报「不支持」有用，也不至于为了一个歌手
+/// 翻几十页。
+pub async fn artist_tracks_all(client: &ApiClient, artist_id: i64) -> Result<Vec<Song>> {
+    let root = client
+        .get_json_uncached("/artists", &[("id", artist_id.to_string())])
+        .await?;
+    let songs = extract_list(data_of(&root), &["hotSongs"], song_from_json);
+    Ok(songs)
+}
+
+/// 排行榜列表。
+pub async fn rank_boards(client: &ApiClient) -> Result<Vec<crate::api::model::RankBoard>> {
+    let root = client.get_json_uncached("/toplist", &[]).await?;
+    Ok(extract_list(data_of(&root), &["list"], rank_from_json))
+}
+
+fn rank_from_json(value: &Value) -> Option<crate::api::model::RankBoard> {
+    let id = pick_i64(value, &["id"])?;
+    Some(crate::api::model::RankBoard {
+        id,
+        name: pick_string(value, &["name"]).unwrap_or_else(|| "未命名榜单".to_string()),
+        cover: pick_string(value, &["coverImgUrl"]),
+        update_frequency: pick_string(value, &["updateFrequency"]),
+    })
+}
+
+/// 榜单歌曲。榜单本身就是一张歌单，按歌单 id 取曲目。
+pub async fn rank_tracks_all(client: &ApiClient, rank_id: i64) -> Result<Vec<Song>> {
+    playlist_tracks_all(client, &rank_id.to_string()).await
+}
+
+/// 公开歌单的全部曲目。
+pub async fn playlist_tracks_all(client: &ApiClient, playlist_id: &str) -> Result<Vec<Song>> {
+    const PAGE: u32 = 100;
+    let mut all: Vec<Song> = Vec::new();
+
+    for page in 1..=MAX_TRACK_PAGES {
+        let offset = (page - 1) * PAGE;
+        let root = client
+            .get_json_uncached(
+                "/playlist/track/all",
+                &[
+                    ("id", playlist_id.to_string()),
+                    ("limit", PAGE.to_string()),
+                    ("offset", offset.to_string()),
+                ],
+            )
+            .await?;
+        let songs = extract_list(data_of(&root), &["songs"], song_from_json);
+        if songs.is_empty() {
+            break;
+        }
+        all.extend(songs);
+    }
+    Ok(all)
 }
 
 #[cfg(test)]
