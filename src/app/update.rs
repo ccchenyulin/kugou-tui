@@ -1320,6 +1320,12 @@ impl App {
                         Some((hash, ms)) if hash == song.hash => ms,
                         _ => 0,
                     };
+                    if resume > 0 {
+                        self.state.info(format!(
+                            "接着上次播：{}",
+                            crate::api::model::format_duration_ms(resume)
+                        ));
+                    }
                     self.start_playback(song, resume);
                 } else {
                     self.play_from_focused_songs();
