@@ -1315,6 +1315,51 @@ impl AppState {
 mod tests {
     use super::*;
 
+    /// `SIDEBAR_ORDER` 必须是 `ALL` 的一个**排列**。
+    ///
+    /// 侧边栏按 `SIDEBAR_ORDER` 渲染、鼠标命中区也照它算行号。漏掉一个标签，
+    /// 那页就再也点不到（也不会报错，只是静默消失）；多一个则会重复渲染。
+    #[test]
+    fn sidebar_order_is_a_permutation_of_all() {
+        let mut all = Tab::ALL.to_vec();
+        all.sort_by_key(|tab| tab.index());
+        let mut sidebar = Tab::SIDEBAR_ORDER.to_vec();
+        sidebar.sort_by_key(|tab| tab.index());
+        assert_eq!(
+            all, sidebar,
+            "SIDEBAR_ORDER 必须与 ALL 包含完全相同的标签页"
+        );
+    }
+
+    /// 分组内不能有交错：同一个分组的标签在 SIDEBAR_ORDER 里必须连续。
+    ///
+    /// 不连续的话侧边栏会为同一组插两次标题行。
+    #[test]
+    fn sidebar_groups_are_contiguous() {
+        let mut seen: Vec<&'static str> = Vec::new();
+        for tab in Tab::SIDEBAR_ORDER {
+            let group = tab.group();
+            if seen.last() != Some(&group) {
+                assert!(
+                    !seen.contains(&group),
+                    "分组「{group}」在侧边栏里出现了不止一段"
+                );
+                seen.push(group);
+            }
+        }
+    }
+
+    /// 数字键落点没被显示重排影响：`ALL` 的前 10 个仍对应 1-9 与 0。
+    #[test]
+    fn number_keys_follow_all_order() {
+        assert_eq!(Tab::ALL[0].number_key(), Some('1'));
+        assert_eq!(Tab::ALL[8].number_key(), Some('9'));
+        assert_eq!(Tab::ALL[9].number_key(), Some('0'));
+        // 超出数字键范围的两个（音源、设置）没有键
+        assert_eq!(Tab::ALL[10].number_key(), None);
+        assert_eq!(Tab::ALL[11].number_key(), None);
+    }
+
     fn named(name: &str) -> Song {
         Song {
             name: name.to_string(),

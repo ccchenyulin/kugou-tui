@@ -86,14 +86,28 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     };
 
     if let Some(sidebar_area) = sidebar_area {
-        // 侧边栏每一行对应一个标签页，整块区域按行切给各标签。
-        for (index, _tab) in Tab::ALL.iter().enumerate() {
-            let row = sidebar_area.y + 2 + index as u16;
+        // 命中区必须按**渲染时的实际行号**算。
+        //
+        // 侧边栏按分组渲染（`Tab::SIDEBAR_ORDER`，顺序与 `ALL` 不同）且每组
+        // 前面插一行标题，所以行号不再是「标题行 + 序号」这么简单。这里照着
+        // `render_sidebar` 的推进方式走一遍：遇到新分组先跳过标题行，再登记
+        // 该标签那一行。算错的话点「搜索」会跳到别的页，而且没有任何提示。
+        //
+        // 命中的仍是 `tab.index()`（`ALL` 里的下标）——处理鼠标事件那边按
+        // 这个下标取 Tab，与显示顺序无关。
+        let mut row = sidebar_area.y + 2; // 跳过上边框与 "kugou-tui 1/12" 标题行
+        let mut current_group: Option<&'static str> = None;
+        for tab in Tab::SIDEBAR_ORDER {
+            if Some(tab.group()) != current_group {
+                current_group = Some(tab.group());
+                row += 1; // 分组标题行，不可点击
+            }
             if row >= sidebar_area.bottom() {
                 break;
             }
             let rect = Rect::new(sidebar_area.x, row, sidebar_area.width, 1);
-            state.add_hit_zone(rect, HitTarget::Tab(index), 0, Tab::ALL.len());
+            state.add_hit_zone(rect, HitTarget::Tab(tab.index()), 0, Tab::ALL.len());
+            row += 1;
         }
         views::render_sidebar(frame, sidebar_area, state, &theme);
     }
