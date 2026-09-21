@@ -1,0 +1,87 @@
+# 配置
+
+## 命令行参数
+
+命令行 > 环境变量 > 配置文件 > 内置默认值。
+
+| 参数 | 环境变量 | 说明 |
+|---|---|---|
+| `-a`, `--api-base <URL>` | `KUGOU_API_BASE` | KuGouMusicApi 地址，默认 `http://127.0.0.1:3000` |
+| `-c`, `--cookie <COOKIE>` | `KUGOU_COOKIE` | 登录凭据，形如 `token=xxx; userid=xxx` |
+| `-s`, `--search <KEYWORDS>` | — | 启动后立刻搜索该关键词 |
+| `--volume <0-100>` | — | 初始音量 |
+| `--cache-dir <DIR>` | — | 音频缓存目录 |
+| `--cache-limit <MiB>` | — | 缓存上限，`0` 表示不限制 |
+| `--tick-ms <MS>` | — | 刷新间隔，50–5000，调大可进一步降低 CPU |
+| `--page-size <N>` | — | 搜索结果与歌单广场的每页条目数，5–200 |
+| `--proxy <URL>` | `KUGOU_PROXY` | 访问 API 服务时用的 HTTP 代理 |
+| `--basic-color` | — | 使用 16 色固定色板，适配老终端 |
+| `--print-config` | — | 打印最终生效的配置、缓存与日志路径后退出 |
+
+```bash
+kugou-tui --print-config        # 查看当前生效的配置与路径
+kugou-tui --tick-ms 1000        # 省电模式：空闲 CPU 接近零
+kugou-tui -s "海阔天空"          # 启动即搜索（需要登录）
+```
+
+## 配置文件
+
+首次运行自动生成，路径 `~/.config/kugou-tui/config.toml`（权限 `0600`，因为可能含 cookie）。
+
+```toml
+api_base = "http://127.0.0.1:3000"
+cookie = "token=xxx; userid=xxx"   # 登录态，可手动填
+dfid = "..."                        # 设备指纹，首次启动自动获取
+volume = 0.7                        # 0.0–1.0
+playback_mode = "sequential"        # sequential | repeat_all | repeat_one | shuffle
+cache_dir = "/home/you/.cache/kugou-tui"
+cache_limit_mib = 512               # 0 = 不限制
+lyric_offset_ms = 0                 # 歌词整体偏移，正=延后
+tick_ms = 200                       # 界面刷新间隔（毫秒）
+page_size = 30                      # 搜索结果与歌单广场的每页条目数
+proxy = "http://127.0.0.1:7890"     # 可选
+quality = "128"
+basic_color = false
+theme = "default"                   # 见下方「主题」
+download_dir = "~/Music"            # 单曲下载保存到这里，留空也行
+qr_aspect = 2.0                     # 终端字符「高:宽」比，见下方说明
+lite_mode = false                   # 简易模式，见下方说明
+```
+
+`qr_aspect` 用来矫正登录二维码的形状：终端字符的高通常是宽的 2 倍，此时用
+半块字符（一个字符承载两行模块）画出来正好是正方形。**如果你觉得二维码被
+拉长或压扁**，按 `L` 让二维码出现，量一个字符的高宽比，把它填到这一行：
+`< 1.5` 改用全块字符（一模块占一字符一行），`>= 1.5` 用半块字符。
+
+主题取值：`default`（冷蓝）、`graphite`（石墨，近乎无彩）、`sunset`（日落）、
+`forest`（森林）、`neon`（霓虹）、`dracula`（暗紫）。写错或删掉这行会回落到
+`default`。运行时按 `,` 打开设置页可直接切换，改完立即写入这个文件。
+
+`quality` 的合法取值：`128`（默认）、`320`、`flac`、`high`、`super`、
+`viper_clear`、`viper_atmos`、`viper_tape`。后三个是酷狗的「蝰蛇音效」系列，
+**仅部分歌曲支持**，拿不到时服务端返回空地址，界面会给出提示。
+
+`lite_mode` 开启后会关掉三样最吃资源的，换更低的占用（**听歌本身不受影响**）：
+
+- 不下载 / 解码封面（图片解码 + 图形协议是最占内存的一块）
+- 不算实时频谱
+- 界面刷新降到 5fps
+
+实测常驻内存（VmRSS）：空闲 13.8 MiB、播放中 16.8 MiB，开启后能再降一截。
+在低配机器或电池供电时有用。设置页可直接开关。
+
+音量、播放模式、歌词偏移会在退出时自动写回。
+
+### 会话持久化
+
+退出时会把**播放队列 + 当前曲目 + 播放位置**存到
+`~/.cache/kugou-tui/session.json`，下次启动自动恢复，界面提示
+「已恢复上次会话：N 首 · 按 Space 继续播放」。
+
+**刻意不自动播放**——一开程序就出声很吓人，也可能在不该出声的场合。
+恢复后按 `Space` 即可继续。
+
+它和配置分开存：配置是你手改的长期设置，会话是程序自己写的瞬时状态，
+混在一个文件里会互相覆盖。
+
+---
