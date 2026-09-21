@@ -1653,8 +1653,9 @@ impl App {
                 pane.title = format!("{}（载入中…）", playlist.name);
             }
             PlaylistSource::Cloud => {
-                // 记下打开了哪个歌单：云端内容变动时要靠它判断是否该重载这里
-                self.state.cloud.open_list_id = playlist.list_id;
+                // 记下打开了哪个歌单：云端内容变动时要靠它判断是否该重载这里，
+                // 按 s 收藏时也要以它为目标（而不是上次选的 sync_target）
+                self.state.cloud.open_playlist = Some(playlist.clone());
                 let pane = &mut self.state.cloud.songs;
                 pane.loading = true;
                 pane.title = format!("{}（载入中…）", playlist.name);
@@ -2508,7 +2509,17 @@ impl App {
             self.state.warn("云端歌单需要登录，请配置 cookie");
             return;
         }
-        let Some(target) = self.state.sync_target.clone() else {
+        // 优先用**当前打开的**歌单：用户眼前就是这个歌单，加到这里才符合直觉。
+        // 原来只用 sync_target（上次选的那个），它未必等于眼前这个，于是出现
+        // 「在《我喜欢》里按 s，歌加到别的歌单去了，眼前这个不刷新」。
+        let Some(target) = self
+            .state
+            .cloud
+            .open_playlist
+            .clone()
+            .filter(|playlist| playlist.is_writable())
+            .or_else(|| self.state.sync_target.clone())
+        else {
             self.state.warn("请先在「云端」标签页选中一个歌单作为目标");
             return;
         };
@@ -2865,13 +2876,27 @@ impl App {
             }
 
             Loaded::CloudPlaylistChanged { playlist } => {
-                // 歌单列表（歌曲数）已经在上面的 CloudNotice 里刷新了，这里补上
-                // **歌曲列表**——收藏/移除成功后当前歌单还显示旧内容，用户会以为没生效。
+                // 歌单列表**再**刷一次。
+                //
+                // `CloudNotice` 里已经刷过一次，但那是「立刻」刷的——服务端歌单同步
+                // 有延迟（实测约 5 秒），那一次读到的还是旧歌曲数。这里是在延迟之后
+                // 才发出的，再刷一次把旧值覆盖掉。少了这步的表现就是：列表里的
+                // 「我喜欢 413」纹丝不动，而服务端其实已经变成 414 了。
+                self.load_cloud_playlists();
+
+                // 补上**歌曲列表**——收藏/移除成功后当前歌单还显示旧内容，
+                // 用户会以为没生效。
                 //
                 // 只在「云端页打开的就是这个歌单」时重载：否则用户正在看另一个歌单，
                 // 重载会把它的内容盖掉（数据没错，但界面莫名其妙跳到别的歌单了）。
                 let list_id = playlist.list_id;
-                if list_id.is_some() && self.state.cloud.open_list_id == list_id {
+                let opened = self
+                    .state
+                    .cloud
+                    .open_playlist
+                    .as_ref()
+                    .and_then(|open| open.list_id);
+                if list_id.is_some() && opened == list_id {
                     self.load_playlist_songs(*playlist, PlaylistSource::Cloud);
                 }
             }
