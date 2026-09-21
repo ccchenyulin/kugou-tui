@@ -921,7 +921,7 @@ impl MenuAction {
             Self::QueueAppend => "a",
             Self::QueuePlayNext => "i",
             Self::AddToCloud => "s",
-            Self::Download => "w",
+            Self::Download => "W",
             Self::RemoveFromQueue => "x",
         }
     }
