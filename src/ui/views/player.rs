@@ -8,7 +8,7 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Gauge, ListState, Paragraph};
-use ratatui_image::StatefulImage;
+use ratatui_image::{Resize, StatefulImage};
 
 use crate::api::model::{WordState, format_duration_ms};
 use crate::app::queue::PlayQueue;
@@ -384,7 +384,7 @@ fn cover_layout(
     };
     let mut rows = max_rows.clamp(COVER_MIN_ROWS, COVER_MAX_ROWS);
 
-    // 填满模式：调用方已按图片比例算好框（见 cover_box），图直接铺满框——无黑边。
+    // 填满模式：图铺满整个区域（配合 Crop 裁剪，见 draw_cover_block），不留黑边。
     // inner——不留上下或左右黑边。
     if fill_height {
         return Some((inner, inner));
@@ -461,7 +461,15 @@ fn draw_cover_block(
     };
 
     if let Some(protocol) = state.cover.protocol.as_mut() {
-        frame.render_stateful_widget(StatefulImage::default(), cover_area, protocol);
+        // 填满模式用 Crop：图铺满整个区域、多余部分裁掉。
+        // 默认的 Fit 是 contain——图按原比例缩到能放下为止，区域跟图比例
+        // 不一致时就留下黑边（用户说的「空了这么多」）。
+        let image = if fill_height {
+            StatefulImage::default().resize(Resize::Crop(None))
+        } else {
+            StatefulImage::default()
+        };
+        frame.render_stateful_widget(image, cover_area, protocol);
         // 缩放与编码发生在渲染时（只在区域或图片变化时）。失败只记日志：
         // 下一帧会重试，不该因为一张图把界面搞崩。
         if let Some(Err(error)) = protocol.last_encoding_result() {
@@ -553,41 +561,13 @@ pub fn render_cover_page(frame: &mut Frame, area: Rect, state: &mut AppState, th
 ///
 /// 字符是「高:宽 = `cell_aspect`」（通常 2:1），所以正方形意味着
 /// `columns = rows * cell_aspect`。
-/// 封面框的最大尺寸（按图片实际比例算，不是固定正方形）。
-///
-/// 学 voicefox 的 `CoverGeometry::image_rect`：让框**与图同比例**，图 fit 框
-/// 时 100% 重合，没有黑边。
-///
-/// 我之前自作主张改成"按 cell_aspect 算正方形"——错的。框是正方形、图是横图，
-/// 图 fit 框后必然留黑边。框应该跟着图走：图是横的就横框、图是竖的就竖框。
-/// 用户说"如果布局的上限不符合正方形就改成正方形"是指：**实在**放不下时才
-/// 退到正方形（cell_aspect 起作用），但首选还是按图片比例。
-fn cover_box(inner: Rect, image_aspect: f32, cell_aspect: f32) -> Rect {
-    let image_aspect = if image_aspect.is_finite() && image_aspect > 0.0 {
-        image_aspect.clamp(0.2, 5.0)
-    } else {
-        1.0
-    };
-    let cell_aspect = cell_aspect.max(0.1);
-
-    // 先按可用高度算宽度：这么多行需要多少列
-    let try_rows = inner.height;
-    let try_cols = (f32::from(try_rows) * image_aspect * cell_aspect).round() as u16;
-    if try_cols <= inner.width {
-        // 高度受限，框高 = try_rows，框宽 = try_cols
-        let x = inner.x + (inner.width - try_cols) / 2;
-        return Rect::new(x, inner.y, try_cols, try_rows);
-    }
-    // 宽度受限：按宽度反推行数
-    let try_cols = inner.width;
-    let try_rows = (f32::from(try_cols) / (image_aspect * cell_aspect)).round() as u16;
-    let try_rows = try_rows.min(inner.height).max(1);
-    let y = inner.y + (inner.height - try_rows) / 2;
-    Rect::new(inner.x, y, try_cols, try_rows)
-}
-
 /// 头像占的列数：6 行内容 × 字符高宽比 2 = 12 列。
 const AVATAR_COLUMNS: u16 = 12;
+
+/// 首页账号区的高度：边框 2 行 + 内容 6 行（头像要能看清，2 行只能画 4 列宽）。
+///
+/// 固定值，不能被封面框挤掉——封面用剩下的空间。
+const ACCOUNT_HEIGHT: u16 = 8;
 
 /// 首页左下角的账号区：头像 + 昵称 · 等级 · 累计听歌时长。
 ///
@@ -712,33 +692,17 @@ pub fn render_home(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &
         let [left, right] =
             Layout::horizontal([Constraint::Percentage(45), Constraint::Min(24)]).areas(inner);
 
-        // 封面框做成**正方形**（学 voicefox 的 `box_height`：框的尺寸由另一边算出来）。
+        // 左栏竖着切：上方封面（填满）、下方账号信息（固定 8 行，不能被挤掉）。
         //
-        // 之前框高是写死的（占剩余空间 / 占一半），图按自己比例算出来比框小，
-        // 于是框里留出上下或左右的黑边。现在反过来：先按可用空间定正方形边长，
-        // 框刚好等于图，黑边就没有了。
-        let cell_aspect = state.config.qr_aspect.max(0.1);
-        // 框按图片实际比例算（学 voicefox image_rect），图 fit 框后无黑边
-        let image_aspect = state.cover.aspect.max(0.1);
-        let cover_rect = cover_box(left, image_aspect, cell_aspect);
-        // 加边框：上下左右各 1
-        let box_width = cover_rect.width.saturating_add(2).min(left.width);
-        let box_height = cover_rect.height.saturating_add(2).min(left.height);
-        let box_x = left.x + left.width.saturating_sub(box_width) / 2;
-        let cover_col = Rect::new(box_x, left.y, box_width, box_height);
-
+        // 之前让封面框按图片比例自己算高度，结果框能把整个左栏吃掉，
+        // 账号区高度变成 0 —— 用户看到「个人信息被挤掉了」。
+        // 现在账号区固定，封面用剩下的全部空间，图用 Crop 填满（见 draw_cover_block）。
+        let [cover_col, account_col] =
+            Layout::vertical([Constraint::Min(6), Constraint::Length(ACCOUNT_HEIGHT)]).areas(left);
         let left_block = panel("封面", false, theme);
         let left_inner = left_block.inner(cover_col);
         frame.render_widget(left_block, cover_col);
         let _ = draw_cover_block(frame, left_inner, state, theme, true);
-
-        // 封面框下方剩下的空间给账号信息
-        let account_col = Rect::new(
-            left.x,
-            left.y + box_height,
-            left.width,
-            left.height.saturating_sub(box_height),
-        );
         render_account(frame, account_col, state, theme);
         render_lyric(frame, right, state, theme);
     } else {
