@@ -114,10 +114,22 @@ pub(crate) fn extract_list<T>(
     for array in arrays {
         let parsed: Vec<T> = array.iter().filter_map(&parse).collect();
         if !parsed.is_empty() {
+            // 带上顶层键名：光说「兜底命中一个数组」没法知道是哪个接口，
+            // 而顶层键往往一眼就能认出来（歌单广场是 `special_list`、
+            // 用户歌单是 `info`……），下次再出现就不用猜了。
+            let top_keys = root.as_object().map(|object| {
+                object
+                    .keys()
+                    .take(8)
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            });
             crate::logger::tlog!(
                 crate::logger::LEVEL_WARN,
-                "响应未命中任何候选键，兜底扫描命中了一个数组（{} 项），请核对字段布局",
-                parsed.len()
+                "响应未命中任何候选键，兜底扫描命中了一个数组（{} 项），请核对字段布局（顶层键：{}）",
+                parsed.len(),
+                top_keys.as_deref().unwrap_or("(响应不是对象)")
             );
             return parsed;
         }
