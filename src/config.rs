@@ -385,7 +385,13 @@ impl Config {
     pub fn is_logged_in(&self) -> bool {
         self.cookie
             .as_deref()
-            .map(|cookie| cookie.contains("token=") && cookie.contains("userid="))
+            .map(|cookie| {
+                // 酷狗：自己拼的 \`token=; userid=\`；
+                // 网易云：服务端下发的那串里是 \`MUSIC_U=\`，没有 token/userid。
+                // 只认前者的后果是——网易云登录完再重启，登录态凭空消失。
+                (cookie.contains("token=") && cookie.contains("userid="))
+                    || cookie.contains("MUSIC_U=")
+            })
             .unwrap_or(false)
     }
 

@@ -301,10 +301,15 @@ pub async fn login_qr_check(client: &ApiClient, key: &str) -> Result<crate::api:
         _ => QrStatus::Expired,
     };
 
+    // 登录态由服务端持有：凭证在响应的 `cookie` 里（含 MUSIC_U）。
+    // 必须接住并交给上层存起来，否则本次「登录成功」只是个谎言。
+    let cookie = pick_string(&root, &["cookie"]).or_else(|| pick_string(data, &["cookie"]));
+
     Ok(QrCheck {
         status,
         token: None,
         userid: None,
+        cookie,
     })
 }
 

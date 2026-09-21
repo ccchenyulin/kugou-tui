@@ -92,6 +92,12 @@ pub struct QrCheck {
     /// 授权成功后才有的登录令牌。
     pub token: Option<String>,
     pub userid: Option<String>,
+    /// 服务端随响应下发的登录 cookie（网易云走这条路）。
+    ///
+    /// ⚠️ 网易云的登录态**就是这个 cookie**——不存下来，之后的请求没有任何
+    /// 身份信息，`/user/playlist` 永远拿不到 uid。客户端自己造不出它，只能
+    /// 从服务端的响应里接住。
+    pub cookie: Option<String>,
 }
 
 impl ApiClient {
@@ -129,6 +135,8 @@ impl ApiClient {
             status,
             token: pick_string(data, &["token"]),
             userid: pick_string(data, &["userid"]),
+            // 酷狗走 token + userid，不用服务端 cookie
+            cookie: None,
         })
     }
 

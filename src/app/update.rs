@@ -2049,12 +2049,14 @@ impl App {
                         bus.emit(Loaded::LoginSucceeded {
                             token: None,
                             userid: None,
+                            cookie: check.cookie.clone(),
                         })
                     } else {
                         match (check.token, check.userid) {
                             (Some(token), Some(userid)) => bus.emit(Loaded::LoginSucceeded {
                                 token: Some(token),
                                 userid: Some(userid),
+                                cookie: None,
                             }),
                             _ => bus.emit(Loaded::LoginFailed {
                                 message: "扫码已授权，但未拿到 token".to_string(),
@@ -2125,6 +2127,40 @@ impl App {
                 );
                 self.state.success("登录成功，按 Esc 关闭");
                 // 顺带取一次会员信息，界面上能直接看到服务端认定的会员形态
+                self.fetch_vip_status();
+            }
+            Err(error) => {
+                self.finish_login(false, format!("保存登录凭据失败：{error}"));
+            }
+        }
+    }
+
+    /// 登录凭证由**服务端下发**时的收尾（网易云走这条路）。
+    ///
+    /// 网易云的登录态**就是** `login/qr/check` 响应里那个 cookie（含 `MUSIC_U`）。
+    /// 不接住并写进配置，之后的请求不带任何身份：界面上写着「登录成功」，可
+    /// `/user/playlist` 拿不到 uid、云端歌单照旧报「尚未登录」——成功只是个谎言。
+    ///
+    /// 与 [`Self::apply_login`] 的差别只是凭据从哪来：那边自己拼 `token=; userid=`，
+    /// 这边直接用服务端给的一整串。
+    fn apply_server_cookie(&mut self, cookie: String) {
+        self.state.config.cookie = Some(cookie);
+        self.api.set_cookie(self.state.config.cookie_header());
+
+        let config_path = Config::path();
+        match self.state.config.save() {
+            Ok(()) => {
+                self.state.logged_in = true;
+                // 同样**不回显** cookie：它等价于账号密码。
+                self.finish_login(
+                    true,
+                    format!(
+                        "「{}」登录成功，凭据已写入 {}",
+                        self.state.config.active_source_kind().label(),
+                        config_path.display()
+                    ),
+                );
+                self.state.success("登录成功，按 Esc 关闭");
                 self.fetch_vip_status();
             }
             Err(error) => {
@@ -2993,18 +3029,21 @@ impl App {
                 }
             }
 
-            Loaded::LoginSucceeded { token, userid } => {
-                tlog!(
-                    crate::logger::LEVEL_INFO,
-                    "[诊断] 收到 LoginSucceeded token={:?} userid={:?}",
-                    token.is_some(),
-                    userid.is_some()
-                );
+            Loaded::LoginSucceeded {
+                token,
+                userid,
+                cookie,
+            } => {
                 match (token, userid) {
                     (Some(token), Some(userid)) => self.apply_login(token, userid),
-                    // 登录态由服务端持有（网易云）：客户端没有凭据可存，
-                    // 只需把界面标记为已登录并说明凭据在哪。
-                    _ => self.finish_server_side_login(),
+                    // 网易云：登录凭证就是服务端给的那个 cookie，必须存下来，
+                    // 否则「登录成功」只是个谎言——之后的请求没有任何身份。
+                    _ => match cookie {
+                        Some(cookie) if !cookie.trim().is_empty() => {
+                            self.apply_server_cookie(cookie)
+                        }
+                        _ => self.finish_server_side_login(),
+                    },
                 }
             }
 

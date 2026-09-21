@@ -113,6 +113,9 @@ pub enum Loaded {
     LoginSucceeded {
         token: Option<String>,
         userid: Option<String>,
+        /// 服务端下发的登录 cookie（网易云走这条路，见 `QrCheck::cookie`）。
+        /// 有它就写进配置并在本次会话热更新，之后的请求才带得上身份。
+        cookie: Option<String>,
     },
     /// 登录失败。
     LoginFailed {
