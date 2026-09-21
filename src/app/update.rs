@@ -2094,21 +2094,14 @@ impl App {
         });
     }
 
-    /// 登录态由服务端持有时的收尾：没有凭据可存，只更新界面状态。
+    /// 兜底：服务端下发的 cookie 为空时（理论上不会，但万一）的收尾路径。
+    ///
+    /// 正常路径走 `apply_server_cookie`——把含 `MUSIC_U` 的 cookie 写进
+    /// 配置，热更新 ApiClient 并存盘。这里**只**在服务端 cookie 为空字符串
+    /// 时被兜住，只更新界面状态，没有任何凭据可存。
     fn finish_server_side_login(&mut self) {
-        tlog!(
-            crate::logger::LEVEL_INFO,
-            "[诊断] finish_server_side_login 被调了，源={:?}，设 logged_in=true 前={}",
-            self.state.config.active_source_kind(),
-            self.state.logged_in
-        );
         let kind = self.state.config.active_source_kind();
         self.state.logged_in = true;
-        tlog!(
-            crate::logger::LEVEL_INFO,
-            "[诊断] finish_server_side_login 设完后 logged_in={}",
-            self.state.logged_in
-        );
         self.finish_login(
             true,
             format!(
