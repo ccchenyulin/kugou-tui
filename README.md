@@ -1,6 +1,6 @@
 # kugou-tui
 
-酷狗音乐的命令行 TUI 播放器：Rust 编写，单个二进制，常驻内存约 13 MiB。
+酷狗音乐的命令行 TUI 播放器：Rust 编写，单个二进制，常驻内存约 14 MiB。
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)
@@ -131,7 +131,7 @@ cargo build --release
 ./target/release/kugou-tui --help
 ```
 
-release 产物约 **5.4 MiB**（`opt-level="z"` + fat LTO + strip）。
+release 产物约 **6.7 MiB**（`opt-level="z"` + fat LTO + strip）。
 
 ### 3.（可选）安装启动器脚本
 
@@ -510,17 +510,18 @@ audio thread ──────────────────────�
 
 ### 低资源占用
 
-实测（release 构建，x86_64 Linux，108×30 终端，CPU 取 `/proc/<pid>/stat` 差分）：
+实测（release 构建，Linux 6.x x86_64，**100×34 终端**，读 `/proc/<pid>/status` 的
+`VmRSS`；已含 MPRIS 的 D-Bus 连接开销）：
 
 | 场景 | 常驻内存 |
 |---|---|
-| 启动后空闲 | 13.6 MiB |
-| 歌单页（列表已加载） | 14.1 MiB |
-| 打开歌单（歌曲已加载） | 15.0 MiB |
-| 播放中 | 16.3 MiB |
+| 启动后空闲 | 13.8 MiB |
+| 歌单页（列表已加载） | 14.3 MiB |
+| 打开歌单（歌曲已加载） | 14.8 MiB |
+| 播放中 | 16.8 MiB |
 
-（release 构建，Linux 6.x/7.x x86_64，100×34 终端，读 `/proc/<pid>/status` 的 `VmRSS`；
-以上已含 MPRIS 的 D-Bus 连接开销。）
+分块并发下载**不额外吃内存**：各块是 seek 到自己的偏移直接写同一个临时文件，
+不在内存里拼装整首歌，所以 65 MB 的 Hi-Res 播放时内存还是十几 MiB。
 
 内存与"在放什么"基本无关：128 kbps 的 MP3 和 30 MiB 的 FLAC 常驻内存都是十几 MiB，
 因为音频落盘播放，内存里只有解码缓冲。二进制本体约 6 MiB。
