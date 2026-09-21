@@ -283,7 +283,11 @@ kugou-api stop     # 停止
 ### 网易云音源（需要额外部署一个服务）
 
 网易云走的是 **NeteaseCloudMusicApi**，和酷狗的 KuGouMusicApi 完全是两套服务
-（SPlayer、YesPlayMusic 用的也是它）。要用的话得先把它跑起来：
+（SPlayer、YesPlayMusic 用的也是它）。要用的话得先把它跑起来。
+
+程序只认 `api_base` 这一个地址，**不绑定某个具体实现**——原版 Binaryify 的、
+api-enhanced、以及任何接口兼容的 fork 都能用，换服务改这一行就行。下面用的是
+`@neteasecloudmusicapienhanced/api`（v4.30.1，接口最全的那个）：
 
 ```bash
 git clone --depth 1 https://github.com/neteasecloudmusicapienhanced/api-enhanced.git NeteaseCloudMusicApi

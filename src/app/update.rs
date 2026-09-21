@@ -649,8 +649,20 @@ impl App {
         if self.state.login.is_some() {
             match action {
                 Action::Cancel => {
+                    // 已经登录成功时，Esc 只是**关掉结果弹窗**——不能再报
+                    // 「已取消登录」。凭证都存好了却弹出这么一句，用户会以为
+                    // 刚才白扫了。
+                    let succeeded = self
+                        .state
+                        .login
+                        .as_ref()
+                        .is_some_and(|state| state.succeeded);
                     self.state.login = None;
-                    self.state.info("已取消登录");
+                    if succeeded {
+                        self.state.success("登录成功");
+                    } else {
+                        self.state.info("已取消登录");
+                    }
                 }
                 Action::Quit => self.state.should_quit = true,
                 Action::ForceQuit => {
