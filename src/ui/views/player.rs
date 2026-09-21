@@ -384,6 +384,12 @@ fn cover_layout(
     };
     let mut rows = max_rows.clamp(COVER_MIN_ROWS, COVER_MAX_ROWS);
 
+    // 填满模式：调用方已经把框做成正方形（见 square_side），图直接铺满整个
+    // inner——不留上下或左右黑边。
+    if fill_height {
+        return Some((inner, inner));
+    }
+
     // 填满模式：忽略原图宽高比，强制正方形 + 边长取 inner 允许的最大值。
     //
     // 否则按真实比例算 columns（横图 columns 大于 rows），如果 columns 仍小于
@@ -539,10 +545,28 @@ pub fn render_cover_page(frame: &mut Frame, area: Rect, state: &mut AppState, th
 }
 
 /// 首页：正在播放的总览——封面在左，曲目信息与歌词在右。
-/// 首页账号区的高度：边框 2 行 + 内容 6 行。
+/// 在 `inner` 里能放下的最大**正方形**封面框的边长（列数, 行数）。
 ///
-/// 6 行是按头像定的：头像要能看清，2 行只能画出 4 列宽的小方块。
-const ACCOUNT_HEIGHT: u16 = 8;
+/// 学 voicefox 的 `CoverGeometry::box_height`——框的尺寸由另一边算出来，而不是
+/// 写死。取正方形是为了让图刚好填满框：框如果比图宽或比图高，多出来的部分就是
+/// 黑边（用户说「空了这么多」的根源）。
+///
+/// 字符是「高:宽 = `cell_aspect`」（通常 2:1），所以正方形意味着
+/// `columns = rows * cell_aspect`。
+fn square_side(inner: Rect, cell_aspect: f32) -> (u16, u16) {
+    let cell_aspect = cell_aspect.max(0.1);
+    // 先按可用高度试：这么多行需要多少列
+    let rows = inner.height;
+    let columns = (f32::from(rows) * cell_aspect).round() as u16;
+    if columns <= inner.width {
+        // 高度受限：能放下
+        return (columns.max(1), rows.max(1));
+    }
+    // 宽度受限：按宽度反推行数
+    let columns = inner.width;
+    let rows = ((f32::from(columns) / cell_aspect).round() as u16).max(1);
+    (columns, rows.min(inner.height))
+}
 
 /// 头像占的列数：6 行内容 × 字符高宽比 2 = 12 列。
 const AVATAR_COLUMNS: u16 = 12;
@@ -669,13 +693,33 @@ pub fn render_home(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &
     if inner.width >= 60 {
         let [left, right] =
             Layout::horizontal([Constraint::Percentage(45), Constraint::Min(24)]).areas(inner);
-        // 左栏再竖着切：封面占大部分，底下给账号信息留一块固定高度
-        let [cover_col, account_col] =
-            Layout::vertical([Constraint::Min(6), Constraint::Length(ACCOUNT_HEIGHT)]).areas(left);
+
+        // 封面框做成**正方形**（学 voicefox 的 `box_height`：框的尺寸由另一边算出来）。
+        //
+        // 之前框高是写死的（占剩余空间 / 占一半），图按自己比例算出来比框小，
+        // 于是框里留出上下或左右的黑边。现在反过来：先按可用空间定正方形边长，
+        // 框刚好等于图，黑边就没有了。
+        let cell_aspect = state.config.qr_aspect.max(0.1);
+        let (side_columns, side_rows) = square_side(left, cell_aspect);
+        // 边框上下左右各 1，所以框比内容大 2
+        let box_height = side_rows.saturating_add(2).min(left.height);
+        let box_width = side_columns.saturating_add(2).min(left.width);
+        // 正方形框在左栏里水平居中
+        let box_x = left.x + left.width.saturating_sub(box_width) / 2;
+        let cover_col = Rect::new(box_x, left.y, box_width, box_height);
+
         let left_block = panel("封面", false, theme);
         let left_inner = left_block.inner(cover_col);
         frame.render_widget(left_block, cover_col);
         let _ = draw_cover_block(frame, left_inner, state, theme, true);
+
+        // 封面框下方剩下的空间给账号信息
+        let account_col = Rect::new(
+            left.x,
+            left.y + box_height,
+            left.width,
+            left.height.saturating_sub(box_height),
+        );
         render_account(frame, account_col, state, theme);
         render_lyric(frame, right, state, theme);
     } else {
