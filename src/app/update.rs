@@ -2078,8 +2078,19 @@ impl App {
 
     /// 登录态由服务端持有时的收尾：没有凭据可存，只更新界面状态。
     fn finish_server_side_login(&mut self) {
+        tlog!(
+            crate::logger::LEVEL_INFO,
+            "[诊断] finish_server_side_login 被调了，源={:?}，设 logged_in=true 前={}",
+            self.state.config.active_source_kind(),
+            self.state.logged_in
+        );
         let kind = self.state.config.active_source_kind();
         self.state.logged_in = true;
+        tlog!(
+            crate::logger::LEVEL_INFO,
+            "[诊断] finish_server_side_login 设完后 logged_in={}",
+            self.state.logged_in
+        );
         self.finish_login(
             true,
             format!(
@@ -2983,6 +2994,12 @@ impl App {
             }
 
             Loaded::LoginSucceeded { token, userid } => {
+                tlog!(
+                    crate::logger::LEVEL_INFO,
+                    "[诊断] 收到 LoginSucceeded token={:?} userid={:?}",
+                    token.is_some(),
+                    userid.is_some()
+                );
                 match (token, userid) {
                     (Some(token), Some(userid)) => self.apply_login(token, userid),
                     // 登录态由服务端持有（网易云）：客户端没有凭据可存，
