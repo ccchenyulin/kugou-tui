@@ -1078,6 +1078,47 @@ impl AppState {
     }
 
     /// 当前焦点面板对应的歌曲列表（如果该面板确实在展示歌曲）。
+    /// 当前「选中」的那首歌——给 `s`（收藏到云端）、`a`/`i`（加入队列）这类
+    /// 作用于单曲的动作用。
+    ///
+    /// # 为什么不能只用 `focused_songs`
+    ///
+    /// `focused_songs()` 要求焦点落在**歌曲列表**那一栏，于是：
+    ///
+    /// * 焦点停在歌单 / 歌手 / 排行榜的**上半部分**时它返回 `None`；
+    /// * 队列页压根不在它的匹配里（`Tab::Queue` 没有对应分支）。
+    ///
+    /// 两种情况下用户明明选中了一首歌，按 `s` 却报「当前没有选中的歌曲」。
+    /// 所以这里按优先级依次找：
+    ///
+    /// 1. 焦点在队列面板 → 队列里选中的那首；
+    /// 2. 当前标签页的歌曲列表（不管焦点在哪一栏）→ 它的选中项；
+    /// 3. 队列页 → 队列当前这首；
+    /// 4. 都没有（比如在首页、歌词页）→ 正在播放的这首。
+    ///
+    /// 最后这条兜底很重要：用户按 `s` 时心里想的通常是「把正在听的这首收了」，
+    /// 而不是「这一页没有列表所以什么都不做」。
+    pub fn selected_song(&self) -> Option<Song> {
+        if self.focus == Focus::Queue {
+            let index = self.queue_cursor.selected()?;
+            if let Some(song) = self.queue.items().get(index) {
+                return Some(song.clone());
+            }
+        }
+
+        if let Some(song) = self.songs().and_then(|list| list.selected()) {
+            return Some(song.clone());
+        }
+
+        if self.tab == Tab::Queue {
+            if let Some(song) = self.queue.current() {
+                return Some(song.clone());
+            }
+        }
+
+        self.current.clone()
+    }
+
     pub fn focused_songs(&self) -> Option<&SongList> {
         match (self.tab, self.focus) {
             (Tab::Search, Focus::Primary | Focus::Secondary) => Some(&self.search.results),

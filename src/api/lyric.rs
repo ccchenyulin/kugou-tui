@@ -305,53 +305,56 @@ fn parse_fraction(text: &str) -> u64 {
 fn parse_krc_words(text: &str, line_start_ms: u64) -> (String, Vec<LyricWord>) {
     let mut output = String::with_capacity(text.len());
     let mut words: Vec<LyricWord> = Vec::new();
-    let mut buffer = String::new();
-    let mut depth = 0usize;
-    // 真正拿到 \`<…>\` 标记的字有几个。字数不等于它就必须放弃逐字信息——
-    // 只比对 \`words.len()\` 是没用的：每个字都会先占位，两者永远相等。
-    let mut tagged = 0usize;
 
-    for character in text.chars() {
-        match character {
-            '<' => {
-                depth += 1;
-                buffer.clear();
-            }
-            '>' => {
-                depth = depth.saturating_sub(1);
-                let mut parts = buffer.split(',');
-                let offset: u64 = parts
-                    .next()
-                    .and_then(|v| v.trim().parse().ok())
-                    .unwrap_or(0);
-                let duration: u64 = parts
-                    .next()
-                    .and_then(|v| v.trim().parse().ok())
-                    .unwrap_or(0);
-                // 标记描述的是**它前面**那个字
-                if let Some(word) = words.last_mut() {
-                    word.start_ms = line_start_ms + offset;
-                    word.end_ms = word.start_ms + duration;
-                    tagged += 1;
-                }
-            }
-            _ if depth == 0 => {
-                output.push(character);
-                // 先占位（起止都设为行起始），后面的 `<…>` 会填上真实时间
-                words.push(LyricWord {
-                    start_ms: line_start_ms,
-                    end_ms: line_start_ms,
-                });
-            }
-            _ => buffer.push(character),
-        }
+    // 整行没有任何 `<…>`（普通 LRC）：原样返回文本、逐字信息留空。
+    // 少了这一步会把纯 LRC 的歌词清成空字符串——歌词直接消失。
+    if !text.contains('<') {
+        return (text.trim().to_string(), Vec::new());
     }
 
-    // 逐字信息不完整就整体放弃：宁可退回整行高亮，也不要错位的歌词
-    if tagged != output.chars().count() {
+    // 逐字单元写作 `<本行内偏移,持续,0>文本`——**标记在文本前面**（KRC 标准写法，
+    // 与 MoeKoeMusic 的 /<(\d+),(\d+),\d+>([^<]+)/g 一致）。
+    //
+    // 文本可以不止一个字符：实测见过 `<1600,160,0>Jay`，所以按「一段标记 + 它后面
+    // 直到下一个 `<` 之前的所有字符」来切，同一段里的字符共用一组时间
+    // （MoeKoeMusic 也是把 `Jay` 当一个单元整体高亮）。
+    let mut rest = text;
+    while let Some(open) = rest.find('<') {
+        let after_open = &rest[open + 1..];
+        let Some(close) = after_open.find('>') else {
+            break;
+        };
+        let mut parts = after_open[..close].split(',');
+        let offset: u64 = parts
+            .next()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0);
+        let duration: u64 = parts
+            .next()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0);
+
+        // 标记之后、下一个 `<`（或行尾）之前的所有字符都属于这一单元
+        let body = &after_open[close + 1..];
+        let stop = body.find('<').unwrap_or(body.len());
+        let segment = &body[..stop];
+
+        let start_ms = line_start_ms + offset;
+        let end_ms = start_ms + duration;
+        for character in segment.chars() {
+            output.push(character);
+            words.push(LyricWord { start_ms, end_ms });
+        }
+        rest = &body[stop..];
+    }
+
+    // 一个逐字单元都没有（普通 LRC、或这行没标记）就返回空，
+    // 调用方退回整行高亮——宁可少个效果，也不能让歌词和时间错位。
+    let trimmed = output.trim().to_string();
+    if words.is_empty() || words.len() != trimmed.chars().count() {
         words.clear();
     }
-    (output.trim().to_string(), words)
+    (trimmed, words)
 }
 
 /// 去掉 KRC 的内联标记 `<起始偏移,持续时长,0>`。
@@ -700,7 +703,8 @@ mod tests {
 
     #[test]
     fn strips_krc_inline_markup() {
-        let lyric = parse_lrc("[1000,500]海<100,200,0>阔<300,200,0>天空\n");
+        // 真实 KRC：标记在**字前面**
+        let lyric = parse_lrc("[1000,500]<100,200,0>海<300,200,0>阔天空\n");
         assert_eq!(lyric.lines[0].text, "海阔天空");
     }
 
@@ -734,9 +738,9 @@ mod tests {
     /// 绝对时间 = 行起始 + 偏移。
     #[test]
     fn parses_per_word_timestamps() {
-        // 行起始 1000ms，「这是测试」四个字各带一个标记
+        // 真实 KRC 的写法：标记在**字前面**。行起始 1000ms。
         let (text, words) =
-            parse_krc_words("这<0,200,0>是<200,300,0>测<500,200,0>试<700,200,0>", 1000);
+            parse_krc_words("<0,200,0>这<200,300,0>是<500,200,0>测<700,200,0>试", 1000);
         assert_eq!(text, "这是测试");
         assert_eq!(words.len(), text.chars().count());
         assert_eq!(
@@ -769,14 +773,86 @@ mod tests {
         );
     }
 
+    /// 一个标记可以管好几个字符（真实数据里见过 `<1600,160,0>Jay`），
+    /// 同一段内的字符共用一组时间——和 MoeKoeMusic 的整体高亮保持一致。
+    #[test]
+    fn a_single_tag_covers_multiple_characters() {
+        let (text, words) = parse_krc_words("<0,300,0>周<300,300,0>Jay", 2000);
+        assert_eq!(text, "周Jay");
+        assert_eq!(words.len(), text.chars().count());
+        // "周" 单独一个单元
+        assert_eq!(
+            words[0],
+            LyricWord {
+                start_ms: 2000,
+                end_ms: 2300
+            }
+        );
+        // "Jay" 三个字符共用同一组时间
+        for word in &words[1..] {
+            assert_eq!(
+                *word,
+                LyricWord {
+                    start_ms: 2300,
+                    end_ms: 2600
+                }
+            );
+        }
+    }
+
+    /// 照抄真实响应里的一行（晴天的第一句），确保端到端格式对得上。
+    #[test]
+    fn parses_a_real_krc_line() {
+        let line = "[0,2250]<0,160,0>晴<160,160,0>天<320,160,0> <480,160,0>-<640,160,0> <800,160,0>周<960,160,0>杰<1120,160,0>伦";
+        let (timestamps, remainder) = consume_time_tags(line);
+        assert_eq!(timestamps, vec![0]);
+        let (text, words) = parse_krc_words(remainder, 0);
+        assert_eq!(text, "晴天 - 周杰伦");
+        assert_eq!(words.len(), text.chars().count());
+        // 第一个字 0~160ms，第二个 160~320ms
+        assert_eq!(
+            words[0],
+            LyricWord {
+                start_ms: 0,
+                end_ms: 160
+            }
+        );
+        assert_eq!(
+            words[1],
+            LyricWord {
+                start_ms: 160,
+                end_ms: 320
+            }
+        );
+    }
+
+    /// 普通 LRC（没有任何逐字标记）→ 逐字信息为空，调用方退回整行高亮。
+    #[test]
+    fn plain_text_has_no_word_timestamps() {
+        let (text, words) = parse_krc_words("这是一句普通的歌词", 1000);
+        assert_eq!(text, "这是一句普通的歌词");
+        assert!(words.is_empty());
+    }
+
     /// 字数与标记数对不上就**整体放弃**逐字信息——猜出来的时间会让歌词
     /// 唱得和声音错位，比没效果更糟。调用方会退回整行高亮。
     #[test]
-    fn discards_word_timestamps_when_count_mismatches() {
-        // 三个字但只有两个标记
-        let (text, words) = parse_krc_words("这<0,200,0>是<200,300,0>测试", 1000);
+    fn words_always_line_up_with_text() {
+        // 真实格式下每个字符都会配到一组时间，所以 text 与 words 必须严格
+        // 一一对应——这是渲染逐字高亮的前提，错位就会「唱的和亮的对不上」。
+        let (text, words) = parse_krc_words("<0,200,0>这<200,300,0>是测试", 1000);
         assert_eq!(text, "这是测试");
-        assert!(words.is_empty(), "标记数不足必须整体放弃");
+        assert_eq!(words.len(), text.chars().count());
+        // "是测试" 三个字共用了第二段的时间
+        for word in &words[1..] {
+            assert_eq!(
+                *word,
+                LyricWord {
+                    start_ms: 1200,
+                    end_ms: 1500
+                }
+            );
+        }
     }
 
     /// 一个字在不同进度下的三态：未唱 / 正在唱 / 已唱。

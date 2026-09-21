@@ -1781,11 +1781,7 @@ impl App {
     // ==================================================================
 
     fn queue_focused_song(&mut self, play_next: bool) {
-        let Some(song) = self
-            .state
-            .focused_songs()
-            .and_then(|songs| songs.selected().cloned())
-        else {
+        let Some(song) = self.state.selected_song() else {
             self.state.warn("当前没有选中的歌曲");
             return;
         };
@@ -2403,11 +2399,7 @@ impl App {
             return;
         }
 
-        let Some(song) = self
-            .state
-            .focused_songs()
-            .and_then(|list| list.selected().cloned())
-        else {
+        let Some(song) = self.state.selected_song() else {
             self.state.warn("当前没有选中的歌曲");
             return;
         };
@@ -2507,11 +2499,7 @@ impl App {
             self.state.error("该歌单不可写（缺少 listid）");
             return;
         };
-        let Some(song) = self
-            .state
-            .focused_songs()
-            .and_then(|songs| songs.selected().cloned())
-        else {
+        let Some(song) = self.state.selected_song() else {
             self.state.warn("当前没有选中的歌曲");
             return;
         };
