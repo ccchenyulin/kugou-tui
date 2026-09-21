@@ -212,11 +212,17 @@ impl App {
         // 30fps。终端里再往上（60fps）看不出差别，但重绘成本是线性的，
         // 白白吃掉「低资源占用」这个卖点，所以取这个折中值。
         const ANIMATED_TICK_MS: u64 = 33;
+        /// 简易模式的刷新间隔下限（5fps）。再慢界面就拖了。
+        const LITE_TICK_MS: u64 = 200;
         let base = self.state.config.tick_ms;
         let animating =
             self.state.tab == Tab::Visualizer && self.state.playback == PlaybackState::Playing;
 
-        let millis = if animating && base > ANIMATED_TICK_MS {
+        // 简易模式：不做动画提速，并且把刷新压到 5fps（200ms）——省下的都是
+        // CPU 与重绘，听歌不受影响。
+        let millis = if self.state.config.lite_mode {
+            base.max(LITE_TICK_MS)
+        } else if animating && base > ANIMATED_TICK_MS {
             ANIMATED_TICK_MS
         } else {
             base

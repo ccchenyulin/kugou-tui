@@ -71,7 +71,8 @@ pub fn cover() -> &'static str {
 }
 
 pub fn visualizer() -> &'static str {
-    icon("\u{f6fe}", "=")
+    // 面积图（area-chart）比波形（U+F6FE）更像频谱柱状，码点也更常见
+    icon("\u{f1fe}", "^")
 }
 
 pub fn sources() -> &'static str {

@@ -36,12 +36,14 @@ pub enum Setting {
     LyricPanel,
     /// 侧边栏（标签导航）。
     Sidebar,
+    /// 简易模式：关封面与频谱，省内存和 CPU。
+    LiteMode,
     /// 单曲下载到哪个目录（只能选预设的几个常见位置）。
     DownloadDir,
 }
 
 impl Setting {
-    pub const ALL: [Setting; 11] = [
+    pub const ALL: [Setting; 12] = [
         Self::Theme,
         Self::Quality,
         Self::PlaybackMode,
@@ -52,6 +54,7 @@ impl Setting {
         Self::BasicColor,
         Self::LyricPanel,
         Self::Sidebar,
+        Self::LiteMode,
         Self::DownloadDir,
     ];
 
@@ -68,6 +71,7 @@ impl Setting {
             Self::BasicColor => "16 色模式",
             Self::LyricPanel => "歌词面板",
             Self::Sidebar => "侧边导航",
+            Self::LiteMode => "简易模式",
             Self::DownloadDir => "下载目录",
         }
     }
@@ -85,6 +89,7 @@ impl Setting {
             Self::BasicColor => "老终端画不出真彩时打开",
             Self::LyricPanel => "右侧歌词栏（快捷键 y）",
             Self::Sidebar => "左侧标签导航（快捷键 b）",
+            Self::LiteMode => "关封面与频谱，省内存和 CPU",
             Self::DownloadDir => "下载单曲保存到这里（默认 ~/Music）",
         }
     }
@@ -157,6 +162,7 @@ pub fn value_text(setting: Setting, state: &AppState) -> String {
         Setting::BasicColor => toggle_text(state.config.basic_color),
         Setting::LyricPanel => toggle_text(state.show_lyric_panel),
         Setting::Sidebar => toggle_text(state.sidebar_visible),
+        Setting::LiteMode => toggle_text(state.config.lite_mode),
         Setting::DownloadDir => expand_download_dir(state.config.download_dir.as_deref()),
     }
 }

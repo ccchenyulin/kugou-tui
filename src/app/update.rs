@@ -165,6 +165,7 @@ impl App {
             MouseEventKind::ScrollDown => self.scroll_list_at(&mouse, 1),
             MouseEventKind::ScrollUp => self.scroll_list_at(&mouse, -1),
             MouseEventKind::Down(MouseButton::Left) => self.click_at(&mouse),
+            MouseEventKind::Down(MouseButton::Right) => self.right_click_at(&mouse),
             _ => {}
         }
     }
@@ -204,6 +205,42 @@ impl App {
             }
             HitTarget::Progress => self.click_progress(zone, mouse),
             HitTarget::Settings => self.click_setting(zone, mouse),
+        }
+    }
+
+    /// 右键：对光标下那一行的歌做「最常用的那个动作」。
+    ///
+    /// 左键已经占了「选中 / 双击播放」，右键补的是加队列（`a`）与移出队列（`x`）——
+    /// 终端里真正高频的就这两个。
+    ///
+    /// **不做上下文菜单**：菜单要浮在内容上，小屏时会盖掉半屏，而这里需要的操作
+    /// 就一个，弹菜单是拿空间换没用到的灵活性。
+    fn right_click_at(&mut self, mouse: &MouseEvent) {
+        let Some(zone) = self.state.hit_test(mouse.column, mouse.row) else {
+            return;
+        };
+        let Some(index) = zone.index_at(mouse.row) else {
+            return;
+        };
+
+        match zone.target {
+            // 搜索结果 / 歌曲列表：选中该行并加进队列（等同 a）
+            HitTarget::Entries | HitTarget::Songs => {
+                match zone.target {
+                    HitTarget::Entries => self.state.select_entry_index(index),
+                    HitTarget::Songs => self.state.select_song_index(index),
+                    _ => {}
+                }
+                self.focus_hit_target(zone.target);
+                self.queue_focused_song(false);
+            }
+            // 队列里：选中并从队列移除（等同 x）。队列行再加一次队列没有意义。
+            HitTarget::Queue => {
+                self.focus_hit_target(zone.target);
+                self.state.queue_cursor.select(Some(index));
+                self.remove_selected_from_queue();
+            }
+            HitTarget::Tab(_) | HitTarget::Progress | HitTarget::Settings => {}
         }
     }
 
@@ -488,6 +525,17 @@ impl App {
             s::Setting::Sidebar => {
                 if delta != 0 {
                     self.state.sidebar_visible = !self.state.sidebar_visible;
+                }
+            }
+            // 简易模式进配置文件：它是「这台机器要不要省资源」的长期选择，
+            // 不像歌词面板那样只关乎这一次会话。
+            s::Setting::LiteMode => {
+                if delta != 0 {
+                    config.lite_mode = !config.lite_mode;
+                    // 关掉封面就把已解码的那张也扔了，否则内存不会降
+                    if config.lite_mode {
+                        self.state.cover = crate::app::state::CoverArt::default();
+                    }
                 }
             }
             // 路径用 Cycle 在几个预设之间切，配置文件里空着也行
@@ -3168,6 +3216,21 @@ impl App {
     ///
     /// 失败只记日志：封面是锦上添花，不能因为它让播放流程报错。
     fn load_cover(&mut self, song: &Song) {
+        // 简易模式：封面是最占内存的一块（图片解码 + 图形协议），直接不取。
+        // 与其取完再扔，不如从源头省掉这次下载与解码。
+        if self.state.config.lite_mode {
+            if !self
+                .state
+                .cover
+                .hash
+                .as_deref()
+                .unwrap_or_default()
+                .is_empty()
+            {
+                self.state.cover = CoverArt::default();
+            }
+            return;
+        }
         // 已经有这张封面就不用重复取
         if self.state.cover.belongs_to(&song.hash) && self.state.cover.is_drawable() {
             return;
@@ -3304,8 +3367,9 @@ impl App {
         self.state.levels = self.audio.levels();
         // 频谱只在可视化页且真的在播时算：一次 2048 点 FFT 只要零点几毫秒，
         // 但为所有页面每帧都付这份钱没必要——别的页面根本不显示它。
-        let wants_spectrum =
-            self.state.tab == Tab::Visualizer && self.state.playback == PlaybackState::Playing;
+        let wants_spectrum = !self.state.config.lite_mode
+            && self.state.tab == Tab::Visualizer
+            && self.state.playback == PlaybackState::Playing;
         if wants_spectrum {
             self.state.spectrum = self.audio.spectrum(BAND_COUNT);
         } else {

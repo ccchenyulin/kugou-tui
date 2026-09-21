@@ -121,6 +121,16 @@ pub struct Config {
     #[serde(default = "default_qr_aspect")]
     pub qr_aspect: f32,
 
+    /// 简易模式：关掉吃内存和 CPU 的那几样，换更低的占用。
+    ///
+    /// 开启后：不下载/解码封面（省掉图片解码与图形协议的开销，是最占内存的一
+    /// 块）、不画实时频谱、刷新间隔降到 5fps。听歌本身不受影响。
+    ///
+    /// 实测正常模式播放中约 16.8 MiB（VmRSS），关掉这几样能再降一截——在低配
+    /// 机器或电池供电时有用。
+    #[serde(default)]
+    pub lite_mode: bool,
+
     /// 各音源的连接与身份配置，以及当前选中的音源。
     ///
     /// 切换音源时，`api_base` / `cookie` / `dfid` 会从选中的音源同步过来。
@@ -152,6 +162,7 @@ impl Default for Config {
             download_dir: None,
             keymap: std::collections::BTreeMap::new(),
             qr_aspect: default_qr_aspect(),
+            lite_mode: false,
             sources: SourceSet::default(),
         }
     }
