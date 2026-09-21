@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Gauge, ListState, Paragraph};
 use ratatui_image::StatefulImage;
 
-use crate::api::model::format_duration_ms;
+use crate::api::model::{WordState, format_duration_ms};
 use crate::app::queue::PlayQueue;
 use crate::app::state::{AppState, HitTarget};
 use crate::audio::engine::PlaybackState;
@@ -182,6 +182,9 @@ pub fn render_lyric(frame: &mut Frame, area: Rect, state: &mut AppState, theme: 
     let max_offset = display.len().saturating_sub(viewport);
     let offset = focus_display.saturating_sub(viewport / 2).min(max_offset);
 
+    // 逐字着色要用当前播放位置，取一次即可（毫秒）
+    let position_ms = state.position_ms;
+
     let lines: Vec<Line> = display
         .iter()
         .skip(offset)
@@ -189,14 +192,39 @@ pub fn render_lyric(frame: &mut Frame, area: Rect, state: &mut AppState, theme: 
         .map(|(index, is_translation, text)| {
             // 译文始终暗一档（包括"当前行"的译文），只有原文才有活动态高亮，
             // 这样一眼能看出「上面那行亮的是原文，下面那行是它的译文」。
-            let style = if *is_translation {
-                theme.dim()
-            } else if Some(*index) == active {
-                theme.lyric_active()
-            } else {
-                theme.lyric_idle()
-            };
-            Line::from(Span::styled(text.clone(), style))
+            if *is_translation {
+                return Line::from(Span::styled(text.clone(), theme.dim()));
+            }
+            if Some(*index) != active {
+                return Line::from(Span::styled(text.clone(), theme.lyric_idle()));
+            }
+
+            // 当前行：拿得到逐字时间戳就逐字染色（唱到哪亮到哪），
+            // 拿不到就退回整行高亮——绝不为了效果让歌词和时间错位。
+            let words = state
+                .lyric
+                .lyric
+                .lines
+                .get(*index)
+                .map(|line| line.words.as_slice())
+                .unwrap_or(&[]);
+            if words.len() != text.chars().count() {
+                return Line::from(Span::styled(text.clone(), theme.lyric_active()));
+            }
+
+            let spans: Vec<Span> = text
+                .chars()
+                .zip(words.iter())
+                .map(|(character, word)| {
+                    let style = match word.state_at(position_ms) {
+                        WordState::Sung => theme.lyric_sung(),
+                        WordState::Singing => theme.lyric_singing(),
+                        WordState::Pending => theme.lyric_pending(),
+                    };
+                    Span::styled(character.to_string(), style)
+                })
+                .collect();
+            Line::from(spans)
         })
         .collect();
 

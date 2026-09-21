@@ -197,6 +197,45 @@ pub struct LyricLine {
     pub translation: Option<String>,
     /// 该行的音译（罗马音，若有）。来自 `type == 0` 的轨道。
     pub romanization: Option<String>,
+    /// 逐字时间戳（KRC 才有，与 [`Self::text`] 的字符**一一对应**）。
+    ///
+    /// 为空表示拿不到逐字信息（LRC 格式、或这行的标记数与字数对不上），
+    /// 此时退回整行高亮——宁可少个效果，也不能让歌词和时间错位。
+    #[serde(default)]
+    pub words: Vec<LyricWord>,
+}
+
+/// 一个字的起止时间（毫秒，绝对时间轴）。
+///
+/// KRC 里写作 `字<该字在本行的偏移毫秒,该字持续毫秒,0>`，绝对时间 = 行起始 + 偏移。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LyricWord {
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
+impl LyricWord {
+    /// 该字在 `position_ms` 时刻的状态。用于逐字染色（卡拉 OK 效果）。
+    pub fn state_at(self, position_ms: u64) -> WordState {
+        if position_ms >= self.end_ms {
+            WordState::Sung
+        } else if position_ms >= self.start_ms {
+            WordState::Singing
+        } else {
+            WordState::Pending
+        }
+    }
+}
+
+/// 一个字相对于当前播放进度的状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WordState {
+    /// 已经唱过。
+    Sung,
+    /// 正在唱。
+    Singing,
+    /// 还没到。
+    Pending,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1017,18 +1056,21 @@ mod tests {
                     text: "第一句".into(),
                     translation: None,
                     romanization: None,
+                    words: Vec::new(),
                 },
                 LyricLine {
                     time_ms: 5_000,
                     text: "第二句".into(),
                     translation: None,
                     romanization: None,
+                    words: Vec::new(),
                 },
                 LyricLine {
                     time_ms: 9_000,
                     text: "第三句".into(),
                     translation: None,
                     romanization: None,
+                    words: Vec::new(),
                 },
             ],
         };

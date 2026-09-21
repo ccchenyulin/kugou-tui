@@ -21,7 +21,9 @@ use serde_json::Value;
 
 use crate::api::client::ApiClient;
 use crate::api::data_of;
-use crate::api::model::{Lyric, LyricLine, Song, pick_string};
+#[cfg(test)]
+use crate::api::model::WordState;
+use crate::api::model::{Lyric, LyricLine, LyricWord, Song, pick_string};
 use crate::error::{AppError, Result};
 
 impl ApiClient {
@@ -197,17 +199,18 @@ pub fn parse_lrc(text: &str) -> Lyric {
             continue;
         }
 
-        let content = clean_krc_markup(remainder);
-        if content.is_empty() {
-            continue;
-        }
-
+        // 逐字时间戳是相对**本行起始**的，所以每个重复时间标签都要各解析一次
         for time_ms in timestamps {
+            let (content, words) = parse_krc_words(remainder, time_ms);
+            if content.is_empty() {
+                continue;
+            }
             lines.push(LyricLine {
                 time_ms,
-                text: content.clone(),
+                text: content,
                 translation: None,
                 romanization: None,
+                words,
             });
         }
     }
@@ -287,6 +290,68 @@ fn parse_fraction(text: &str) -> u64 {
         // 超过 3 位就截断，不四舍五入——歌词对齐差 1ms 无感
         _ => digits[..3].parse().unwrap_or(0),
     }
+}
+
+/// 拆出纯文本，并保留每个字的时间戳。
+///
+/// KRC 的逐字信息写在一行里：`这<0,200,0>是<200,300,0>测试`
+/// ——`<本行内偏移毫秒,持续毫秒,0>` 跟在它所描述的那个字**后面**。
+///
+/// # 字数与标记数必须一致才返回逐字信息
+///
+/// 少一个标记就没法确定剩下那些字的时间。这种情况返回**空** `words`
+/// （调用方退回整行高亮），而不是猜一个——猜出来的时间会让整行歌词
+/// 唱得和声音对不上，比没有效果更糟。
+fn parse_krc_words(text: &str, line_start_ms: u64) -> (String, Vec<LyricWord>) {
+    let mut output = String::with_capacity(text.len());
+    let mut words: Vec<LyricWord> = Vec::new();
+    let mut buffer = String::new();
+    let mut depth = 0usize;
+    // 真正拿到 \`<…>\` 标记的字有几个。字数不等于它就必须放弃逐字信息——
+    // 只比对 \`words.len()\` 是没用的：每个字都会先占位，两者永远相等。
+    let mut tagged = 0usize;
+
+    for character in text.chars() {
+        match character {
+            '<' => {
+                depth += 1;
+                buffer.clear();
+            }
+            '>' => {
+                depth = depth.saturating_sub(1);
+                let mut parts = buffer.split(',');
+                let offset: u64 = parts
+                    .next()
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                let duration: u64 = parts
+                    .next()
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                // 标记描述的是**它前面**那个字
+                if let Some(word) = words.last_mut() {
+                    word.start_ms = line_start_ms + offset;
+                    word.end_ms = word.start_ms + duration;
+                    tagged += 1;
+                }
+            }
+            _ if depth == 0 => {
+                output.push(character);
+                // 先占位（起止都设为行起始），后面的 `<…>` 会填上真实时间
+                words.push(LyricWord {
+                    start_ms: line_start_ms,
+                    end_ms: line_start_ms,
+                });
+            }
+            _ => buffer.push(character),
+        }
+    }
+
+    // 逐字信息不完整就整体放弃：宁可退回整行高亮，也不要错位的歌词
+    if tagged != output.chars().count() {
+        words.clear();
+    }
+    (output.trim().to_string(), words)
 }
 
 /// 去掉 KRC 的内联标记 `<起始偏移,持续时长,0>`。
@@ -663,5 +728,68 @@ mod tests {
         // "abc" 的 base64
         let root = json!({"content": "YWJj"});
         assert_eq!(extract_lyric_text(&root), "abc");
+    }
+
+    /// 逐字时间戳：`<本行内偏移,持续,0>` 跟在它描述的那个字后面，
+    /// 绝对时间 = 行起始 + 偏移。
+    #[test]
+    fn parses_per_word_timestamps() {
+        // 行起始 1000ms，「这是测试」四个字各带一个标记
+        let (text, words) =
+            parse_krc_words("这<0,200,0>是<200,300,0>测<500,200,0>试<700,200,0>", 1000);
+        assert_eq!(text, "这是测试");
+        assert_eq!(words.len(), text.chars().count());
+        assert_eq!(
+            words[0],
+            LyricWord {
+                start_ms: 1000,
+                end_ms: 1200
+            }
+        );
+        assert_eq!(
+            words[1],
+            LyricWord {
+                start_ms: 1200,
+                end_ms: 1500
+            }
+        );
+        assert_eq!(
+            words[2],
+            LyricWord {
+                start_ms: 1500,
+                end_ms: 1700
+            }
+        );
+        assert_eq!(
+            words[3],
+            LyricWord {
+                start_ms: 1700,
+                end_ms: 1900
+            }
+        );
+    }
+
+    /// 字数与标记数对不上就**整体放弃**逐字信息——猜出来的时间会让歌词
+    /// 唱得和声音错位，比没效果更糟。调用方会退回整行高亮。
+    #[test]
+    fn discards_word_timestamps_when_count_mismatches() {
+        // 三个字但只有两个标记
+        let (text, words) = parse_krc_words("这<0,200,0>是<200,300,0>测试", 1000);
+        assert_eq!(text, "这是测试");
+        assert!(words.is_empty(), "标记数不足必须整体放弃");
+    }
+
+    /// 一个字在不同进度下的三态：未唱 / 正在唱 / 已唱。
+    #[test]
+    fn word_state_follows_playback_position() {
+        let word = LyricWord {
+            start_ms: 1000,
+            end_ms: 1200,
+        };
+        assert_eq!(word.state_at(900), WordState::Pending);
+        assert_eq!(word.state_at(1000), WordState::Singing);
+        assert_eq!(word.state_at(1100), WordState::Singing);
+        assert_eq!(word.state_at(1200), WordState::Sung);
+        assert_eq!(word.state_at(9999), WordState::Sung);
     }
 }

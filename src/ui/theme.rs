@@ -255,6 +255,31 @@ impl Theme {
         Style::default().fg(self.text_dim)
     }
 
+    // ---- 逐字歌词（卡拉 OK 效果）----
+    //
+    // 终端画不出「宽度裁剪」那种渐变染色，但可以**逐字上色**，效果反而更准：
+    // 每个字按它自己的时间戳决定用哪一档，唱到哪亮到哪。
+
+    /// 已经唱过的字。
+    pub fn lyric_sung(&self) -> Style {
+        Style::default()
+            .fg(self.accent)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    /// **正在唱**的字。比「已唱」再亮一档（用正文色 + 下划线），
+    /// 让眼睛能跟着走——这是逐字效果最关键的那一档。
+    pub fn lyric_singing(&self) -> Style {
+        Style::default()
+            .fg(self.text)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+    }
+
+    /// 还没唱到的字。
+    pub fn lyric_pending(&self) -> Style {
+        Style::default().fg(self.text_dim)
+    }
+
     /// 状态栏消息按级别取色。
     pub fn status(&self, level: crate::app::state::StatusLevel) -> Style {
         use crate::app::state::StatusLevel;
