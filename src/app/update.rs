@@ -3542,7 +3542,17 @@ impl App {
     fn tick(&mut self) {
         self.state.ticks = self.state.ticks.wrapping_add(1);
         self.state.playback = self.audio.state();
-        self.state.position_ms = self.audio.position_ms();
+        // 只在音频引擎真的持有曲目时才用它上报的位置。
+        //
+        // 否则（Stopped）`audio.position_ms()` 返回 0，会把会话恢复出来的进度
+        // 冲掉——表现是：启动瞬间能看到上次的进度，等别的请求回来刷了一帧就
+        // 变回 00:00。按 Space 又回到正确位置，因为那时才重新用 resume 赋值。
+        if matches!(
+            self.state.playback,
+            PlaybackState::Playing | PlaybackState::Paused
+        ) {
+            self.state.position_ms = self.audio.position_ms();
+        }
 
         let duration = self.audio.duration_ms();
         if duration > 0 {
