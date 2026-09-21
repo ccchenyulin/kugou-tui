@@ -83,6 +83,17 @@ const MPRIS_COVER_SIZE: u32 = 400;
 const COVER_WIDTH: usize = 24;
 const COVER_HEIGHT: usize = 12;
 
+/// 未登录时各音源该说什么——按音源分引导路径，否则把网易云用户怼到
+/// 「去配置 cookie」会让人无所适从（网易云没 cookie 这概念）。
+fn not_logged_in_hint(source: SourceKind) -> String {
+    match source {
+        SourceKind::Netease => "云端歌单需要登录，请按 L 扫码登录网易云".to_string(),
+        SourceKind::Kugou | SourceKind::KugouConcept => {
+            "云端歌单需要登录，请配置 cookie（--cookie 或配置文件）".to_string()
+        }
+    }
+}
+
 impl App {
     // ==================================================================
     // 事件分发
@@ -1608,7 +1619,7 @@ impl App {
     pub fn load_cloud_playlists(&mut self) {
         if !self.state.logged_in {
             self.state
-                .warn("云端歌单需要登录，请配置 cookie（--cookie 或配置文件）");
+                .warn(not_logged_in_hint(self.state.config.active_source_kind()));
             return;
         }
 

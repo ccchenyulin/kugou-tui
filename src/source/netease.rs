@@ -252,11 +252,18 @@ pub async fn login_qr_key(client: &ApiClient) -> Result<String> {
 /// 酷狗那套接口返回的就是二维码文本（由 TUI 自己渲染成方块）；网易云这个接口
 /// 默认返回**图片链接**（`qrimg`），要文本得显式带上 `qrimg=false`。
 /// 统一取文本，渲染交给 `qr_lines()`，与酷狗共用一套画法。
+///
+/// `platform=web` 让服务端在 URL 上拼 `chainId`，让 web / App / 二维码扫描器
+/// 都能识别这个登录入口（默认 pc 路径不带 chainId，纯 web 扫码会触发不了授权）。
 pub async fn login_qr_create(client: &ApiClient, key: &str) -> Result<String> {
     let root = client
         .get_json_uncached(
             "/login/qr/create",
-            &[("key", key.to_string()), ("qrimg", "false".to_string())],
+            &[
+                ("key", key.to_string()),
+                ("qrimg", "false".to_string()),
+                ("platform", "web".to_string()),
+            ],
         )
         .await?;
     let data = data_of(&root);

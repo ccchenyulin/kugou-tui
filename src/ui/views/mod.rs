@@ -266,7 +266,12 @@ pub fn render_prompt(frame: &mut Frame, prompt: &PromptState, theme: &Theme) {
 ///
 /// 二维码用 `█` 与空格渲染——终端显示不了接口返回的 PNG，只能自己编码。每个模块横向
 /// 重复一次以修正终端字符的高宽比。
-pub fn render_login(frame: &mut Frame, login: &LoginState, theme: &Theme) {
+pub fn render_login(
+    frame: &mut Frame,
+    login: &LoginState,
+    source: crate::source::SourceKind,
+    theme: &Theme,
+) {
     let popup = crate::ui::widgets::centered_rect(
         frame.area(),
         login.dialog_width(),
@@ -293,7 +298,24 @@ pub fn render_login(frame: &mut Frame, login: &LoginState, theme: &Theme) {
         login.message.clone(),
         theme.title(),
     )));
-    lines.push(Line::from(Span::styled("Esc 取消", theme.dim())));
+
+    // 未结束 + 不是网易云：上面那段说明对酷狗够用了；网易云用户得明确知道用哪个 App。
+    if !login.finished && matches!(source, crate::source::SourceKind::Netease) {
+        lines.push(Line::from(Span::styled(
+            "用网易云 App 扫描（手机端登录入口）",
+            theme.dim(),
+        )));
+    }
+
+    // 已结束的弹窗里已经有结论了，「取消」字样跟原消息打架，改成「关闭」。
+    lines.push(Line::from(Span::styled(
+        if login.finished {
+            "Esc 关闭"
+        } else {
+            "Esc 取消"
+        },
+        theme.dim(),
+    )));
 
     frame.render_widget(
         Paragraph::new(lines)
