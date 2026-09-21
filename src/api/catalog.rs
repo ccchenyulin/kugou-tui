@@ -418,27 +418,23 @@ impl ApiClient {
         if VIPER_QUALITIES.contains(&quality) {
             let fallback = candidates
                 .iter()
-                .map(|(_, candidate_quality, _)| candidate_quality)
+                .map(|(_, candidate_quality)| candidate_quality)
                 .find(|candidate_quality| !VIPER_QUALITIES.contains(&candidate_quality.as_str()))
                 .cloned()
                 .unwrap_or_else(|| VIPER_FALLBACK_QUALITY.to_string());
-            candidates.push((song.hash.clone(), fallback, song.album_audio_id.to_string()));
+            candidates.push((song.hash.clone(), fallback));
         }
 
         let mut last_full = None;
-        for (hash, q, album_audio_id) in &candidates {
-            // 单个候选失败（比如服务端对某个 `album_audio_id` 直接 502）**不能**中断
-            // 整个流程——我们要的是「试出第一个能用的组合」，不是「第一个组合必须成功」。
-            // 之前这里用了 `?`，一个 502 就把能播的组合也一起放弃了。
-            let response = match self
-                .request_song_url_with_hash(song, hash, q, album_audio_id, false)
-                .await
-            {
+        for (hash, q) in &candidates {
+            // 单个候选失败（比如服务端对某个组合直接 502）**不能**中断整个流程
+            // ——我们要的是「试出第一个能用的组合」，不是「第一个组合必须成功」。
+            let response = match self.request_song_url_with_hash(song, hash, q, false).await {
                 Ok(response) => response,
                 Err(error) => {
                     tlog!(
                         crate::logger::LEVEL_DEBUG,
-                        "/song/url 候选失败（hash={hash} quality={q} aid={album_audio_id}）：{}，继续下一个",
+                        "/song/url 候选失败（hash={hash} quality={q}）：{}，继续下一个",
                         error.user_hint()
                     );
                     continue;
@@ -462,13 +458,7 @@ impl ApiClient {
         // 试听兜底：这一路失败也别抛出去了——上面完整版已经试过一轮，能到这里说明
         // 全都没成，应该给用户一个**完整的原因**而不是最后这次的网络错误。
         let trial = self
-            .request_song_url_with_hash(
-                song,
-                &song.hash,
-                quality,
-                &song.album_audio_id.to_string(),
-                true,
-            )
+            .request_song_url_with_hash(song, &song.hash, quality, true)
             .await
             .unwrap_or_else(|error| {
                 tlog!(
@@ -535,16 +525,11 @@ impl ApiClient {
     ///
     /// 所以 `/privilege/lite` 查不到、或者服务端根本没有这个接口（旧版
     /// KuGouMusicApi）时，把整组 hash 挨个试一遍，而不是只抱着失效的那个不放。
-    fn fallback_candidates(song: &Song, quality: &str) -> Vec<(String, String, String)> {
-        let album_audio_id = song.album_audio_id.to_string();
-        let mut candidates = vec![(
-            song.hash.clone(),
-            quality.to_string(),
-            album_audio_id.clone(),
-        )];
+    fn fallback_candidates(song: &Song, quality: &str) -> Vec<(String, String)> {
+        let mut candidates = vec![(song.hash.clone(), quality.to_string())];
         for hash in song.extra_hashes.values() {
             if *hash != song.hash {
-                candidates.push((hash.clone(), quality.to_string(), album_audio_id.clone()));
+                candidates.push((hash.clone(), quality.to_string()));
             }
         }
         candidates
@@ -554,11 +539,7 @@ impl ApiClient {
     ///
     /// 没拿到响应或解析不出候选时，回退到 `fallback_candidates`——这一首歌的所有
     /// hash 挨个试。走老路不一定能拿到，但至少不会因为这个查询失败就整条堵死。
-    async fn privilege_candidates(
-        &self,
-        song: &Song,
-        quality: &str,
-    ) -> Vec<(String, String, String)> {
+    async fn privilege_candidates(&self, song: &Song, quality: &str) -> Vec<(String, String)> {
         let response = match self.request_privilege_lite(song).await {
             Ok(value) => value,
             Err(error) => {
@@ -576,46 +557,10 @@ impl ApiClient {
             // 换这一首歌的其它 hash 再试，别只咬着失效的那个。
             return Self::fallback_candidates(song, quality);
         }
-
-        // 每个候选配**所有已知的文件标识**，挨个试。
-        //
-        // 实测（同一首歌，概念版服务端）：
-        //   - 歌单条目的 `audio_id`（=116104796）→ /song/url 拿到直链 ✅
-        //   - 同一个条目的 `mixsongid`（=330978610）→ status=3、空 url ❌
-        //   - /privilege/lite 返回的那个也是 mixsongid → 同样失败 ❌
-        //
-        // 而搜索接口反过来：`MixSongID` 对、`Audioid` 不一定。两个字段在不同
-        // 接口里各有对错，只信一个就会把一半的歌判成下架。所以全都放进去，
-        // 让服务端挑它认的那个。
-        let mut ids: Vec<String> = Vec::with_capacity(3);
-        for id in [song.album_audio_id, song.audio_id] {
-            if id > 0 {
-                let text = id.to_string();
-                if !ids.contains(&text) {
-                    ids.push(text);
-                }
-            }
-        }
-
-        let mut out = Vec::with_capacity(candidates.len() * (ids.len() + 1));
-        for candidate in candidates {
-            for id in &ids {
-                out.push((
-                    candidate.hash.clone(),
-                    candidate.quality.clone(),
-                    id.clone(),
-                ));
-            }
-            // privilege 自己给的那个也试一下（可能与上面两个都不同）
-            if !candidate.album_audio_id.is_empty() && !ids.contains(&candidate.album_audio_id) {
-                out.push((
-                    candidate.hash.clone(),
-                    candidate.quality.clone(),
-                    candidate.album_audio_id.clone(),
-                ));
-            }
-        }
-        out
+        candidates
+            .into_iter()
+            .map(|candidate| (candidate.hash, candidate.quality))
+            .collect()
     }
 
     /// 问服务端「这个 hash 在登录账号下能听哪几档音质」。
@@ -716,17 +661,15 @@ impl ApiClient {
     /// 而我们未登录时那一步走不通，只能靠这两个字段兜底。
     async fn request_song_url_with_hash(
         &self,
-        song: &Song,
+        _song: &Song,
         hash: &str,
         quality: &str,
-        album_audio_id: &str,
         free_part: bool,
     ) -> Result<Value> {
         let mut query = vec![
             ("hash", hash.to_string()),
-            ("album_id", song.album_id.clone()),
-            ("album_audio_id", album_audio_id.to_string()),
             ("quality", quality.to_string()),
+            ("ppage_id", PPAGE_ID_LITE.to_string()),
         ];
         if free_part {
             query.push(("free_part", "true".to_string()));
@@ -871,6 +814,25 @@ fn fallback_chain(requested: &str) -> Vec<&'static str> {
         .copied()
         .collect()
 }
+
+/// 概念版（lite）的「官方客户端指纹」，照抄 MoeKoeMusic 的写法：
+/// ```js
+/// get('/song/url', { hash, quality, ppage_id: '356753938' })
+/// ```
+///
+/// # 为什么非要传它
+///
+/// 实测同一首歌（歌单里的下架歌，hash=0C9E876A…）：
+///
+/// * 不传 `ppage_id` → 服务端用默认的三段值 `356753938,823673182,967485191`
+///   → `/song/url` 返回 `status=3`、空 url
+/// * 传 `356753938`（单个）→ `status=1`，128/320/flac 全都能拿到直链
+///
+/// 也就是说概念版服务端认的是这**一个**数，多段反而不对。
+///
+/// 标准版不受影响：`song_url.js` 里标准版分支是硬编码、完全忽略客户端传的值，
+/// 所以统一传这个数对两种平台都安全。
+const PPAGE_ID_LITE: &str = "356753938";
 
 /// `/song/url` 的结果。
 pub struct StreamUrl {
@@ -1152,7 +1114,6 @@ mod tests {
             hash: "PRIMARY_HASH".to_string(),
             album_id: "1".to_string(),
             album_audio_id: 0,
-            audio_id: 0,
             album_name: String::new(),
             singers: vec![],
             duration_ms: 0,
@@ -1168,14 +1129,10 @@ mod tests {
         assert_eq!(candidates.len(), 3);
         assert_eq!(
             candidates[0],
-            (
-                "PRIMARY_HASH".to_string(),
-                "128".to_string(),
-                "0".to_string()
-            )
+            ("PRIMARY_HASH".to_string(), "128".to_string())
         );
-        assert!(candidates.iter().any(|(h, _, _)| h == "HASH_320"));
-        assert!(candidates.iter().any(|(h, _, _)| h == "HASH_FLAC"));
+        assert!(candidates.iter().any(|(h, _)| h == "HASH_320"));
+        assert!(candidates.iter().any(|(h, _)| h == "HASH_FLAC"));
     }
 
     /// 没有 extra_hashes 时兜底就只有主 hash 一项，别凭空造数据。
@@ -1186,7 +1143,6 @@ mod tests {
             hash: "ONLY_HASH".to_string(),
             album_id: String::new(),
             album_audio_id: 0,
-            audio_id: 0,
             album_name: String::new(),
             singers: vec![],
             duration_ms: 0,
@@ -1199,7 +1155,7 @@ mod tests {
         let candidates = ApiClient::fallback_candidates(&song, "320");
         assert_eq!(
             candidates,
-            vec![("ONLY_HASH".to_string(), "320".to_string(), "0".to_string())]
+            vec![("ONLY_HASH".to_string(), "320".to_string())]
         );
     }
 
@@ -1230,7 +1186,6 @@ mod tests {
             hash: "h_128".to_string(),
             album_id: String::new(),
             album_audio_id: 116104796,
-            audio_id: 0,
             album_name: String::new(),
             singers: vec![],
             duration_ms: 0,
@@ -1242,9 +1197,8 @@ mod tests {
         };
         let _ = &mut song;
         assert_eq!(
-            ApiClient::fallback_candidates(&song, "128")[0].2,
-            "116104796",
-            "fallback 用的是 Song 自己的 album_audio_id"
+            ApiClient::fallback_candidates(&song, "128")[0],
+            ("h_128".to_string(), "128".to_string())
         );
     }
 
