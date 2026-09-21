@@ -509,10 +509,11 @@ pub fn render_lyric_panel(frame: &mut Frame, area: Rect, state: &mut AppState, t
     render_lyric(frame, rest, state, theme);
 }
 
-/// 歌词页：上方封面、下方歌词。
+/// 歌词页：整块主区只放歌词，不放封面。
 ///
-/// 封面与歌词都是「当前这首歌」的信息，放一起语义最顺。组合方式与首页一致，
-/// 都走 `draw_cover_block`。
+/// 之前是「上方小封面 + 下方歌词」，但封面在首页和封面页都有（而且大得多、
+/// 按真实比例），歌词页这一小块既看不清又白占掉一半高度——歌词能显示的行数
+/// 因此少很多。既然封面别处已经够看了，这里就纯放歌词。
 pub fn render_lyrics_page(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
     let block = panel("歌词", false, theme);
     let inner = block.inner(area);
@@ -522,8 +523,7 @@ pub fn render_lyrics_page(frame: &mut Frame, area: Rect, state: &mut AppState, t
         return;
     }
 
-    let rest = draw_cover_block(frame, inner, state, theme, false);
-    render_lyric(frame, rest, state, theme);
+    render_lyric(frame, inner, state, theme);
 }
 
 /// 封面页：整块主区只放封面，配上曲名与歌手。
