@@ -383,13 +383,20 @@ fn cover_layout(
         inner.height / 2
     };
     let mut rows = max_rows.clamp(COVER_MIN_ROWS, COVER_MAX_ROWS);
-    // 按「图片真实宽高比 × 字符高宽比」算列数（学 voicefox 的 CoverGeometry）。
-    // 以前写死 columns = rows * 2，等于假定所有封面都是正方形 + 字符 2:1——
-    // 碰到 16:9 的头图就会被压扁。
-    let mut columns = (f32::from(rows) * aspect * cell_aspect).round() as u16;
+
+    // 填满模式：忽略原图宽高比，强制正方形 + 边长取 inner 允许的最大值。
+    //
+    // 否则按真实比例算 columns（横图 columns 大于 rows），如果 columns 仍小于
+    // inner.width，居中后左右留下大块黑边——用户看着像没填满。
+    // "填满"优先于"保持原比例"：正方形比拉变形好（横图变正方看起来是裁切）。
+    let mut columns = if fill_height {
+        rows.saturating_mul(2)
+    } else {
+        (f32::from(rows) * aspect * cell_aspect).round() as u16
+    };
     columns = columns.clamp(1, inner.width);
 
-    // 宽度不够就按宽度反推行数，别让封面横向溢出
+    // 太宽就按 inner.width 反算（封面不能横向溢出）
     if columns >= inner.width {
         columns = inner.width;
         rows = (f32::from(columns) / (aspect * cell_aspect)).round() as u16;
@@ -407,8 +414,13 @@ fn cover_layout(
         rest
     };
 
-    // 居中：封面比可用宽度窄时左右留白
-    let x = inner.x + inner.width.saturating_sub(columns) / 2;
+    // 居中：分两半模式居中（左右留白好看）；填满模式靠左上——用户要的就是填满，
+    // 居中后空着右边反而像没填。
+    let x = if fill_height {
+        inner.x
+    } else {
+        inner.x + inner.width.saturating_sub(columns) / 2
+    };
     Some((Rect::new(x, cover_y, columns, rows), rest))
 }
 
