@@ -232,6 +232,72 @@ impl App {
         }
     }
 
+    /// 把队列里的下一首提前下载到缓存（**不播放、不打扰界面**）。
+    ///
+    /// 只做一件事：如果下一首还没缓存，就在后台把它下下来。这样用户按 `n` 切歌时
+    /// 直接命中缓存，不用再等一次几十秒的下载（Hi-Res 那档实测 65 MB，首次播放
+    /// 必然是「转圈半分钟」；预取之后切歌就是秒开）。
+    ///
+    /// # 为什么不复用 `request_stream`
+    ///
+    /// 那条路径下载完会 emit `StreamCached`，而它的处理函数会把「不是当前这首歌」
+    /// 的结果当孤儿**删掉**——预取的正是「下一首」，会被自己删掉。而且它会去
+    /// `audio.load()`，等于打断正在放的这首。所以这里单独走一条静默路径：
+    /// 不设 `download_progress` / `busy`（那会覆盖掉当前播放的进度显示），
+    /// 成功失败都只记日志。
+    fn prefetch_next(&mut self) {
+        let len = self.state.queue.len();
+        if len < 2 {
+            return;
+        }
+        let current = self.state.queue_cursor.selected().unwrap_or(0).min(len - 1);
+        let Some(next) = self.state.queue.items().get(current + 1).cloned() else {
+            return;
+        };
+
+        let quality = self.state.config.quality.clone();
+        // 已缓存就别重复下了
+        if self.cache.find(&next.cache_key(&quality)).is_some() {
+            return;
+        }
+
+        let source = next.source;
+        let api = match self.client_for(source) {
+            Ok(client) => client,
+            Err(_) => return, // 预取失败无所谓，不该弹错误打扰用户
+        };
+        let downloader = self.downloader.clone();
+        let cache = self.cache.clone();
+
+        self.runtime.spawn(async move {
+            let Ok(stream) = source.song_stream_url(&api, &next, &quality).await else {
+                return;
+            };
+            let key = next.cache_key(&quality);
+            let target = cache.path_for(&key, Downloader::extension_from_url(&stream.url));
+            if target.exists() {
+                return;
+            }
+            match downloader
+                .fetch_to(&stream.url, &target, &|_received, _total| {})
+                .await
+            {
+                Ok(bytes) => tlog!(
+                    crate::logger::LEVEL_DEBUG,
+                    "预取《{}》完成（{} 字节）",
+                    next.name,
+                    bytes
+                ),
+                Err(error) => tlog!(
+                    crate::logger::LEVEL_DEBUG,
+                    "预取《{}》失败：{}",
+                    next.name,
+                    error.user_hint()
+                ),
+            }
+        });
+    }
+
     /// 把当前播放的歌曲下载到设置里的目录。
     ///
     /// 设计上的几个选择：
@@ -2737,6 +2803,13 @@ impl App {
                 self.state.download_progress = None;
                 self.state.busy = None;
                 self.audio.load(path, start_at_ms, song.duration_ms);
+
+                // 当前这首已经在放了——趁这会儿把**下一首**悄悄下下来。
+                //
+                // 高音质（Hi-Res 那档实测 65 MB）首次播放要等完整下载，几十秒起步；
+                // 切歌时再下就是「每首都等一遍」。预取之后切到下一首直接命中缓存，
+                // 体验上的差别是「秒开」和「转圈半分钟」。
+                self.prefetch_next();
 
                 // 缓存回收是同步目录扫描，扔到阻塞线程池，别卡住 UI
                 let cache = self.cache.clone();
