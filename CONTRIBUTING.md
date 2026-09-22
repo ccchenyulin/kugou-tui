@@ -5,8 +5,8 @@
 
 ## 先把环境跑起来
 
-1. **Rust 1.85+**（本项目用 edition 2024）。
-2. **Node.js 16+**，用于运行 [KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi)：
+1. **Rust 1.86+**（本项目用 edition 2024；下限由 `ratatui-image` 11.x 决定）。
+2. **Node.js 12+**，用于运行 [KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi)：
 
    ```bash
    git clone https://github.com/MakcRe/KuGouMusicApi.git

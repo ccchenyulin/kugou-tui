@@ -18,7 +18,9 @@ use crate::audio::engine::PlaybackState;
 use crate::config::CoverFill;
 use crate::ui::theme::{Theme, mix};
 use crate::ui::views::{empty_placeholder, loading_placeholder};
-use crate::ui::widgets::{RowContext, panel, selection_list, song_row, truncate_to_width};
+use crate::ui::widgets::{
+    RowContext, display_width, panel, selection_list, song_row, truncate_to_width,
+};
 
 /// 播放条高度：2 行内容 + 上下边框。
 ///
@@ -84,8 +86,12 @@ fn render_song_info(frame: &mut Frame, area: Rect, state: &AppState, theme: &The
     };
 
     // 右侧：下一首 + 音量 + 循环模式。宽度不够就整段不画，别把歌名挤没了。
+    //
+    // 宽度必须按**显示宽度**算，不能按字符数：`下一首 <歌名>` 里歌名常是中文，
+    // 一个字符占两列，按字符数算出来的宽度会明显偏小——明明有空间，
+    // 右侧那段却被 `truncate_to_width` 截成「下一首 WE GO · 播放中 · …」。
     let right_text = next_up_text(state);
-    let right_width = (right_text.chars().count() as u16).min(area.width / 2);
+    let right_width = (display_width(&right_text) as u16).min(area.width / 2);
     let show_right = !right_text.is_empty() && area.width >= 60;
 
     let (left_area, right_area) = if show_right {

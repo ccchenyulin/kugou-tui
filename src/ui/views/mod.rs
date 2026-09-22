@@ -187,7 +187,7 @@ pub fn render_sidebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &T
 /// 也不要显示一个认不出来的空值。
 fn dir_basename(path: &std::path::Path) -> String {
     // 用 to_string_lossy 而非 OsStr::display()：后者要 Rust 1.87，
-    // 项目 MSRV 是 1.85，用了 clippy 会报 MSRV 错误
+    // 项目 MSRV 是 1.86，用了 clippy 会报 MSRV 错误
     path.file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| path.display().to_string())
