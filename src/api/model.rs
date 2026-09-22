@@ -215,27 +215,24 @@ pub struct LyricWord {
 }
 
 impl LyricWord {
-    /// 该字在 `position_ms` 时刻的状态。用于逐字染色（卡拉 OK 效果）。
-    pub fn state_at(self, position_ms: u64) -> WordState {
+    /// 该字在 `position_ms` 时刻**已经唱了多少**，`0.0` ~ `1.0`。
+    ///
+    /// 用连续比例而不是「未唱 / 正在唱 / 已唱」三档，是为了画出 Apple Music 那种
+    /// 柔和的推进：边界字的颜色取「未唱色 → 已唱色」之间的插值，看上去是渐变扫过，
+    /// 而不是一格一格硬跳。
+    ///
+    /// 真实数据里偶有 `end_ms <= start_ms` 的坏字（KRC 里见过），`max(1)` 保证
+    /// 分母非零——那种字的行为退化成「唱到 start 就整个亮起来」。
+    pub fn progress_at(self, position_ms: u64) -> f32 {
         if position_ms >= self.end_ms {
-            WordState::Sung
-        } else if position_ms >= self.start_ms {
-            WordState::Singing
-        } else {
-            WordState::Pending
+            return 1.0;
         }
+        if position_ms <= self.start_ms {
+            return 0.0;
+        }
+        let span = self.end_ms.saturating_sub(self.start_ms).max(1) as f32;
+        (position_ms - self.start_ms) as f32 / span
     }
-}
-
-/// 一个字相对于当前播放进度的状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WordState {
-    /// 已经唱过。
-    Sung,
-    /// 正在唱。
-    Singing,
-    /// 还没到。
-    Pending,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -28,6 +28,11 @@ pub struct Theme {
     pub text: Color,
     /// 次要文字：歌手、专辑、提示。
     pub text_dim: Color,
+    /// 歌词里**离当前行最远**的那些行用的颜色，比 `text_dim` 再暗一档。
+    ///
+    /// 非当前行按距离在 `text_dim` 与它之间插值，越远越暗——这是仿 Apple Music
+    /// 那套歌词视觉里最容易做、辨识度也最高的一环。
+    pub lyric_far: Color,
     /// 非焦点边框。
     pub border: Color,
     /// 焦点边框。
@@ -52,6 +57,8 @@ impl Theme {
             accent_dim,
             text: Color::Rgb(222, 228, 238),
             text_dim: Color::Rgb(134, 145, 162),
+            // 比 text_dim 再暗一档的冷灰，和 border 同族，远行淡出后不会抢眼
+            lyric_far: Color::Rgb(74, 84, 100),
             border: Color::Rgb(66, 76, 92),
             border_focus: accent,
             selection_bg,
@@ -72,6 +79,8 @@ impl Theme {
             accent_dim,
             text: Color::White,
             text_dim: Color::Gray,
+            // 16 色里只有 Gray / DarkGray 这一档可退，正好用来做「远行更暗」
+            lyric_far: Color::DarkGray,
             border: Color::DarkGray,
             border_focus: accent,
             selection_bg,
@@ -243,42 +252,22 @@ impl Theme {
             .add_modifier(Modifier::BOLD)
     }
 
-    /// 当前歌词行。
+    /// 当前歌词行。**只在拿不到逐字时间戳时用**（那时整行一个颜色）。
     pub fn lyric_active(&self) -> Style {
         Style::default()
             .fg(self.accent)
             .add_modifier(Modifier::BOLD)
     }
 
-    /// 其它歌词行。
-    pub fn lyric_idle(&self) -> Style {
-        Style::default().fg(self.text_dim)
-    }
-
-    // ---- 逐字歌词（卡拉 OK 效果）----
+    // ---- 逐字歌词（仿 Apple Music）----
     //
-    // 终端画不出「宽度裁剪」那种渐变染色，但可以**逐字上色**，效果反而更准：
-    // 每个字按它自己的时间戳决定用哪一档，唱到哪亮到哪。
-
-    /// 已经唱过的字。
-    pub fn lyric_sung(&self) -> Style {
-        Style::default()
-            .fg(self.accent)
-            .add_modifier(Modifier::BOLD)
-    }
-
-    /// **正在唱**的字。比「已唱」再亮一档（用正文色 + 下划线），
-    /// 让眼睛能跟着走——这是逐字效果最关键的那一档。
-    pub fn lyric_singing(&self) -> Style {
-        Style::default()
-            .fg(self.text)
-            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-    }
-
-    /// 还没唱到的字。
-    pub fn lyric_pending(&self) -> Style {
-        Style::default().fg(self.text_dim)
-    }
+    // 之前这里写着「终端画不出宽度裁剪那种渐变染色」——那个结论是错的。
+    // 终端支持 24 位真彩，**每个字符都能独立上色**，所以只要在相邻两色之间插值，
+    // 就能把「渐变扫过」精确模拟出来，边界字是柔和的过渡而不是硬跳。
+    //
+    // 具体配色不在这里定：渲染层拿 [`Theme::accent`] / [`Theme::text`] /
+    // [`Theme::text_dim`] / [`Theme::lyric_far`] 四个原始色自己去 [`mix`]。
+    // 这样六套主题不用各写一遍歌词规则，改配色也只改一处。
 
     /// 状态栏消息按级别取色。
     pub fn status(&self, level: crate::app::state::StatusLevel) -> Style {
@@ -309,5 +298,95 @@ impl Theme {
         Style::default()
             .fg(self.accent_dim)
             .add_modifier(Modifier::BOLD)
+    }
+}
+
+/// 两个颜色之间线性插值，`t = 0` 取 `from`、`t = 1` 取 `to`。
+///
+/// 逐字推进和距离淡出都靠它：终端每个字符能独立上色，所以在相邻两色之间取值
+/// 就能画出连续的过渡，边界字是柔和的而不是硬跳。
+///
+/// **非 24 位真彩时没有中间色阶可插**（`Color::Gray` 和 `Color::DarkGray` 之间
+/// 没有第三种灰），此时按 `t` 取两端之一——效果退回「一格一格变」，而不是整行
+/// 一个颜色。`Reset` / 索引色走的是同一条路，不需要调用方特判。
+pub fn mix(from: Color, to: Color, t: f32) -> Color {
+    let (Color::Rgb(fr, fg, fb), Color::Rgb(tr, tg, tb)) = (from, to) else {
+        return if t >= 0.5 { to } else { from };
+    };
+
+    let t = t.clamp(0.0, 1.0);
+    let lerp = |a: u8, b: u8| -> u8 {
+        let value = f32::from(a) + (f32::from(b) - f32::from(a)) * t;
+        // t 已经夹在 [0,1]，四舍五入后必然落在 u8 范围内；clamp 是防御性的
+        value.round().clamp(0.0, 255.0) as u8
+    };
+    Color::Rgb(lerp(fr, tr), lerp(fg, tg), lerp(fb, tb))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mix_hits_both_ends_exactly() {
+        let from = Color::Rgb(0, 0, 0);
+        let to = Color::Rgb(255, 128, 64);
+
+        assert_eq!(mix(from, to, 0.0), from);
+        assert_eq!(mix(from, to, 1.0), to);
+        assert_eq!(mix(from, to, 0.5), Color::Rgb(128, 64, 32));
+    }
+
+    /// 越界的 `t` 不能算出非法通道值——逐字进度是浮点算出来的，多一个 ulp 很正常。
+    #[test]
+    fn mix_clamps_out_of_range_t() {
+        let from = Color::Rgb(10, 20, 30);
+        let to = Color::Rgb(200, 210, 220);
+
+        assert_eq!(mix(from, to, -5.0), from);
+        assert_eq!(mix(from, to, 5.0), to);
+    }
+
+    /// 16 色（非 Rgb）没有中间色阶：只能取两端之一，绝不能拼出一个假 Rgb。
+    ///
+    /// 拼出来的话，16 色终端上会收到一个它渲染不了的颜色，整行可能变成默认色
+    /// ——比不做渐变还糟。
+    #[test]
+    fn mix_falls_back_to_the_nearest_end_for_ansi_colors() {
+        assert_eq!(mix(Color::Gray, Color::DarkGray, 0.2), Color::Gray);
+        assert_eq!(mix(Color::Gray, Color::DarkGray, 0.8), Color::DarkGray);
+        assert_eq!(mix(Color::Reset, Color::Red, 0.9), Color::Red);
+    }
+
+    /// 六套主题（真彩 + 16 色各一份）都得有「远处色」，而且必须比 `text_dim` 暗。
+    ///
+    /// 不暗的话距离淡出就是反的——越远的行越亮，一眼就看得出来不对。
+    #[test]
+    fn every_theme_has_a_dimmer_lyric_far_color() {
+        let luminance = |color: Color| -> f32 {
+            let Color::Rgb(r, g, b) = color else {
+                return -1.0; // 16 色不参与亮度比较，只检查它不是 Rgb
+            };
+            0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)
+        };
+
+        for name in ThemeName::ALL {
+            for basic in [false, true] {
+                let theme = Theme::for_config(name, basic);
+                let far = luminance(theme.lyric_far);
+                if far < 0.0 {
+                    // 16 色：只要求它和 text_dim 不是同一个色
+                    assert_ne!(
+                        theme.lyric_far, theme.text_dim,
+                        "{name:?}（16 色）的远处色和次要文字色相同，淡出看不出效果"
+                    );
+                    continue;
+                }
+                assert!(
+                    far < luminance(theme.text_dim),
+                    "{name:?} 的远处色比次要文字还亮，距离淡出方向反了"
+                );
+            }
+        }
     }
 }

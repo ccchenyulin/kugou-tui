@@ -21,8 +21,6 @@ use serde_json::Value;
 
 use crate::api::client::ApiClient;
 use crate::api::data_of;
-#[cfg(test)]
-use crate::api::model::WordState;
 use crate::api::model::{Lyric, LyricLine, LyricWord, Song, pick_string};
 use crate::error::{AppError, Result};
 
@@ -855,17 +853,36 @@ mod tests {
         }
     }
 
-    /// 一个字在不同进度下的三态：未唱 / 正在唱 / 已唱。
+    /// 一个字在不同进度下的比例：未唱 0.0、正在唱介于两者之间、已唱 1.0。
     #[test]
-    fn word_state_follows_playback_position() {
+    fn word_progress_follows_playback_position() {
         let word = LyricWord {
             start_ms: 1000,
             end_ms: 1200,
         };
-        assert_eq!(word.state_at(900), WordState::Pending);
-        assert_eq!(word.state_at(1000), WordState::Singing);
-        assert_eq!(word.state_at(1100), WordState::Singing);
-        assert_eq!(word.state_at(1200), WordState::Sung);
-        assert_eq!(word.state_at(9999), WordState::Sung);
+        assert_eq!(word.progress_at(900), 0.0, "还没到");
+        assert_eq!(word.progress_at(1000), 0.0, "刚起头");
+        assert_eq!(word.progress_at(1100), 0.5, "唱到一半");
+        assert_eq!(word.progress_at(1200), 1.0, "唱完");
+        assert_eq!(word.progress_at(9999), 1.0, "过去很久仍然是 1，不能溢出");
+    }
+
+    /// 坏数据不能让逐字推进炸掉：`end_ms <= start_ms` 时不能除零。
+    #[test]
+    fn zero_length_word_does_not_divide_by_zero() {
+        let degenerate = LyricWord {
+            start_ms: 1000,
+            end_ms: 1000,
+        };
+        assert_eq!(degenerate.progress_at(999), 0.0);
+        assert_eq!(degenerate.progress_at(1000), 1.0);
+        assert!(degenerate.progress_at(1500).is_finite());
+
+        // 倒挂的时间戳同样不能出 NaN / inf
+        let reversed = LyricWord {
+            start_ms: 2000,
+            end_ms: 1000,
+        };
+        assert!(reversed.progress_at(1500).is_finite());
     }
 }

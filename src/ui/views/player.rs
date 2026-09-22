@@ -11,12 +11,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Gauge, ListState, Paragraph};
 use ratatui_image::{FontSize, Resize, StatefulImage};
 
-use crate::api::model::{WordState, format_duration_ms};
+use crate::api::model::format_duration_ms;
 use crate::app::queue::PlayQueue;
 use crate::app::state::{AppState, HitTarget};
 use crate::audio::engine::PlaybackState;
 use crate::config::CoverFill;
-use crate::ui::theme::Theme;
+use crate::ui::theme::{Theme, mix};
 use crate::ui::views::{empty_placeholder, loading_placeholder};
 use crate::ui::widgets::{RowContext, panel, selection_list, song_row, truncate_to_width};
 
@@ -165,6 +165,26 @@ fn render_progress(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &
     state.add_hit_zone(area, HitTarget::Progress, 0, 1);
 }
 
+/// 当前行**未唱部分**的底色，在 `text_dim` 与 `text` 之间的位置。
+///
+/// 取 0.3：比别的行亮一档，整行才压得住上下两行；再亮就会让还没唱的字抢戏，
+/// 逐字推进的「亮点」反而不明显了。
+const LYRIC_ACTIVE_BASE: f32 = 0.30;
+
+/// 非当前行的淡出跨度：距离 1 用 `text_dim`，超过这个距离就到底色 `lyric_far`。
+///
+/// 取 4 是照着一屏能显示十几行调的——太短则只有紧邻的两行有层次，
+/// 太长则远处的行还看得清，当前行就不突出了。
+const LYRIC_FADE_SPAN: f32 = 4.0;
+
+/// 非当前行在「近色 → 远色」之间的插值比例。
+///
+/// 距离 1 是紧邻当前行的那一行，它应当保持原来的 idle 色（比例 0），
+/// 所以先把 1 减掉再算。
+fn fade_ratio(distance: usize) -> f32 {
+    (distance.saturating_sub(1) as f32 / LYRIC_FADE_SPAN).min(1.0)
+}
+
 /// 歌词面板。
 ///
 /// 当前行始终垂直居中——这是卡拉OK式滚动的关键：视线固定屏幕中央，
@@ -241,18 +261,29 @@ pub fn render_lyric(frame: &mut Frame, area: Rect, state: &mut AppState, theme: 
     // 逐字着色要用当前播放位置，取一次即可（毫秒）
     let position_ms = state.position_ms;
 
+    // 回填给 `App::frame_interval`：歌词**真的画出来了**才值得为逐字推进提速。
+    // 放在这里而不是在那边重新推一遍布局——标签页、歌词面板开关、终端尺寸
+    // 都会影响它，渲染层才是唯一知道真相的地方。
+    state.lyric_visible = true;
+
+    // 当前行未唱部分的底色：比 `text_dim` 亮一档，整行才压得住上下两行
+    let active_base = mix(theme.text_dim, theme.text, LYRIC_ACTIVE_BASE);
+
     let lines: Vec<Line> = display
         .iter()
         .skip(offset)
         .take(viewport)
-        .map(|(index, is_translation, text)| {
-            // 译文始终暗一档（包括"当前行"的译文），只有原文才有活动态高亮，
-            // 这样一眼能看出「上面那行亮的是原文，下面那行是它的译文」。
-            if *is_translation {
-                return Line::from(Span::styled(text.clone(), theme.dim()));
-            }
+        .enumerate()
+        .map(|(row, (index, is_translation, text))| {
+            // 离当前行多远（按**显示行**算，译文行也占一格，视觉间隔才均匀）
+            let distance = (offset + row).abs_diff(focus_display);
+
+            // 译文比它的原文再暗一档，一眼能分出主次
+            let t = fade_ratio(distance) + if *is_translation { 0.25 } else { 0.0 };
+
             if Some(*index) != active {
-                return Line::from(Span::styled(text.clone(), theme.lyric_idle()));
+                let color = mix(theme.text_dim, theme.lyric_far, t);
+                return Line::from(Span::styled(text.clone(), Style::default().fg(color)));
             }
 
             // 当前行：拿得到逐字时间戳就逐字染色（唱到哪亮到哪），
@@ -268,16 +299,16 @@ pub fn render_lyric(frame: &mut Frame, area: Rect, state: &mut AppState, theme: 
                 return Line::from(Span::styled(text.clone(), theme.lyric_active()));
             }
 
+            // 每个字按**它自己**的进度在「未唱底色 → 强调色」之间取值。
+            // 边界字因此是两色之间的过渡，看上去是渐变扫过，不是一格一格硬跳。
+            // 非真彩终端没有中间色阶，`mix` 会自动退回两端取一，行为等价于
+            // 原来的三档离散——不需要在这里特判。
             let spans: Vec<Span> = text
                 .chars()
                 .zip(words.iter())
                 .map(|(character, word)| {
-                    let style = match word.state_at(position_ms) {
-                        WordState::Sung => theme.lyric_sung(),
-                        WordState::Singing => theme.lyric_singing(),
-                        WordState::Pending => theme.lyric_pending(),
-                    };
-                    Span::styled(character.to_string(), style)
+                    let color = mix(active_base, theme.accent, word.progress_at(position_ms));
+                    Span::styled(character.to_string(), Style::default().fg(color))
                 })
                 .collect();
             Line::from(spans)
@@ -713,6 +744,7 @@ pub fn render_home(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::theme::ThemeName;
 
     /// 造一张纯色图，用来断言「裁完的尺寸对不对」。
     fn solid(width: u32, height: u32) -> image::DynamicImage {
@@ -1073,5 +1105,196 @@ mod tests {
                 .fit_to(CoverFill::Crop, Rect::new(0, 0, 34, 11), &picker)
                 .is_none()
         );
+    }
+
+    // ---- 逐字歌词（仿 Apple Music）----
+    //
+    // 配色数学有 `theme::mix` 的单测兜着，但那只证明「插值算得对」，
+    // 证明不了它**真的画到了屏幕上**。下面两条走 TestBackend 读真实 Buffer。
+
+    /// 造一行 5 个字的歌词，每个字占 200ms，从 `time_ms` 开始。
+    fn line_with_words(time_ms: u64, text: &str) -> crate::api::model::LyricLine {
+        let words = (0..text.chars().count() as u64)
+            .map(|i| crate::api::model::LyricWord {
+                start_ms: time_ms + i * 200,
+                end_ms: time_ms + 200 + i * 200,
+            })
+            .collect();
+        crate::api::model::LyricLine {
+            time_ms,
+            text: text.to_string(),
+            words,
+            ..Default::default()
+        }
+    }
+
+    /// 渲染一次歌词，返回绘制后的 Buffer。
+    fn render_lyric_into(
+        state: &mut AppState,
+        width: u16,
+        height: u16,
+        theme: &Theme,
+    ) -> ratatui::buffer::Buffer {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("测试后端可用");
+        terminal
+            .draw(|frame| render_lyric(frame, Rect::new(0, 0, width, height), state, theme))
+            .expect("绘制成功");
+        terminal.backend().buffer().clone()
+    }
+
+    /// 某个字符格的前景色。
+    fn fg_at(buffer: &ratatui::buffer::Buffer, x: u16, y: u16) -> ratatui::style::Color {
+        buffer
+            .cell((x, y))
+            .map(|cell| cell.fg)
+            .expect("坐标在 Buffer 内")
+    }
+
+    /// 该行第一个有字的列（左起）。
+    ///
+    /// 比手算居中偏移可靠：水平居中是 `Paragraph` 按它的规则取整的，测试去猜
+    /// 那个取整方式只会写出「差一列」的脆弱断言（这条最初就踩了）。
+    ///
+    /// 只扫内区：最左最右两列是面板边框，边框也有前景色，从 0 扫会先撞上它。
+    fn first_text_column(buffer: &ratatui::buffer::Buffer, row: u16, width: u16) -> u16 {
+        (1..width.saturating_sub(1))
+            .find(|x| fg_at(buffer, *x, row) != ratatui::style::Color::Reset)
+            .expect("这一行应当有歌词")
+    }
+
+    /// 感知亮度，用来断言「这一档比那一档亮」。
+    fn luma(color: ratatui::style::Color) -> f32 {
+        let ratatui::style::Color::Rgb(r, g, b) = color else {
+            panic!("真彩主题不该出现非 Rgb 颜色：{color:?}");
+        };
+        0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)
+    }
+
+    /// 当前行的颜色必须**沿着字逐个变亮**，而不是整行一个色或硬跳两档。
+    ///
+    /// 播放位置卡在第 2 个字中间，于是 5 个字应当拿到 3 档颜色：
+    /// 已唱的（强调色）、正在唱的那个（插值出来的中间色）、还没唱的（底色）。
+    #[test]
+    fn active_line_ramps_from_pending_to_sung() {
+        let theme = Theme::for_config(ThemeName::Default, false);
+        let mut state = AppState::new(crate::config::Config::default());
+        // 行数必须**多于**视口，居中定位才会生效——歌词行不够时 Paragraph 是顶对齐
+        // 的，当前行根本不在中间（这条最初就踩了，断言全读到空格子）
+        state.lyric.lyric = crate::api::model::Lyric {
+            lines: (0..15)
+                .map(|_| line_with_words(1000, "一二三四五"))
+                .collect(),
+        };
+        state.lyric.active_line = Some(7);
+        // 第 1 个字（1200~1400）唱到一半
+        state.position_ms = 1300;
+
+        let buffer = render_lyric_into(&mut state, 40, 9, &theme);
+
+        // 40×9 → 面板内区 (1,1,38,7)；15 行里偏移 4，当前行落在内区第 3 行
+        let row = 1 + 3;
+        let start = first_text_column(&buffer, row, 40);
+
+        // 汉字是**双宽**的：每个字占 2 列，紧跟的那一格是续格、前景色是默认值。
+        // 所以按 2 列步进取「第几个字」，按 1 列走会一半落在续格上。
+        let colors: Vec<_> = (0..5).map(|i| fg_at(&buffer, start + i * 2, row)).collect();
+
+        assert_eq!(colors[0], theme.accent, "唱完的字应当是强调色");
+        assert_eq!(
+            colors[4],
+            mix(theme.text_dim, theme.text, LYRIC_ACTIVE_BASE),
+            "没唱的字应当是底色"
+        );
+
+        let (sung, mid, pending) = (luma(colors[0]), luma(colors[1]), luma(colors[4]));
+        assert!(
+            pending < mid && mid < sung,
+            "亮度必须逐个递增：未唱 {pending:.0} < 正在唱 {mid:.0} < 已唱 {sung:.0}"
+        );
+
+        let distinct: std::collections::BTreeSet<_> =
+            colors.iter().map(|c| format!("{c:?}")).collect();
+        assert_eq!(
+            distinct.len(),
+            3,
+            "应当是「已唱 / 中间 / 未唱」三档，实际 {distinct:?}"
+        );
+    }
+
+    /// 非当前行按离当前行的距离**线性变暗**，远处的行必须比近处的暗。
+    #[test]
+    fn distant_lines_fade_out() {
+        let theme = Theme::for_config(ThemeName::Default, false);
+        let mut state = AppState::new(crate::config::Config::default());
+        state.lyric.lyric = crate::api::model::Lyric {
+            lines: (0..21)
+                .map(|_| line_with_words(1000, "一二三四五"))
+                .collect(),
+        };
+        state.lyric.active_line = Some(10);
+        state.position_ms = 1300;
+
+        let buffer = render_lyric_into(&mut state, 40, 13, &theme);
+
+        // 40×13 → 面板内区 (1,1,38,11)；21 行里偏移 5，当前行落在内区第 5 行
+        let center = 1 + 5;
+        let start = first_text_column(&buffer, center, 40);
+        let active = fg_at(&buffer, start, center);
+        let near = fg_at(&buffer, start, center + 1);
+        let far = fg_at(&buffer, start, center + 5);
+
+        assert!(
+            luma(near) < luma(active),
+            "紧邻的那一行必须比当前行暗（当前行才突出）"
+        );
+        assert!(
+            luma(far) < luma(near),
+            "越远的行必须越暗：远 {:.0} 应当低于近 {:.0}",
+            luma(far),
+            luma(near)
+        );
+        assert_eq!(
+            near,
+            mix(theme.text_dim, theme.lyric_far, fade_ratio(1)),
+            "距离 1 应当正好是 idle 色（比例 0）"
+        );
+        assert_eq!(
+            far,
+            mix(theme.text_dim, theme.lyric_far, 1.0),
+            "距离超过跨度后应当到底色"
+        );
+    }
+
+    /// 淡出比例：距离 1 不淡，超过跨度封顶。
+    #[test]
+    fn fade_ratio_starts_at_zero_and_caps() {
+        assert_eq!(fade_ratio(1), 0.0, "紧邻当前行的那一行保持 idle 色");
+        assert_eq!(fade_ratio(0), 0.0, "当前行自身（不该走到这里）也不能出负数");
+        assert!(fade_ratio(2) > 0.0 && fade_ratio(2) < 1.0);
+        assert_eq!(fade_ratio(100), 1.0, "再远也封顶，不能溢出");
+    }
+
+    /// 歌词真的画出来时回填 `lyric_visible`，否则 `App` 不会为逐字推进提速。
+    #[test]
+    fn rendering_marks_the_lyric_as_visible() {
+        let theme = Theme::for_config(ThemeName::Default, false);
+        let mut state = AppState::new(crate::config::Config::default());
+        state.lyric.lyric = crate::api::model::Lyric {
+            lines: vec![line_with_words(1000, "一二三四五")],
+        };
+        state.lyric.active_line = Some(0);
+
+        state.lyric_visible = false;
+        render_lyric_into(&mut state, 40, 9, &theme);
+        assert!(state.lyric_visible, "画出歌词后应当置位，否则逐字不会提速");
+
+        // 没有歌词时只画占位提示，不算「可见」——不该为它提速
+        state.lyric.lyric = crate::api::model::Lyric::default();
+        state.lyric_visible = false;
+        render_lyric_into(&mut state, 40, 9, &theme);
+        assert!(!state.lyric_visible, "只有占位提示时不该置位");
     }
 }

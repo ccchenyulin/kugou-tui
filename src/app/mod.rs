@@ -118,6 +118,35 @@ pub struct App {
     mpris: Option<crate::mpris::MprisHandle>,
 }
 
+/// 动画帧间隔（约 30fps）。终端里再往上（60fps）看不出差别，但重绘成本是线性的，
+/// 白白吃掉「低资源占用」这个卖点，所以取这个折中值。
+const ANIMATED_TICK_MS: u64 = 33;
+
+/// 简易模式的刷新间隔下限（5fps）。再慢界面就拖了。
+const LITE_TICK_MS: u64 = 200;
+
+/// 这一帧该等多久。
+///
+/// 抽成自由函数是为了能直接测：这里的取舍（省电 ↔ 顺滑）很容易被无意改坏，
+/// 而为了测它去构造一个完整的 `App`（要起 tokio 运行时、网络客户端、音频设备）
+/// 代价太大，实际上就不会有人测。
+///
+/// * `visualizer_animating` —— 可视化页正在播放，频谱柱要连续起落；
+/// * `lyric_visible` —— 歌词真的显示在屏幕上，逐字推进要连续。
+fn frame_delay(config: &Config, visualizer_animating: bool, lyric_visible: bool) -> Duration {
+    let base = config.tick_ms;
+
+    // 简易模式：不做动画提速，并且把刷新压到 5fps（200ms）——省下的都是
+    // CPU 与重绘，听歌不受影响。
+    if config.lite_mode {
+        return Duration::from_millis(base.max(LITE_TICK_MS));
+    }
+    if (visualizer_animating || lyric_visible) && base > ANIMATED_TICK_MS {
+        return Duration::from_millis(ANIMATED_TICK_MS);
+    }
+    Duration::from_millis(base)
+}
+
 impl App {
     /// 装配所有子系统。
     pub fn new(config: Config) -> anyhow::Result<Self> {
@@ -220,31 +249,20 @@ impl App {
     /// 而不是「等满一个 tick 才响应」。
     /// 当前这一帧该等多久。
     ///
-    /// 平时用配置的 `tick_ms`（默认 200ms，省电）。但可视化页在播放时柱子要连续
-    /// 起落，5fps 会明显卡顿，所以临时提到 ~30fps（33ms）。
+    /// 平时用配置的 `tick_ms`（默认 200ms，省电）。但有两处需要连续重绘：
+    /// 可视化页的频谱柱，以及**歌词真的显示在屏幕上**时的逐字推进——5fps 下
+    /// 再精细的插值也是五格一跳。两处都临时提到 ~30fps（33ms）。
     ///
     /// 为什么不到 60fps：终端一次重绘是整屏 diff，16ms 与 33ms 的观感差别很小，
     /// 代价却是翻倍的 CPU。这里按「看起来顺」而不是「数字好看」取值。
     fn frame_interval(&self) -> Duration {
-        // 30fps。终端里再往上（60fps）看不出差别，但重绘成本是线性的，
-        // 白白吃掉「低资源占用」这个卖点，所以取这个折中值。
-        const ANIMATED_TICK_MS: u64 = 33;
-        /// 简易模式的刷新间隔下限（5fps）。再慢界面就拖了。
-        const LITE_TICK_MS: u64 = 200;
-        let base = self.state.config.tick_ms;
-        let animating =
-            self.state.tab == Tab::Visualizer && self.state.playback == PlaybackState::Playing;
+        let playing = self.state.playback == PlaybackState::Playing;
+        let visualizer = playing && self.state.tab == Tab::Visualizer;
+        // 歌词可见**且**在播才提速：暂停时那一格不会动，没必要重绘；
+        // 不显示歌词时更是白费 CPU——这是本项目「低占用」卖点的一部分。
+        let lyric = playing && self.state.lyric_visible;
 
-        // 简易模式：不做动画提速，并且把刷新压到 5fps（200ms）——省下的都是
-        // CPU 与重绘，听歌不受影响。
-        let millis = if self.state.config.lite_mode {
-            base.max(LITE_TICK_MS)
-        } else if animating && base > ANIMATED_TICK_MS {
-            ANIMATED_TICK_MS
-        } else {
-            base
-        };
-        Duration::from_millis(millis)
+        frame_delay(&self.state.config, visualizer, lyric)
     }
 
     fn event_loop(&mut self, terminal: &mut ratatui::DefaultTerminal) -> anyhow::Result<()> {
@@ -458,5 +476,56 @@ fn input_loop(bus: EventBus) {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(tick_ms: u64, lite_mode: bool) -> Config {
+        Config {
+            tick_ms,
+            lite_mode,
+            ..Config::default()
+        }
+    }
+
+    fn millis(delay: Duration) -> u64 {
+        delay.as_millis() as u64
+    }
+
+    /// 什么都不动时按用户配的间隔走——不能悄悄提速，那会白吃 CPU。
+    #[test]
+    fn idle_keeps_the_configured_interval() {
+        assert_eq!(millis(frame_delay(&config(200, false), false, false)), 200);
+        assert_eq!(millis(frame_delay(&config(500, false), false, false)), 500);
+    }
+
+    /// 两处该提速的场景：可视化页在播、以及**歌词可见**在播。
+    #[test]
+    fn animating_raises_the_rate_to_thirty_fps() {
+        let cfg = config(200, false);
+        assert_eq!(millis(frame_delay(&cfg, true, false)), ANIMATED_TICK_MS);
+        assert_eq!(millis(frame_delay(&cfg, false, true)), ANIMATED_TICK_MS);
+        assert_eq!(millis(frame_delay(&cfg, true, true)), ANIMATED_TICK_MS);
+    }
+
+    /// 用户已经把间隔调得比 33ms 还快时不要反向拖慢——那是他自己要的。
+    #[test]
+    fn animating_never_slows_a_faster_configured_tick() {
+        assert_eq!(millis(frame_delay(&config(16, false), true, false)), 16);
+        assert_eq!(millis(frame_delay(&config(16, false), false, true)), 16);
+    }
+
+    /// 简易模式的承诺是「不做动画提速」，所以歌词可见也不能把它拉回 30fps。
+    /// 这条是那个卖点的守卫：改了这里，低配机器上的占用会悄悄翻几倍。
+    #[test]
+    fn lite_mode_ignores_every_animation() {
+        let cfg = config(50, true);
+        assert_eq!(millis(frame_delay(&cfg, true, true)), LITE_TICK_MS);
+        assert_eq!(millis(frame_delay(&cfg, false, false)), LITE_TICK_MS);
+        // 用户配得比下限还慢时以用户为准
+        assert_eq!(millis(frame_delay(&config(1000, true), true, true)), 1000);
     }
 }

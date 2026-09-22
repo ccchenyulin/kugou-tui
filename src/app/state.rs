@@ -788,6 +788,12 @@ pub struct AppState {
     pub sidebar_visible: bool,
     pub show_help: bool,
     pub show_lyric_panel: bool,
+    /// 这一帧歌词**真的画到了屏幕上**。由 `render_lyric` 回填、`begin_frame` 复位。
+    ///
+    /// 逐字推进要 ~30fps 才顺滑，但默认刷新是 5fps。要不要提速取决于歌词到底
+    /// 有没有显示——标签页、歌词面板开关、终端尺寸都会影响它，而渲染层是唯一
+    /// 知道真相的地方。让它在渲染时回填，比在 `frame_interval` 里重推一遍布局可靠。
+    pub lyric_visible: bool,
     pub should_quit: bool,
     /// 强制退出：跳过配置保存。
     pub force_quit: bool,
@@ -1187,6 +1193,7 @@ impl AppState {
             sidebar_visible: true,
             show_help: false,
             show_lyric_panel: true,
+            lyric_visible: false,
             should_quit: false,
             force_quit: false,
             search: SearchPane::default(),
@@ -1238,6 +1245,9 @@ impl AppState {
     /// 供 ui 层在每帧开始时调用：清掉上一帧的命中区。
     pub fn begin_frame(&mut self) {
         self.hit_zones.clear();
+        // 每帧先当作「没画歌词」，由 `render_lyric` 在真的画出内容时置位。
+        // 不复位的话，切走标签页之后还会一直按 30fps 重绘。
+        self.lyric_visible = false;
     }
 
     /// ui 层登记一个可命中区域。
