@@ -62,14 +62,6 @@ pub fn queue() -> &'static str {
     icon("\u{f03a}", "=")
 }
 
-pub fn lyrics() -> &'static str {
-    icon("\u{f27a}", "'")
-}
-
-pub fn cover() -> &'static str {
-    icon("\u{f03e}", "[")
-}
-
 pub fn visualizer() -> &'static str {
     // 面积图（area-chart）比波形（U+F6FE）更像频谱柱状，码点也更常见
     icon("\u{f1fe}", "^")
@@ -123,8 +115,6 @@ mod tests {
         assert!(!cloud().is_empty());
         assert!(!home().is_empty());
         assert!(!queue().is_empty());
-        assert!(!lyrics().is_empty());
-        assert!(!cover().is_empty());
         assert!(!visualizer().is_empty());
         assert!(!sources().is_empty());
         assert!(!settings().is_empty());

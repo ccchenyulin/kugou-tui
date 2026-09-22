@@ -19,8 +19,7 @@ pub use lists::{
     render_search_input, render_song_list,
 };
 pub use player::{
-    QueueView, render_cover_page, render_home, render_lyric_panel, render_lyrics_page,
-    render_player, render_queue,
+    QueueView, prepare_cover, render_home, render_lyric_panel, render_player, render_queue,
 };
 pub use settings::render_settings;
 pub use sources::{render_login_picker, render_sources};
@@ -93,7 +92,7 @@ pub fn render_sidebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &T
         theme.dim(),
     )));
 
-    // 按分组渲染：12 个标签平铺会像一堵文字墙，分组后才扫得动。
+    // 按分组渲染：10 个标签平铺会像一堵文字墙，分组后才扫得动。
     // 每个标签前标出数字键——显示顺序与 `Tab::ALL`（数字键落点）不同，
     // 不标出来的话用户按 1 却跳到别的页。
     let mut current_group: Option<&'static str> = None;

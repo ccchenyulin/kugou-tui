@@ -81,13 +81,6 @@ fn expand_cover_size(url: &str, size: u32) -> String {
 /// 桌面组件（MPRIS）用的封面像素尺寸。控件显示得不大，没必要拉原图。
 const MPRIS_COVER_SIZE: u32 = 400;
 
-/// 封面的尺寸（列 x 行）。每个字符承载上下 2 个像素，所以实际是 24x24 像素。
-const COVER_WIDTH: usize = 24;
-const COVER_HEIGHT: usize = 12;
-/// 头像字符画的尺寸：账号区只有 2 行内容高，头像跟着小。
-const AVATAR_WIDTH: usize = 12;
-const AVATAR_HEIGHT: usize = 6;
-
 /// 图片真实宽高比（宽/高）。
 ///
 /// 宽或高为 0、比值算出非有限值时按 1.0（方图）处理——宁可稍微变形，也别让
@@ -669,6 +662,14 @@ impl App {
                     config.download_dir = Some(next.to_string());
                 }
             }
+            // 进配置文件：这是「这块封面以后都这么铺」的长期选择，不是一次性开关。
+            // 改了下一帧就生效——`cover_fill` 是每帧从 config 读的，封面协议会
+            // 因为铺满方式变了而重新裁一次图。
+            s::Setting::CoverFill => {
+                if let Some(next) = s::cycle(&s::COVER_FILLS, config.cover_fill, delta) {
+                    config.cover_fill = next;
+                }
+            }
         }
 
         let label = setting.label();
@@ -1100,13 +1101,18 @@ impl App {
     }
 
     /// 侧边栏里上下移动：切换标签，焦点留在侧边栏。
+    ///
+    /// 走 [`Tab::SIDEBAR_ORDER`]——那是**屏幕上真正显示的顺序**。以前走的是
+    /// `ALL`（数字键落点），而两者顺序不同：从「队列」按一下 j 会跳到「歌词」，
+    /// 可屏幕上下一个明明写着「首页」。首页置顶之后这种错位会出现在第一屏，
+    /// 所以按显示顺序走是硬要求。
     fn move_sidebar(&mut self, delta: isize) {
-        let current = Tab::ALL
+        let current = Tab::SIDEBAR_ORDER
             .iter()
             .position(|tab| *tab == self.state.tab)
             .unwrap_or(0);
-        let next = (current as isize + delta).clamp(0, Tab::ALL.len() as isize - 1) as usize;
-        let tab = Tab::ALL[next];
+        let next = (current as isize + delta).clamp(0, Tab::SIDEBAR_ORDER.len() as isize - 1);
+        let tab = Tab::SIDEBAR_ORDER[next as usize];
 
         if tab != self.state.tab {
             self.switch_tab_inner(tab, false);
@@ -1139,12 +1145,12 @@ impl App {
         }
     }
 
-    /// 侧边栏：跳到第一个 / 最后一个标签。
+    /// 侧边栏：跳到第一个 / 最后一个标签（同样是**显示顺序**上的首尾）。
     fn select_sidebar_edge(&mut self, to_first: bool) {
         let target = if to_first {
-            Tab::ALL[0]
+            Tab::SIDEBAR_ORDER[0]
         } else {
-            Tab::ALL[Tab::ALL.len() - 1]
+            Tab::SIDEBAR_ORDER[Tab::SIDEBAR_ORDER.len() - 1]
         };
         if target != self.state.tab {
             self.switch_tab_inner(target, false);
@@ -1168,17 +1174,14 @@ impl App {
             (_, Focus::Queue) => {
                 move_selection(&mut self.state.queue_cursor, self.state.queue.len(), delta);
             }
-            // 可视化页没有任何列表，焦点在哪都退化成切换标签页——否则这一页会
-            // 「上下键完全无响应」（实测踩过）。放在 Sidebar / Queue 之后即可，
-            // 那两个焦点的行为仍由上面的分支决定。
-            (Tab::Visualizer, _) => self.move_sidebar(delta),
+            // 首页与可视化页都是纯展示页，没有任何列表，焦点在哪都退化成切换
+            // 标签页——否则这两页会「上下键完全无响应」（可视化页实测踩过）。
+            // 放在 Sidebar / Queue 之后即可，那两个焦点的行为仍由上面的分支决定。
+            (Tab::Home | Tab::Visualizer, _) => self.move_sidebar(delta),
             // 队列页的主区就是队列本身
             (Tab::Queue, Focus::Primary) => {
                 move_selection(&mut self.state.queue_cursor, self.state.queue.len(), delta);
             }
-            // 首页/歌词/封面都是展示页，没有可移动的列表；焦点在哪都退化成切标签页，
-            // 免得「上下键完全无响应」（可视化页踩过同样的坑）
-            (Tab::Home | Tab::Lyrics | Tab::Cover, _) => self.move_sidebar(delta),
             // 搜索页主区就是结果列表
             (Tab::Search, Focus::Primary | Focus::Secondary) => {
                 self.state.search.results.move_by(delta);
@@ -1217,7 +1220,8 @@ impl App {
                     select_last(&mut self.state.queue_cursor, len);
                 }
             }
-            (Tab::Visualizer, _) => self.select_sidebar_edge(to_first),
+            // 首页与可视化页没有列表，首/末项退化成侧边栏的首/末个标签
+            (Tab::Home | Tab::Visualizer, _) => self.select_sidebar_edge(to_first),
             (Tab::Queue, Focus::Primary) => {
                 if to_first {
                     select_first(&mut self.state.queue_cursor, len);
@@ -1225,7 +1229,6 @@ impl App {
                     select_last(&mut self.state.queue_cursor, len);
                 }
             }
-            (Tab::Home | Tab::Lyrics | Tab::Cover, _) => self.select_sidebar_edge(to_first),
             (Tab::Settings, _) => {
                 let last = crate::app::settings::Setting::ALL.len() - 1;
                 self.state.settings_cursor = if to_first { 0 } else { last };
@@ -1272,12 +1275,10 @@ impl App {
     /// Enter：进入下一层，或播放选中歌曲。
     fn activate(&mut self) {
         match (self.state.tab, self.state.focus) {
-            // 可视化页没有列表，方向键与 Enter 在它上面没有意义
-            (Tab::Visualizer, _) => {}
+            // 首页与可视化页都是纯展示页，方向键与 Enter 在它们上面没有意义
+            (Tab::Home | Tab::Visualizer, _) => {}
             // 队列页：Enter 播放选中的那首（与焦点在队列时一致）
             (Tab::Queue, _) => self.play_from_queue(),
-            // 首页/歌词/封面是纯展示页，没有可激活的项
-            (Tab::Home | Tab::Lyrics | Tab::Cover, _) => {}
             // 音源页：Enter = 启用 / 禁用
             (Tab::Sources, _) => self.toggle_source_enabled(),
             // 设置页：Enter = 把选中项往前调一档
@@ -2067,7 +2068,7 @@ impl App {
             }
             Tab::Visualizer => self.state.info("可视化页面没有需要刷新的数据"),
             Tab::Sources => self.state.info("音源状态会在切换与启动时自动探测"),
-            Tab::Home | Tab::Lyrics | Tab::Cover | Tab::Queue => self
+            Tab::Home | Tab::Queue => self
                 .state
                 .info("这一页展示的是本地状态，没有需要刷新的列表"),
             Tab::Settings => self.state.info("设置改完即生效并已保存，无需刷新"),
@@ -3363,7 +3364,7 @@ impl App {
                 self.finish_login(false, message);
             }
 
-            Loaded::CoverReady { hash, lines, image } => {
+            Loaded::CoverReady { hash, image } => {
                 // 结果回来时用户可能已经切歌，只认当前这首
                 if self
                     .state
@@ -3371,20 +3372,11 @@ impl App {
                     .as_ref()
                     .is_some_and(|song| song.hash == hash)
                 {
-                    // 协议必须在主线程建：`Picker` 探测过终端能力，不是 Send，
-                    // 不能挪到网络任务里。探测失败（picker 为 None）就只有字符画。
-                    // 宽高比要在 image 被 new_resize_protocol 消耗之前算出来
+                    // 只存解码后的原图，**不在这里建图片协议**：协议要按目标区域的
+                    // 像素尺寸编码，而区域只有渲染时才知道（还会随窗口大小变）。
+                    // 交给 `CoverArt::fit_to` 按需建、按需重编。
                     let aspect = image_aspect(&image);
-                    let protocol = self
-                        .picker
-                        .as_ref()
-                        .map(|picker| picker.new_resize_protocol(image));
-                    self.state.cover = CoverArt {
-                        hash: Some(hash),
-                        lines,
-                        protocol,
-                        aspect,
-                    };
+                    self.state.cover.set_image(hash, image, aspect);
                 }
             }
 
@@ -3399,10 +3391,9 @@ impl App {
             }
 
             Loaded::AvatarReady { image } => {
-                // 协议必须在主线程建：Picker 探测过终端能力，不是 Send
-                self.state.avatar.lines =
-                    crate::ui::cover::cover_lines(&image, AVATAR_WIDTH, AVATAR_HEIGHT);
+                // 协议必须在主线程建：`Picker` 探测过终端能力，不是 `Send`
                 self.state.avatar.protocol = self
+                    .state
                     .picker
                     .as_ref()
                     .map(|picker| picker.new_resize_protocol(image));
@@ -3595,9 +3586,9 @@ impl App {
                     return;
                 }
             };
-            // 字符画是兜底：探测不到终端能力（比如输出不是终端）时只能用它
-            let lines = crate::ui::cover::cover_lines(&image, COVER_WIDTH, COVER_HEIGHT);
-            bus.emit(Loaded::CoverReady { hash, lines, image });
+            // 只传解码结果：图片协议按目标区域编码，所以这里不预先转字符画——
+            // 那是条永远走不到的兜底路径（`Picker::halfblocks()` 不会失败）
+            bus.emit(Loaded::CoverReady { hash, image });
         });
     }
 

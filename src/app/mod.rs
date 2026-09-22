@@ -47,6 +47,23 @@ fn detect_image_picker() -> ratatui_image::picker::Picker {
     } else if is_iterm2 {
         picker.set_protocol_type(ProtocolType::Iterm2);
     }
+
+    // 记一条供排查：封面显示不对时先看这里。
+    //
+    // 两条信息都有用：`protocol_type` 不是 kitty/iTerm2 就说明**探测没命中**
+    // （alacritty / konsole 等即使支持图形协议也认不出来），封面会退到半块
+    // 字符画——那时像素尺寸、裁剪比例全都不参与显示，怎么调都是白调。
+    // `font_size` 则是裁剪换算像素时用的唯一依据，而它**永远是硬编码的 10x20**：
+    // `Picker::halfblocks()` 从不查询终端真实的单元格尺寸（`from_query_stdio`
+    // 才能查，但它会在没有超时的读上卡死键盘，见本函数文档）。
+    let font = picker.font_size();
+    tlog!(
+        crate::logger::LEVEL_INFO,
+        "终端图形协议 {:?}，单元格像素 {}x{}",
+        picker.protocol_type(),
+        font.width,
+        font.height
+    );
     picker
 }
 
@@ -99,13 +116,6 @@ pub struct App {
 
     /// MPRIS 句柄。没有 D-Bus 时为 `None`（不影响播放，只是桌面集成不可用）。
     mpris: Option<crate::mpris::MprisHandle>,
-
-    /// 终端图形协议的探测器（kitty / iTerm2 / sixel，都没有就退到半块字符）。
-    ///
-    /// 只在启动时探测一次：探测要临时开关 raw mode 并向终端发查询序列，
-    /// 每帧做一次既慢又会打断输入。`None` 表示探测失败（输出不是终端等），
-    /// 此时封面只能走字符画兜底。
-    picker: Option<ratatui_image::picker::Picker>,
 }
 
 impl App {
@@ -155,10 +165,9 @@ impl App {
             last_frame_at: Instant::now(),
             last_session_save: Instant::now(),
             mpris,
-            picker: None,
         };
 
-        app.picker = Some(detect_image_picker());
+        app.state.picker = Some(detect_image_picker());
 
         app.restore_session();
         app.announce_readiness();

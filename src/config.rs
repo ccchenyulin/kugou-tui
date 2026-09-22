@@ -131,6 +131,10 @@ pub struct Config {
     #[serde(default)]
     pub lite_mode: bool,
 
+    /// 首页大封面的铺满方式，见 [`CoverFill`]。
+    #[serde(default)]
+    pub cover_fill: CoverFill,
+
     /// 各音源的连接与身份配置，以及当前选中的音源。
     ///
     /// 切换音源时，`api_base` / `cookie` / `dfid` 会从选中的音源同步过来。
@@ -140,6 +144,52 @@ pub struct Config {
 
 fn default_qr_aspect() -> f32 {
     2.0
+}
+
+/// 首页那块大封面怎么铺满它的区域。
+///
+/// # 为什么需要这个开关
+///
+/// 封面区是「多少列 × 多少行」，换算成像素后几乎永远不是正方形，而专辑封面
+/// 大多是正方形。**框和图的形状不一致时，「铺满」「不变形」「不裁剪」三者只能
+/// 同时满足两个**，必须挑一个放弃。这个配置就是让用户自己挑。
+///
+/// 三种取值对应的取舍：
+///
+/// | 取值 | 铺满 | 变形 | 裁剪 |
+/// |------|------|------|------|
+/// | `crop`（默认） | 是 | 否 | 是 |
+/// | `stretch` | 是 | 是 | 否 |
+/// | `fit` | 否 | 否 | 否 |
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CoverFill {
+    /// 居中裁剪：先等比放大到盖住整个区域，再居中裁掉溢出的边。
+    ///
+    /// 等价 CSS 的 `object-fit: cover`。铺满 100%、不变形，代价是方形封面在宽框
+    /// 里会被裁掉上下两条边。默认值——专辑封面基本居中构图，裁掉一点边框通常
+    /// 看不出来，而「框里空着一块」是一眼就能看见的。
+    #[default]
+    Crop,
+    /// 拉伸铺满：直接把图拉到和区域一样大。
+    ///
+    /// 铺满 100%、不裁剪，代价是**变形**——方形封面在宽框里会被横向拉宽。
+    Stretch,
+    /// 完整显示：不裁不拉，把封面框缩到图片自己的比例再居中放进去。
+    ///
+    /// 图一定完整、也不变形，代价是框比图宽时左右会露出底色——也就是「没填满」。
+    Fit,
+}
+
+impl CoverFill {
+    /// 设置页与文档里显示的名字。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Crop => "居中裁剪",
+            Self::Stretch => "拉伸铺满",
+            Self::Fit => "完整显示",
+        }
+    }
 }
 
 impl Default for Config {
@@ -163,6 +213,7 @@ impl Default for Config {
             keymap: std::collections::BTreeMap::new(),
             qr_aspect: default_qr_aspect(),
             lite_mode: false,
+            cover_fill: CoverFill::default(),
             sources: SourceSet::default(),
         }
     }

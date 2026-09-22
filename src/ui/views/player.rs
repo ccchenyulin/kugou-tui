@@ -3,17 +3,19 @@
 //! 三者共同回答用户最关心的三个问题：**在放什么**（播放条）、**唱到哪了**
 //! （歌词）、**接下来放什么**（队列）。
 
+use image::imageops::FilterType;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Gauge, ListState, Paragraph};
-use ratatui_image::{Resize, StatefulImage};
+use ratatui_image::{FontSize, Resize, StatefulImage};
 
 use crate::api::model::{WordState, format_duration_ms};
 use crate::app::queue::PlayQueue;
 use crate::app::state::{AppState, HitTarget};
 use crate::audio::engine::PlaybackState;
+use crate::config::CoverFill;
 use crate::ui::theme::Theme;
 use crate::ui::views::{empty_placeholder, loading_placeholder};
 use crate::ui::widgets::{RowContext, panel, selection_list, song_row, truncate_to_width};
@@ -351,149 +353,205 @@ pub fn render_queue(
     frame.render_stateful_widget(widget, inner, cursor);
 }
 
-/// 封面块的行数下限 / 上限。
+/// 缩略图封面的行数下限 / 上限。
 ///
 /// 上限不只是审美：图片协议按区域尺寸编码，区域越大单次编码的数据越多，
-/// 而封面页最宽也就 48 列左右，再大没有意义。
+/// 而缩略图那块本来就窄，再大没有意义。
 const COVER_MIN_ROWS: u16 = 6;
 const COVER_MAX_ROWS: u16 = 32;
 
-/// 在 `inner` 上方划出一块居中的方形封面区，返回（封面区, 剩余区）。
+/// 封面块在区域里怎么摆。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoverPlace {
+    /// 只占区域上半部分，按图片比例居中（歌词面板上方、窄屏首页的封面）。
+    ///
+    /// 这块只有几十个字符大，裁剪只会更看不清，所以固定「完整显示」，
+    /// 不跟随 [`CoverFill`] 配置。
+    AboveContent,
+    /// 铺满整块区域（宽屏首页左栏那块大封面），怎么铺由配置决定。
+    Fill,
+}
+
+/// 在 `inner` 上方划出一块居中的封面缩略图区，返回（缩略图区, 剩余区）。
 ///
 /// 抽成纯函数是为了能直接测：这块几何一变，图片协议就得重新编码（尺寸变了），
 /// 值得有断言兜着。
 ///
 /// 字符宽高比约 1:2，所以方形区域的列数取行数的两倍；最多占一半高，
 /// 剩下的留给下方内容。区域太小时返回 `None`，调用方把整块都留给内容。
-fn cover_layout(
-    inner: Rect,
-    aspect: f32,
-    cell_aspect: f32,
-    fill_height: bool,
-) -> Option<(Rect, Rect)> {
+fn thumbnail_layout(inner: Rect, aspect: f32, cell_aspect: f32) -> Option<(Rect, Rect)> {
     if inner.width < 12 || inner.height < 8 {
         return None;
     }
 
-    // 上限由调用方决定：歌词面板要让位给歌词（只占一半），
-    // 首页/封面页则把整个 `inner` 都给封面（不留上方空白）。
-    let max_rows = if fill_height {
-        inner.height.saturating_sub(1)
+    // 图被压成 0 宽会让下面的除法炸掉；宽高比拿不到时按方图算
+    let aspect = aspect.max(0.05);
+    let rows = (inner.height / 2).clamp(COVER_MIN_ROWS, COVER_MAX_ROWS);
+
+    // 按真实比例算列数（横图列数大于行数）。缩略图**不追求填满**——它本来就只占
+    // 上半部分，左右留白反而显得居中。真要填满的是首页那块，走 `prepare_cover`
+    // 的裁剪路径。
+    let columns = ((f32::from(rows) * aspect * cell_aspect).round() as u16).clamp(1, inner.width);
+
+    // 太宽就按 inner.width 反算（缩略图不能横向溢出）
+    let rows = if columns >= inner.width {
+        let rows = (f32::from(inner.width) / (aspect * cell_aspect)).round() as u16;
+        rows.clamp(COVER_MIN_ROWS, inner.height.saturating_sub(1))
     } else {
-        inner.height / 2
-    };
-    let mut rows = max_rows.clamp(COVER_MIN_ROWS, COVER_MAX_ROWS);
-
-    // 填满模式：图铺满整个区域（配合 Crop 裁剪，见 draw_cover_block），不留黑边。
-    // inner——不留上下或左右黑边。
-    if fill_height {
-        return Some((inner, inner));
-    }
-
-    // 填满模式：忽略原图宽高比，强制正方形 + 边长取 inner 允许的最大值。
-    //
-    // 否则按真实比例算 columns（横图 columns 大于 rows），如果 columns 仍小于
-    // inner.width，居中后左右留下大块黑边——用户看着像没填满。
-    // "填满"优先于"保持原比例"：正方形比拉变形好（横图变正方看起来是裁切）。
-    let mut columns = if fill_height {
-        rows.saturating_mul(2)
-    } else {
-        (f32::from(rows) * aspect * cell_aspect).round() as u16
-    };
-    columns = columns.clamp(1, inner.width);
-
-    // 太宽就按 inner.width 反算（封面不能横向溢出）
-    if columns >= inner.width {
-        columns = inner.width;
-        rows = (f32::from(columns) / (aspect * cell_aspect)).round() as u16;
-        rows = rows.clamp(COVER_MIN_ROWS, inner.height.saturating_sub(1));
-    }
-
-    // 填满模式：封面直接占满 inner 顶部（不再切两半，rest = inner 让调用方忽略）。
-    // 分两半模式：上方封面、下方 rest 留给歌词。
-    let cover_y = inner.y;
-    let rest = if fill_height {
-        inner
-    } else {
-        let [_cover_area, rest] =
-            Layout::vertical([Constraint::Length(rows + 1), Constraint::Min(1)]).areas(inner);
-        rest
+        rows
     };
 
-    // 居中：分两半模式居中（左右留白好看）；填满模式靠左上——用户要的就是填满，
-    // 居中后空着右边反而像没填。
-    let x = if fill_height {
-        inner.x
-    } else {
-        inner.x + inner.width.saturating_sub(columns) / 2
-    };
-    Some((Rect::new(x, cover_y, columns, rows), rest))
+    let [_cover_area, rest] =
+        Layout::vertical([Constraint::Length(rows + 1), Constraint::Min(1)]).areas(inner);
+
+    let x = inner.x + inner.width.saturating_sub(columns) / 2;
+    Some((Rect::new(x, inner.y, columns, rows), rest))
 }
 
-/// 在当前区域的**上半部分**画封面，返回留给下方内容的区域。
+/// 区域换算成像素尺寸：`列 × 单元格宽`, `行 × 单元格高`。
 ///
-/// 抽出来是因为「首页」「歌词页」「封面页」都要它。
+/// **必须用 `Picker` 报的 `FontSize`**——图片协议内部就是按它把像素折回单元格的。
+/// 这里换个比例算，裁出来的图比例就对不上，渲染时又会留边。
+fn pixel_size(area: Rect, font: FontSize) -> (u32, u32) {
+    (
+        (u32::from(area.width) * u32::from(font.width)).max(1),
+        (u32::from(area.height) * u32::from(font.height)).max(1),
+    )
+}
+
+/// 等比放大到**盖住** `(width, height)`，再居中裁到正好这个尺寸。
 ///
-/// 有图形协议就用 `ratatui-image` 的 widget：它把图片写进 ratatui 的 Buffer，
-/// 由框架的 diff 统一输出——不再自己往 stdout 写几百 KB 的转义序列（那会阻塞
-/// 写入并打乱光标跟踪），而且内容不变时一个字节都不会重发。探测不出终端能力
-/// 时才退回字符画。
+/// 等价 CSS 的 `object-fit: cover`：铺满 100%、不变形，代价是裁掉溢出的边。
+fn crop_to_cover(image: &image::DynamicImage, (width, height): (u32, u32)) -> image::DynamicImage {
+    let src_w = image.width().max(1);
+    let src_h = image.height().max(1);
+    // 取较大的那个比例：两个方向都要盖住，取小的会留边
+    let scale = f64::max(
+        f64::from(width) / f64::from(src_w),
+        f64::from(height) / f64::from(src_h),
+    );
+    // 向上取整：宁可多放大半个像素，也不能因为取整让某一边差一点盖不满
+    let scaled_w = (f64::from(src_w) * scale).ceil().max(f64::from(width)) as u32;
+    let scaled_h = (f64::from(src_h) * scale).ceil().max(f64::from(height)) as u32;
+
+    let scaled = image.resize_exact(scaled_w, scaled_h, FilterType::Lanczos3);
+    scaled.crop_imm(
+        (scaled_w - width) / 2,
+        (scaled_h - height) / 2,
+        width,
+        height,
+    )
+}
+
+/// 直接拉到目标尺寸——**不保持比例**，只给 [`CoverFill::Stretch`] 用。
+fn stretch_to(image: &image::DynamicImage, (width, height): (u32, u32)) -> image::DynamicImage {
+    image.resize_exact(width, height, FilterType::Lanczos3)
+}
+
+/// 在 `area` 里找出与图片像素比例一致的最大矩形，居中放置。
+fn fit_box(image: &image::DynamicImage, area: Rect, font: FontSize) -> Rect {
+    let image_aspect = image.width().max(1) as f32 / image.height().max(1) as f32;
+    // 单元格是「高 : 宽 = font.height : font.width」，换算成列数要乘上去
+    let cell_aspect = f32::from(font.height) / f32::from(font.width.max(1));
+
+    let mut columns = (f32::from(area.height) * image_aspect * cell_aspect).round() as u16;
+    let mut rows = area.height;
+    if columns > area.width {
+        columns = area.width;
+        rows = (f32::from(columns) / (image_aspect * cell_aspect)).round() as u16;
+    }
+    let columns = columns.clamp(1, area.width);
+    let rows = rows.clamp(1, area.height);
+
+    Rect::new(
+        area.x + (area.width - columns) / 2,
+        area.y + (area.height - rows) / 2,
+        columns,
+        rows,
+    )
+}
+
+/// 按 `mode` 把 `image` 塞进 `area`，返回（交给图片协议的图, 真正要渲染的矩形）。
 ///
-/// 用的是默认的 `Resize::Fit`：等比缩到区域里，**不放大**。所以封面页把区域
-/// 给得再大，一张 256 见方的图也只按原始像素铺开，不会被拉成糊图；代价是换
-/// 到不同大小的区域（切页、改窗口）要重新编码一次——每页最多一次，不是每帧。
+/// # 为什么必须自己预处理像素
+///
+/// `ratatui-image` 的三种 `Resize` **全都保持宽高比**：
+///
+/// * `Fit` 是「装得下就不放大」；
+/// * `Scale` 是「允许放大」，但仍然等比；
+/// * `Crop` 甚至不放大，图比区域小就原样画。
+///
+/// 而封面区的像素比例（列 × 单元格宽 : 行 × 单元格高）几乎永远不等于图片比例，
+/// 于是不管选哪个，图都只占区域的一部分，剩下的地方是空的——**这才是「封面没有
+/// 完全填满」的真正原因，不是没放大**。想真正铺满，只能先把图裁/拉到与区域完全
+/// 一致的比例，再交给它渲染。
+pub fn prepare_cover(
+    image: &image::DynamicImage,
+    area: Rect,
+    font: FontSize,
+    mode: CoverFill,
+) -> (image::DynamicImage, Rect) {
+    match mode {
+        CoverFill::Crop => (crop_to_cover(image, pixel_size(area, font)), area),
+        CoverFill::Stretch => (stretch_to(image, pixel_size(area, font)), area),
+        // 不裁不拉：把「要渲染的区域」缩到图片自己的比例，居中放进 area
+        CoverFill::Fit => (image.clone(), fit_box(image, area, font)),
+    }
+}
+
+/// 画封面，返回留给下方内容的区域。
+///
+/// 首页与歌词面板都要它，区别只在 [`CoverPlace`]。
+///
+/// 图片走 `ratatui-image` 的 widget：它把图写进 ratatui 的 Buffer，由框架的
+/// diff 统一输出——不再自己往 stdout 写几百 KB 的转义序列（那会阻塞写入并打乱
+/// 光标跟踪），而且内容不变时一个字节都不会重发。
 fn draw_cover_block(
     frame: &mut Frame,
     inner: Rect,
     state: &mut AppState,
-    theme: &Theme,
-    fill_height: bool,
+    place: CoverPlace,
 ) -> Rect {
     if !state.cover.is_drawable() {
         return inner;
     }
-    // 字符高宽比：配的 qr_aspect 就是「字符高:宽」，同一个概念，直接复用
+
+    // 字符高宽比：配的 qr_aspect 就是「字符高:宽」，同一个概念，直接复用。
+    // 注意它只决定**框的形状**（看起来是不是方的）；裁图用的像素尺寸另算，
+    // 那个必须跟图片协议内部的 `FontSize` 一致，见 `pixel_size`。
     let cell_aspect = state.config.qr_aspect.max(0.1);
-    let Some((cover_area, rest)) =
-        cover_layout(inner, state.cover.aspect, cell_aspect, fill_height)
-    else {
-        return inner;
+
+    let (mode, area, rest) = match place {
+        CoverPlace::AboveContent => {
+            let Some((box_area, rest)) = thumbnail_layout(inner, state.cover.aspect, cell_aspect)
+            else {
+                return inner;
+            };
+            (CoverFill::Fit, box_area, rest)
+        }
+        CoverPlace::Fill => {
+            let mode = state.config.cover_fill;
+            (mode, inner, inner)
+        }
     };
 
-    if let Some(protocol) = state.cover.protocol.as_mut() {
-        // 填满模式用 Scale：永远把 image 拉伸到 area 一样大。
-        //
-        // 之前选 Crop 是错的——Crop 在 needs_resize 里和 Fit 一样有「image 比 area
-        // 小就不 resize」这条短路，结果 image 还是它的小尺寸，渲染时只画到
-        // protocol.size 那么大，area 多出来的地方全黑（用户说的「泳池只给左上
-        // 角注水」就是这个的另一个写法）。
-        //
-        // Scale 是 ratatui-image 里唯一无视 fits 判断、总是按 area 重 encode 的
-        // 模式。代价是图会拉伸（不保持比例），但用户要的就是「铺满」。
-        let image = if fill_height {
-            StatefulImage::default().resize(Resize::Scale(None))
-        } else {
-            StatefulImage::default()
-        };
-        frame.render_stateful_widget(image, cover_area, protocol);
-        // 缩放与编码发生在渲染时（只在区域或图片变化时）。失败只记日志：
-        // 下一帧会重试，不该因为一张图把界面搞崩。
-        if let Some(Err(error)) = protocol.last_encoding_result() {
-            crate::logger::tlog!(crate::logger::LEVEL_WARN, "封面编码失败：{error}");
+    if let Some(picker) = state.picker.as_ref() {
+        if let Some((protocol, render_area)) = state.cover.fit_to(mode, area, picker) {
+            // `Scale`：允许放大，等比铺到 `render_area`。图的比例已经被
+            // `prepare_cover` 对齐到区域了，所以这里正好铺满、不留边。
+            frame.render_stateful_widget(
+                StatefulImage::default().resize(Resize::Scale(None)),
+                render_area,
+                protocol,
+            );
+            // 编码发生在渲染时（只在区域或图片变化时）。失败只记日志：
+            // 下一帧会重试，不该因为一张图把界面搞崩。
+            if let Some(Err(error)) = protocol.last_encoding_result() {
+                crate::logger::tlog!(crate::logger::LEVEL_WARN, "封面编码失败：{error}");
+            }
         }
-        return rest;
     }
-
-    let lines: Vec<Line> = state
-        .cover
-        .lines
-        .iter()
-        .map(|line| Line::from(Span::styled(line.clone(), theme.now_playing())))
-        .collect();
-    frame.render_widget(
-        Paragraph::new(lines).alignment(Alignment::Center),
-        cover_area,
-    );
+    // 没有终端图形能力（`picker` 为空）或没有原图时留白——画不出东西比画错好
     rest
 }
 
@@ -505,68 +563,10 @@ pub fn render_lyric_panel(frame: &mut Frame, area: Rect, state: &mut AppState, t
     if area.height < 3 || area.width < 8 {
         return;
     }
-    let rest = draw_cover_block(frame, area, state, theme, false);
+    let rest = draw_cover_block(frame, area, state, CoverPlace::AboveContent);
     render_lyric(frame, rest, state, theme);
 }
 
-/// 歌词页：整块主区只放歌词，不放封面。
-///
-/// 之前是「上方小封面 + 下方歌词」，但封面在首页和封面页都有（而且大得多、
-/// 按真实比例），歌词页这一小块既看不清又白占掉一半高度——歌词能显示的行数
-/// 因此少很多。既然封面别处已经够看了，这里就纯放歌词。
-pub fn render_lyrics_page(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
-    let block = panel("歌词", false, theme);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if inner.height < 4 || inner.width < 8 {
-        return;
-    }
-
-    render_lyric(frame, inner, state, theme);
-}
-
-/// 封面页：整块主区只放封面，配上曲名与歌手。
-pub fn render_cover_page(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
-    let block = panel("封面", false, theme);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if inner.height < 3 || inner.width < 8 {
-        return;
-    }
-
-    let Some(song) = state.current.as_ref() else {
-        frame.render_widget(empty_placeholder("播放歌曲后显示封面", theme), inner);
-        return;
-    };
-    // 先把要显示的文字取出来，释放对 state 的不可变借用——
-    // 下面 draw_cover_block 要可变借用它（图片协议状态是可变的）
-    let title = song.name.clone();
-    let subtitle = format!("{} · {}", song.singer_text(), song.album_name);
-
-    // 先把曲名信息留在底部一行，封面占其余空间
-    let [cover_area, info_area] =
-        Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).areas(inner);
-
-    let _ = draw_cover_block(frame, cover_area, state, theme, true);
-
-    let info = vec![
-        Line::from(Span::styled(title, theme.now_playing())),
-        Line::from(Span::styled(subtitle, theme.dim())),
-    ];
-    frame.render_widget(Paragraph::new(info).alignment(Alignment::Center), info_area);
-}
-
-/// 首页：正在播放的总览——封面在左，曲目信息与歌词在右。
-/// 在 `inner` 里能放下的最大**正方形**封面框的边长（列数, 行数）。
-///
-/// 学 voicefox 的 `CoverGeometry::box_height`——框的尺寸由另一边算出来，而不是
-/// 写死。取正方形是为了让图刚好填满框：框如果比图宽或比图高，多出来的部分就是
-/// 黑边（用户说「空了这么多」的根源）。
-///
-/// 字符是「高:宽 = `cell_aspect`」（通常 2:1），所以正方形意味着
-/// `columns = rows * cell_aspect`。
 /// 头像占的列数：6 行内容 × 字符高宽比 2 = 12 列。
 const AVATAR_COLUMNS: u16 = 12;
 
@@ -624,16 +624,6 @@ fn render_account(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &T
             if let Some(Err(error)) = protocol.last_encoding_result() {
                 crate::logger::tlog!(crate::logger::LEVEL_WARN, "头像编码失败：{error}");
             }
-        } else if !state.avatar.lines.is_empty() {
-            // 没有图形协议时退回半块字符画
-            let lines: Vec<Line> = state
-                .avatar
-                .lines
-                .iter()
-                .take(avatar_area.height as usize)
-                .map(|line| Line::from(truncate_to_width(line, avatar_area.width as usize)))
-                .collect();
-            frame.render_widget(Paragraph::new(lines), avatar_area);
         }
     }
 
@@ -676,6 +666,7 @@ fn render_account(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &T
     frame.render_widget(Paragraph::new(lines), text_area);
 }
 
+/// 首页：正在播放的总览——封面在左，曲目信息与歌词在右。
 pub fn render_home(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
     let block = panel("正在播放", false, theme);
     let inner = block.inner(area);
@@ -693,26 +684,28 @@ pub fn render_home(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &
         return;
     }
 
-    // 宽屏左右分栏（封面 | 歌词），窄屏上下堆叠——和歌词页的断点保持一致
+    // 宽屏左右分栏（封面 | 歌词），窄屏上下堆叠
     if inner.width >= 60 {
         let [left, right] =
             Layout::horizontal([Constraint::Percentage(45), Constraint::Min(24)]).areas(inner);
 
-        // 左栏竖着切：上方封面（填满）、下方账号信息（固定 8 行，不能被挤掉）。
+        // 左栏竖着切：上方封面（铺满整块）、下方账号信息（固定 8 行，不能被挤掉）。
         //
         // 之前让封面框按图片比例自己算高度，结果框能把整个左栏吃掉，
         // 账号区高度变成 0 —— 用户看到「个人信息被挤掉了」。
-        // 现在账号区固定，封面用剩下的全部空间，图用 Crop 填满（见 draw_cover_block）。
+        // 现在账号区固定，封面用剩下的全部空间，按 `cover_fill` 铺满
+        // （见 `prepare_cover`）。
         let [cover_col, account_col] =
             Layout::vertical([Constraint::Min(6), Constraint::Length(ACCOUNT_HEIGHT)]).areas(left);
         let left_block = panel("封面", false, theme);
         let left_inner = left_block.inner(cover_col);
         frame.render_widget(left_block, cover_col);
-        let _ = draw_cover_block(frame, left_inner, state, theme, true);
+        draw_cover_block(frame, left_inner, state, CoverPlace::Fill);
         render_account(frame, account_col, state, theme);
         render_lyric(frame, right, state, theme);
     } else {
-        let rest = draw_cover_block(frame, inner, state, theme, false);
+        // 窄屏没有左右分栏的余地：封面缩到上半部分，下半部分留给歌词
+        let rest = draw_cover_block(frame, inner, state, CoverPlace::AboveContent);
         render_lyric(frame, rest, state, theme);
     }
 }
@@ -720,13 +713,17 @@ pub fn render_home(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::theme::ThemeName;
 
-    /// 封面区是「列 = 行 × 2」的方形（字符宽高比 1:2），并水平居中。
+    /// 造一张纯色图，用来断言「裁完的尺寸对不对」。
+    fn solid(width: u32, height: u32) -> image::DynamicImage {
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(width, height))
+    }
+
+    /// 缩略图区是「列 = 行 × 2」的方形（字符宽高比 1:2），并水平居中。
     #[test]
-    fn cover_block_is_twice_as_wide_as_tall_and_centered() {
+    fn thumbnail_is_twice_as_wide_as_tall_and_centered() {
         let inner = Rect::new(0, 0, 60, 20);
-        let (cover, _rest) = cover_layout(inner, 1.0, 2.0, false).expect("60x20 够放封面");
+        let (cover, _rest) = thumbnail_layout(inner, 1.0, 2.0).expect("60x20 够放缩略图");
 
         assert_eq!(cover.height, 10, "最多占一半高");
         assert_eq!(cover.width, 20, "列数是行数的两倍");
@@ -734,35 +731,29 @@ mod tests {
         assert_eq!(cover.y, inner.y);
     }
 
-    /// 区域太小就整块留给内容——半个封面对阅读毫无帮助。
+    /// 区域太小就整块留给内容——半个缩略图对阅读毫无帮助。
     #[test]
-    fn cover_block_is_skipped_when_area_is_tiny() {
-        assert!(cover_layout(Rect::new(0, 0, 11, 20), 1.0, 2.0, false).is_none());
-        assert!(cover_layout(Rect::new(0, 0, 60, 7), 1.0, 2.0, false).is_none());
+    fn thumbnail_is_skipped_when_area_is_tiny() {
+        assert!(thumbnail_layout(Rect::new(0, 0, 11, 20), 1.0, 2.0).is_none());
+        assert!(thumbnail_layout(Rect::new(0, 0, 60, 7), 1.0, 2.0).is_none());
     }
 
-    /// 行数被夹在 [6, 24]：矮区域不至于缩成一条，高区域也不会把内容挤没。
+    /// 行数被夹在 [6, 32]：矮区域不至于缩成一条，高区域也不会把内容挤没。
     #[test]
-    fn cover_rows_are_clamped() {
-        let (short, _) =
-            cover_layout(Rect::new(0, 0, 40, 8), 1.0, 2.0, false).expect("8 行够放最小封面");
+    fn thumbnail_rows_are_clamped() {
+        let (short, _) = thumbnail_layout(Rect::new(0, 0, 40, 8), 1.0, 2.0).expect("8 行够放");
         assert_eq!(short.height, COVER_MIN_ROWS);
 
-        let (tall, _) =
-            cover_layout(Rect::new(0, 0, 80, 100), 1.0, 2.0, false).expect("100 行够放封面");
+        let (tall, _) = thumbnail_layout(Rect::new(0, 0, 80, 100), 1.0, 2.0).expect("100 行够放");
         assert_eq!(tall.height, COVER_MAX_ROWS);
         assert_eq!(tall.width, 64, "32 行 × 2（方图 + 字符 2:1）");
     }
 
     /// 非正方形封面按真实比例算列数——16:9 的头图不该被压成方的。
-    ///
-    /// 以前写死 `columns = rows * 2`，等于假定所有封面都是正方形。
     #[test]
-    fn cover_respects_image_aspect_ratio() {
-        let (square, _) =
-            cover_layout(Rect::new(0, 0, 80, 20), 1.0, 2.0, false).expect("80x20 够放封面");
-        let (wide, _) =
-            cover_layout(Rect::new(0, 0, 80, 20), 16.0 / 9.0, 2.0, false).expect("80x20 够放封面");
+    fn thumbnail_respects_image_aspect_ratio() {
+        let (square, _) = thumbnail_layout(Rect::new(0, 0, 80, 20), 1.0, 2.0).expect("够放");
+        let (wide, _) = thumbnail_layout(Rect::new(0, 0, 80, 20), 16.0 / 9.0, 2.0).expect("够放");
 
         assert!(
             wide.width > square.width,
@@ -772,18 +763,106 @@ mod tests {
         );
 
         // 竖图（比如 3:4 的歌手照）应该更窄
-        let (tall, _) =
-            cover_layout(Rect::new(0, 0, 80, 20), 0.75, 2.0, false).expect("80x20 够放封面");
+        let (tall, _) = thumbnail_layout(Rect::new(0, 0, 80, 20), 0.75, 2.0).expect("够放");
         assert!(tall.width < square.width, "竖图应该比方图窄");
     }
 
-    /// 窄区域里宽度是硬约束：宁可矮一点也不让封面超出边界。
+    /// 窄区域里宽度是硬约束：宁可矮一点也不让缩略图超出边界。
     #[test]
-    fn cover_width_is_capped_by_area_width() {
-        let (cover, _) =
-            cover_layout(Rect::new(0, 0, 14, 20), 1.0, 2.0, false).expect("14x20 够放封面");
+    fn thumbnail_width_is_capped_by_area_width() {
+        let (cover, _) = thumbnail_layout(Rect::new(0, 0, 14, 20), 1.0, 2.0).expect("够放");
         assert_eq!(cover.width, 14, "10 行本该要 20 列，被宽度压到 14");
         assert_eq!(cover.x, 0);
+    }
+
+    /// 剩余区域紧接缩略图下方，且两者高度加起来仍是原区域高度。
+    #[test]
+    fn remainder_sits_below_the_thumbnail() {
+        let inner = Rect::new(3, 5, 60, 20);
+        let (cover, rest) = thumbnail_layout(inner, 1.0, 2.0).expect("够放");
+
+        // rows + 1：多留一行当间距，不然缩略图和下面的内容会糊在一起
+        assert_eq!(rest.y, cover.y + cover.height + 1);
+        assert_eq!(rest.height, inner.height - cover.height - 1);
+        assert_eq!(rest.width, inner.width, "剩余区用满宽度");
+    }
+
+    // ---- 铺满（`prepare_cover`）：这是「封面填不满」的根治点 ----
+
+    /// 裁剪模式的**核心不变量**：裁完的图，像素比例与目标区域完全一致。
+    ///
+    /// 只要这一条成立，`ratatui-image` 的等比缩放就会正好铺满整个区域，不留黑边。
+    /// 以前填不满就是因为区域是 45% 宽 × 剩下高（像素比例约 1.5:1），而图是方的。
+    #[test]
+    fn crop_matches_the_area_pixel_ratio_exactly() {
+        let font = FontSize::new(10, 20);
+        // 典型的宽扁封面区：34 列 × 11 行 → 340 × 220 像素
+        let area = Rect::new(0, 0, 34, 11);
+        let (width, height) = pixel_size(area, font);
+        assert_eq!((width, height), (340, 220));
+
+        let cropped = crop_to_cover(&solid(256, 256), (width, height));
+        assert_eq!(cropped.width(), 340, "裁完正好是区域的像素宽");
+        assert_eq!(cropped.height(), 220, "裁完正好是区域的像素高");
+    }
+
+    /// 裁剪模式是「盖住再裁」：短边不裁，长边裁掉，且两侧对称。
+    #[test]
+    fn crop_keeps_the_short_side_and_centers_the_overflow() {
+        // 100x100 的方图 → 目标 200x100（宽是高的两倍）
+        // 等比放大到盖住 → 200x200，再上下各裁 50 行
+        let cropped = crop_to_cover(&solid(100, 100), (200, 100));
+        assert_eq!((cropped.width(), cropped.height()), (200, 100));
+    }
+
+    /// 目标比原图小也要正确缩小（下载的封面 256 见方，区域常常比它小）。
+    #[test]
+    fn crop_also_shrinks() {
+        let cropped = crop_to_cover(&solid(256, 256), (60, 40));
+        assert_eq!((cropped.width(), cropped.height()), (60, 40));
+    }
+
+    /// 拉伸模式：直接变成目标尺寸，不保持比例。
+    #[test]
+    fn stretch_resizes_without_keeping_the_ratio() {
+        let stretched = stretch_to(&solid(100, 400), (200, 100));
+        assert_eq!((stretched.width(), stretched.height()), (200, 100));
+    }
+
+    /// 完整显示模式：区域缩到图片比例，居中，绝不超出区域。
+    #[test]
+    fn fit_box_matches_the_image_ratio_and_stays_inside() {
+        let font = FontSize::new(10, 20);
+        let area = Rect::new(0, 0, 34, 11);
+
+        // 方图：列 = 行 × 1（图） × 2（字符高宽比） = 22，水平居中
+        let square = fit_box(&solid(100, 100), area, font);
+        assert_eq!((square.width, square.height), (22, 11));
+        assert_eq!(square.x, (34 - 22) / 2, "居中");
+        assert_eq!(square.y, 0);
+
+        // 16:9 的横图：列 = 11 × 1.778 × 2 ≈ 39，比区域宽 → 反过来按宽算行
+        let wide = fit_box(&solid(160, 90), area, font);
+        assert!(wide.width <= area.width && wide.height <= area.height);
+        assert!(wide.width > square.width, "横图应该更宽");
+    }
+
+    /// 三种模式都不该让图溢出区域——溢出会被 ratatui 裁掉，看起来就是「图缺了一块」。
+    #[test]
+    fn every_mode_stays_within_the_area() {
+        let font = FontSize::new(10, 20);
+        let area = Rect::new(0, 0, 34, 11);
+        for mode in [CoverFill::Crop, CoverFill::Stretch, CoverFill::Fit] {
+            let (image, render) = prepare_cover(&solid(256, 256), area, font, mode);
+            assert!(
+                render.width <= area.width && render.height <= area.height,
+                "{mode:?} 溢出区域：{render:?} 不在 {area:?} 里"
+            );
+            assert!(
+                image.width() > 0 && image.height() > 0,
+                "{mode:?} 不该产生空图"
+            );
+        }
     }
 
     /// 端到端：封面真的画进了 ratatui 的 Buffer。
@@ -802,28 +881,25 @@ mod tests {
         for (x, y, pixel) in pixels.enumerate_pixels_mut() {
             *pixel = image::Rgb([(x * 8) as u8, (y * 8) as u8, 128]);
         }
-        let protocol = ratatui_image::picker::Picker::halfblocks()
-            .new_resize_protocol(image::DynamicImage::ImageRgb8(pixels));
 
         let mut state = AppState::new(crate::config::Config::default());
-        state.cover = crate::app::state::CoverArt {
-            hash: Some("test-hash".to_string()),
-            aspect: 1.0,
-            lines: Vec::new(),
-            protocol: Some(protocol),
-        };
+        state.picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.cover.set_image(
+            "test-hash".to_string(),
+            image::DynamicImage::ImageRgb8(pixels),
+            1.0,
+        );
 
         let area = Rect::new(0, 0, 60, 20);
         let mut terminal = Terminal::new(TestBackend::new(60, 20)).expect("测试后端可用");
         let mut rest = Rect::default();
         let drawn = terminal
             .draw(|frame| {
-                let theme = Theme::for_config(ThemeName::Default, false);
-                rest = draw_cover_block(frame, area, &mut state, &theme, false);
+                rest = draw_cover_block(frame, area, &mut state, CoverPlace::AboveContent);
             })
             .expect("绘制成功");
 
-        assert_eq!(rest.y, 11, "下方内容从封面（10 行 + 1 行间距）之后开始");
+        assert_eq!(rest.y, 11, "下方内容从缩略图（10 行 + 1 行间距）之后开始");
 
         // 落在封面区里的非空格单元格：全是空格就说明图根本没进去
         let painted = drawn
@@ -835,7 +911,57 @@ mod tests {
         assert!(painted > 0, "封面应当写进 Buffer，而不是 stdout");
     }
 
-    /// 根治点：区域不变时**不会**重新编码。
+    /// 铺满模式画出来的格子必须**严格多于**「完整显示」——多出来的正是原先空着的那条。
+    ///
+    /// 用差分而不是绝对像素值：半块字符在上下同色时会退化成空格（用底色表示），
+    /// 「某个格子是不是空格」并不可靠，但「哪种模式覆盖得更广」是可靠的：
+    /// `Fit` 只能画进 22 列，`Crop` 铺满 34 列。
+    #[test]
+    fn fill_mode_paints_more_than_fit_mode() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut pixels = image::RgbImage::new(256, 256);
+        for (x, y, pixel) in pixels.enumerate_pixels_mut() {
+            *pixel = image::Rgb([(x * 7) as u8, (y * 7) as u8, 128]);
+        }
+
+        // 34 × 11 就是宽屏首页左栏那块封面的真实尺寸：像素比例约 1.5:1，而封面是方图
+        let area = Rect::new(0, 0, 34, 11);
+
+        let painted = |mode: CoverFill| {
+            let mut state = AppState::new(crate::config::Config::default());
+            state.picker = Some(ratatui_image::picker::Picker::halfblocks());
+            state.config.cover_fill = mode;
+            state.cover.set_image(
+                "h".to_string(),
+                image::DynamicImage::ImageRgb8(pixels.clone()),
+                1.0,
+            );
+
+            let mut terminal = Terminal::new(TestBackend::new(34, 11)).expect("测试后端可用");
+            let drawn = terminal
+                .draw(|frame| {
+                    draw_cover_block(frame, area, &mut state, CoverPlace::Fill);
+                })
+                .expect("绘制成功");
+            drawn
+                .buffer
+                .content()
+                .iter()
+                .filter(|cell| cell.symbol() != " ")
+                .count()
+        };
+
+        let fitted = painted(CoverFill::Fit);
+        let cropped = painted(CoverFill::Crop);
+        assert!(
+            cropped > fitted,
+            "铺满模式应当比完整显示覆盖得更广：crop={cropped} fit={fitted}"
+        );
+    }
+
+    /// 区域变了才重新编码；区域不变时**一帧都不重编**。
     ///
     /// 之前的病根就是每帧重发——474KB 的转义序列堵死 stdout。这里直接断言
     /// 「第二帧没有任何编码动作」：不编码就没有新的图片数据，ratatui 的 diff
@@ -847,8 +973,6 @@ mod tests {
         use ratatui::buffer::Buffer;
         use ratatui::widgets::StatefulWidget;
 
-        // 尺寸要贴近真实封面（256 见方）。`Resize::Fit` 不会把小图放大，
-        // 用一张装得下图会让「换区域要重新编码」这条永远成立不了。
         let mut pixels = image::RgbImage::new(256, 256);
         for (x, y, pixel) in pixels.enumerate_pixels_mut() {
             *pixel = image::Rgb([x as u8, y as u8, 128]);
@@ -858,10 +982,8 @@ mod tests {
 
         // 交给 widget 的区域由纯函数算出，因此连续两帧必然是同一个矩形——
         // 区域稳定是「不重发」的前提
-        let (first_area, _) =
-            cover_layout(Rect::new(0, 0, 60, 20), 1.0, 2.0, false).expect("够放封面");
-        let (second_area, _) =
-            cover_layout(Rect::new(0, 0, 60, 20), 1.0, 2.0, false).expect("够放封面");
+        let (first_area, _) = thumbnail_layout(Rect::new(0, 0, 60, 20), 1.0, 2.0).expect("够放");
+        let (second_area, _) = thumbnail_layout(Rect::new(0, 0, 60, 20), 1.0, 2.0).expect("够放");
         assert_eq!(first_area, second_area);
 
         let mut first = Buffer::empty(first_area);
@@ -883,7 +1005,7 @@ mod tests {
         );
 
         // 换到更大的区域才重新编码一次：切页 / 改窗口大小走的就是这条路
-        let (bigger, _) = cover_layout(Rect::new(0, 0, 60, 40), 1.0, 2.0, false).expect("够放封面");
+        let (bigger, _) = thumbnail_layout(Rect::new(0, 0, 60, 40), 1.0, 2.0).expect("够放");
         assert_ne!(bigger.height, first_area.height);
         let mut third = Buffer::empty(bigger);
         StatefulImage::default().render(bigger, &mut third, &mut protocol);
@@ -893,15 +1015,63 @@ mod tests {
         );
     }
 
-    /// 剩余区域紧接封面下方，且两者高度加起来仍是原区域高度。
+    /// `CoverArt::fit_to` 的缓存语义：区域不变时协议被复用，**一帧都不重编**；
+    /// 区域一变就必须重编。
+    ///
+    /// 重编意味着重新裁图 + 重新编码（几百 KB 的数据），每帧都做就是之前卡死的
+    /// 那条路。这里必须真的渲染一次才能读到编码结果——`last_encoding_result()`
+    /// 是 widget 在 `resize_encode_render` 里填的，光建协议不算编码。
     #[test]
-    fn remainder_sits_below_the_cover() {
-        let inner = Rect::new(3, 5, 60, 20);
-        let (cover, rest) = cover_layout(inner, 1.0, 2.0, false).expect("60x20 够放封面");
+    fn fit_to_reuses_the_protocol_while_the_area_is_stable() {
+        use ratatui::buffer::Buffer;
+        use ratatui::widgets::StatefulWidget;
 
-        // rows + 1：多留一行当间距，不然封面和下面的内容会糊在一起
-        assert_eq!(rest.y, cover.y + cover.height + 1);
-        assert_eq!(rest.height, inner.height - cover.height - 1);
-        assert_eq!(rest.width, inner.width, "剩余区用满宽度");
+        let picker = ratatui_image::picker::Picker::halfblocks();
+        let mut cover = crate::app::state::CoverArt::default();
+        cover.set_image("h".to_string(), solid(256, 256), 1.0);
+
+        // 画一帧，返回这一帧是否发生了编码
+        fn draw(
+            cover: &mut crate::app::state::CoverArt,
+            area: Rect,
+            picker: &ratatui_image::picker::Picker,
+        ) -> bool {
+            let mut buffer = Buffer::empty(area);
+            let (protocol, render) = cover.fit_to(CoverFill::Crop, area, picker).expect("有原图");
+            assert_eq!(render, area, "裁剪模式的渲染区就是请求区");
+            StatefulImage::default().resize(Resize::Scale(None)).render(
+                render,
+                &mut buffer,
+                protocol,
+            );
+            protocol.last_encoding_result().is_some()
+        }
+
+        let area = Rect::new(0, 0, 34, 11);
+        assert!(draw(&mut cover, area, &picker), "首帧必须编码一次");
+        assert!(
+            !draw(&mut cover, area, &picker),
+            "区域没变就不该再编码——每帧编码正是之前卡死的原因"
+        );
+
+        // 换区域 → 必须重编，否则图还是旧尺寸、右下留空
+        let wider = Rect::new(0, 0, 60, 11);
+        assert!(
+            draw(&mut cover, wider, &picker),
+            "区域变了必须重新编码，否则图还是旧尺寸、填不满"
+        );
+    }
+
+    /// 没有原图时 `fit_to` 返回 `None`——调用方据此留白，而不是画出半张图。
+    #[test]
+    fn fit_to_yields_nothing_without_a_source_image() {
+        let picker = ratatui_image::picker::Picker::halfblocks();
+        let mut cover = crate::app::state::CoverArt::default();
+        assert!(!cover.is_drawable());
+        assert!(
+            cover
+                .fit_to(CoverFill::Crop, Rect::new(0, 0, 34, 11), &picker)
+                .is_none()
+        );
     }
 }

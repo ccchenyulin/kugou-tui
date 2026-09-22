@@ -11,6 +11,7 @@
 
 use crate::app::queue::PlaybackMode;
 use crate::app::state::AppState;
+use crate::config::CoverFill;
 use crate::ui::views::settings::toggle_text;
 
 /// 设置项。顺序即设置页里的显示顺序。
@@ -40,10 +41,12 @@ pub enum Setting {
     LiteMode,
     /// 单曲下载到哪个目录（只能选预设的几个常见位置）。
     DownloadDir,
+    /// 首页大封面怎么铺满它的区域。
+    CoverFill,
 }
 
 impl Setting {
-    pub const ALL: [Setting; 12] = [
+    pub const ALL: [Setting; 13] = [
         Self::Theme,
         Self::Quality,
         Self::PlaybackMode,
@@ -56,6 +59,7 @@ impl Setting {
         Self::Sidebar,
         Self::LiteMode,
         Self::DownloadDir,
+        Self::CoverFill,
     ];
 
     /// 左侧的名字。
@@ -73,6 +77,7 @@ impl Setting {
             Self::Sidebar => "侧边导航",
             Self::LiteMode => "简易模式",
             Self::DownloadDir => "下载目录",
+            Self::CoverFill => "封面铺满",
         }
     }
 
@@ -87,10 +92,11 @@ impl Setting {
             Self::PageSize => "搜索与歌单一次取多少条",
             Self::CacheLimitMib => "超了自动删最旧的，0 为不限",
             Self::BasicColor => "老终端画不出真彩时打开",
-            Self::LyricPanel => "右侧歌词栏（快捷键 y）",
-            Self::Sidebar => "左侧标签导航（快捷键 b）",
+            Self::LyricPanel => "右侧歌词栏（快捷键 l）",
+            Self::Sidebar => "左侧标签导航（快捷键 \\）",
             Self::LiteMode => "关封面与频谱，省内存和 CPU",
             Self::DownloadDir => "下载单曲保存到这里（默认 ~/Music）",
+            Self::CoverFill => "铺满 / 不变形 / 不裁剪，只能取两个",
         }
     }
 }
@@ -115,6 +121,9 @@ pub const PLAYBACK_MODES: [PlaybackMode; 4] = [
     PlaybackMode::RepeatOne,
     PlaybackMode::Shuffle,
 ];
+
+/// 封面铺满方式候选。顺序即设置页里按 → 的轮转顺序，默认值排第一。
+pub const COVER_FILLS: [CoverFill; 3] = [CoverFill::Crop, CoverFill::Stretch, CoverFill::Fit];
 
 /// 单曲下载目录的预设选项。
 ///
@@ -166,6 +175,7 @@ pub fn value_text(setting: Setting, state: &AppState) -> String {
         Setting::Sidebar => toggle_text(state.sidebar_visible),
         Setting::LiteMode => toggle_text(state.config.lite_mode),
         Setting::DownloadDir => expand_download_dir(state.config.download_dir.as_deref()),
+        Setting::CoverFill => state.config.cover_fill.label().to_string(),
     }
 }
 

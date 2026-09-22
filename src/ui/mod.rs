@@ -22,7 +22,6 @@
 //!
 //! 这样一套布局从 80 列的 SSH 窗口到 200 列的宽屏都能用，不需要用户配置。
 
-pub mod cover;
 pub mod icons;
 pub mod theme;
 pub mod views;
@@ -93,11 +92,12 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
         // `render_sidebar` 的推进方式走一遍：遇到新分组先跳过标题行，再登记
         // 该标签那一行。算错的话点「搜索」会跳到别的页，而且没有任何提示。
         //
-        // 命中的仍是 `tab.index()`（`ALL` 里的下标）——处理鼠标事件那边按
-        // 这个下标取 Tab，与显示顺序无关。
-        let mut row = sidebar_area.y + 2; // 跳过上边框与 "kugou-tui 1/12" 标题行
+        // 命中的是**显示顺序里的位置**（`SIDEBAR_ORDER` 的下标），app 层用
+        // `Tab::from_sidebar_index` 换回标签页——两边都按同一份顺序走，才不会
+        // 「屏幕上点第一个、跳到了数字键意义上的第一个」。
+        let mut row = sidebar_area.y + 2; // 跳过上边框与 "kugou-tui 1/10" 标题行
         let mut current_group: Option<&'static str> = None;
-        for tab in Tab::SIDEBAR_ORDER {
+        for (index, tab) in Tab::SIDEBAR_ORDER.iter().enumerate() {
             if Some(tab.group()) != current_group {
                 current_group = Some(tab.group());
                 row += 1; // 分组标题行，不可点击
@@ -106,7 +106,7 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
                 break;
             }
             let rect = Rect::new(sidebar_area.x, row, sidebar_area.width, 1);
-            state.add_hit_zone(rect, HitTarget::Tab(tab.index()), 0, Tab::ALL.len());
+            state.add_hit_zone(rect, HitTarget::Tab(index), 0, Tab::SIDEBAR_ORDER.len());
             row += 1;
         }
         views::render_sidebar(frame, sidebar_area, state, &theme);
@@ -167,19 +167,11 @@ fn render_main(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Them
         return;
     }
 
-    // 首页 / 队列 / 歌词 / 封面都是单一用途的页面，整块主区都给它——
+    // 首页 / 队列 / 设置都是单一用途的页面，整块主区都给它——
     // 塞进下面那套「条目 + 歌曲 + 队列」的分割里，每块都会小到没法用。
     match state.tab {
         Tab::Home => {
             views::render_home(frame, area, state, theme);
-            return;
-        }
-        Tab::Lyrics => {
-            views::render_lyrics_page(frame, area, state, theme);
-            return;
-        }
-        Tab::Cover => {
-            views::render_cover_page(frame, area, state, theme);
             return;
         }
         Tab::Settings => {
@@ -242,13 +234,7 @@ fn render_main(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Them
             // 鼠标命中区长度为 0，点上去不会有任何反应
             Tab::Sources => state.config.sources.ordered().len(),
             // 其余页面没有条目列表
-            Tab::Search
-            | Tab::Home
-            | Tab::Queue
-            | Tab::Lyrics
-            | Tab::Cover
-            | Tab::Visualizer
-            | Tab::Settings => 0,
+            Tab::Search | Tab::Home | Tab::Queue | Tab::Visualizer | Tab::Settings => 0,
         };
         state.add_hit_zone(
             Rect::new(
@@ -343,8 +329,6 @@ impl AppState {
             Tab::Search
             | Tab::Home
             | Tab::Queue
-            | Tab::Lyrics
-            | Tab::Cover
             | Tab::Visualizer
             | Tab::Sources
             | Tab::Settings => 0,
@@ -399,7 +383,7 @@ fn render_primary(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &T
         }
         Tab::Sources => views::render_sources(frame, area, state, focused, theme),
         // 这几页都由 render_main 整屏渲染，不会走到这里
-        Tab::Home | Tab::Queue | Tab::Lyrics | Tab::Cover | Tab::Visualizer | Tab::Settings => {}
+        Tab::Home | Tab::Queue | Tab::Visualizer | Tab::Settings => {}
     }
 }
 
@@ -425,13 +409,7 @@ fn render_song_pane(
         Tab::Ranks => Some(&mut state.ranks.songs),
         Tab::Cloud => Some(&mut state.cloud.songs),
         // 音源页没有歌曲列表
-        Tab::Home
-        | Tab::Queue
-        | Tab::Lyrics
-        | Tab::Cover
-        | Tab::Visualizer
-        | Tab::Sources
-        | Tab::Settings => None,
+        Tab::Home | Tab::Queue | Tab::Visualizer | Tab::Sources | Tab::Settings => None,
     }) else {
         return;
     };

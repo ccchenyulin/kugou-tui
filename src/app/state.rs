@@ -22,7 +22,7 @@ use crate::config::Config;
 pub enum Tab {
     /// 首页：正在播放的总览——封面 + 曲目信息 + 歌词。
     ///
-    /// 这是默认落点：打开播放器最想看到的是「现在在放什么」，
+    /// 这是默认落点，也是侧边栏的第一项：打开播放器最想看到的是「现在在放什么」，
     /// 而不是一个空的搜索框。
     #[default]
     Home,
@@ -33,48 +33,53 @@ pub enum Tab {
     Cloud,
     /// 播放队列。原先挤在侧边栏/弹窗里，独立成页后能看全、能翻页。
     Queue,
-    /// 歌词。原先和封面挤在同一块面板，拆开之后两边都舒展。
-    Lyrics,
-    /// 封面。终端支持图形协议时放真图，否则退回半块字符画。
-    Cover,
     /// 音频可视化。不承载列表，整块主区都用来画实时频谱。
     Visualizer,
     /// 音源管理：启用/禁用、设默认、调优先级、查看可用状态。
-    ///
-    /// 刻意排在后面：前面几个的顺序是从第一版就定下来的，老用户已经形成
-    /// 肌肉记忆，插队会让所有数字键错位。
     Sources,
     /// 设置：主题、音质、播放模式、缓存……集中改配置的地方。
     Settings,
 }
 
 impl Tab {
-    /// 全部标签页。**前 10 个对应数字键 1-9 与 0**；`Sources` 排最后不进数字键
-    /// （由 `v` 打开）——常用页面放在能被数字键直接够到的位置。
-    pub const ALL: [Tab; 12] = [
-        Tab::Home,
-        Tab::Search,
-        Tab::Playlists,
-        Tab::Artists,
-        Tab::Ranks,
-        Tab::Cloud,
-        Tab::Queue,
-        Tab::Lyrics,
-        Tab::Cover,
-        Tab::Visualizer,
-        Tab::Sources,
-        Tab::Settings,
+    /// 全部标签页，顺序**就是数字键 1-9 与 0 的落点**。
+    ///
+    /// 原先「歌词」与「封面」占着下标 7、8（数字键 8、9），删掉这两页之后如果
+    /// 直接顺延，`可视化` 会被从 `0` 顶到 `8`、`音源`/`设置` 也跟着往前挪——
+    /// 老用户已经形成的肌肉记忆会全乱。所以这里把 `可视化` 留在下标 9（仍然是
+    /// `0` 键），让 `音源`/`设置` 去填空出来的 8、9 两格：
+    /// **1-7 与 0 一个都没动**，只有原先被两页占用的 8、9 换了主人。
+    pub const ALL: [Tab; 10] = [
+        Tab::Home,       // 1
+        Tab::Search,     // 2
+        Tab::Playlists,  // 3
+        Tab::Artists,    // 4
+        Tab::Ranks,      // 5
+        Tab::Cloud,      // 6
+        Tab::Queue,      // 7
+        Tab::Sources,    // 8
+        Tab::Settings,   // 9
+        Tab::Visualizer, // 0
     ];
 
     /// 数字键能直接够到的标签页数量（1-9 加 0）。
+    ///
+    /// 目前正好等于 [`Self::ALL`] 的长度，所以每个标签都够得到；留着它是为了
+    /// 以后再加标签页时，新页默认落在数字键之外，而不是悄悄挤掉某个键。
     pub const NUMBERED: usize = 10;
 
     /// 侧边栏的显示顺序：按 [`Self::group`] 归类排好。
     ///
     /// 与 `ALL` **故意不同**——`ALL` 的顺序决定数字键 1-9/0 的落点，动它会让
-    /// 肌肉记忆全乱；而平铺 12 个标签的侧边栏像一堵文字墙。所以这里只改显示
+    /// 肌肉记忆全乱；而平铺 10 个标签的侧边栏像一堵文字墙。所以这里只改显示
     /// 顺序，并在每个标签前标出它的数字键，用户照着按不会错。
-    pub const SIDEBAR_ORDER: [Tab; 12] = [
+    ///
+    /// 「正在播放」整组排在最前：首页是默认落点，也是用得最多的一页，压在
+    /// 列表页下面每按一次上下键都要路过一串才发现「不太舒服」。
+    pub const SIDEBAR_ORDER: [Tab; 10] = [
+        // 正在播放
+        Tab::Home,
+        Tab::Visualizer,
         // 发现
         Tab::Search,
         Tab::Playlists,
@@ -83,11 +88,6 @@ impl Tab {
         // 我的
         Tab::Cloud,
         Tab::Queue,
-        // 正在播放
-        Tab::Home,
-        Tab::Lyrics,
-        Tab::Cover,
-        Tab::Visualizer,
         // 设置
         Tab::Sources,
         Tab::Settings,
@@ -103,8 +103,6 @@ impl Tab {
             Self::Cloud => "云端",
             Self::Visualizer => "可视化",
             Self::Queue => "队列",
-            Self::Lyrics => "歌词",
-            Self::Cover => "封面",
             Self::Sources => "音源",
             Self::Settings => "设置",
         }
@@ -121,23 +119,21 @@ impl Tab {
             Self::Ranks => icons::rank(),
             Self::Cloud => icons::cloud(),
             Self::Queue => icons::queue(),
-            Self::Lyrics => icons::lyrics(),
-            Self::Cover => icons::cover(),
             Self::Visualizer => icons::visualizer(),
             Self::Sources => icons::sources(),
             Self::Settings => icons::settings(),
         }
     }
 
-    /// 侧边栏分组标题。12 个标签平铺会让侧边栏像一堵文字墙，分组后才扫得动。
+    /// 侧边栏分组标题。10 个标签平铺会让侧边栏像一堵文字墙，分组后才扫得动。
     ///
     /// 分组**不改变** `ALL` 的顺序——顺序决定数字键 1-9/0 的落点，动了会让
     /// 用户肌肉记忆全乱。这里只是显示时插一行标题。
     pub fn group(self) -> &'static str {
         match self {
+            Self::Home | Self::Visualizer => "正在播放",
             Self::Search | Self::Playlists | Self::Artists | Self::Ranks => "发现",
             Self::Cloud | Self::Queue => "我的",
-            Self::Home | Self::Lyrics | Self::Cover | Self::Visualizer => "正在播放",
             Self::Sources | Self::Settings => "设置",
         }
     }
@@ -167,15 +163,14 @@ impl Tab {
         format!("{}/{}", self.index() + 1, Self::ALL.len())
     }
 
-    /// `1`..`6` 数字键（与 `Tab::ALL` 长度保持一致）。
-    /// 数字键 → 标签页。\`0\` 表示第 10 个（可视化），其余按 1 基索引。
+    /// 数字键 → 标签页。`0` 表示第 10 个（可视化），其余按 1 基索引。
     pub fn from_number(number: u8) -> Option<Self> {
         let index = if number == 0 {
             9
         } else {
             number.checked_sub(1)? as usize
         };
-        // 只够到 NUMBERED 范围内的页面；音源管理排最后，由 \`v\` 打开
+        // 只够到 NUMBERED 范围内的页面；以后新增的标签页默认落在数字键之外
         if index >= Self::NUMBERED {
             return None;
         }
@@ -184,11 +179,10 @@ impl Tab {
 
     /// 侧边栏第 `index` 项对应的标签页（鼠标点击用）。
     ///
-    /// 刻意不走 [`Self::from_number`]：那是**数字键**的映射，只覆盖前
-    /// [`Self::NUMBERED`] 页。鼠标不受键盘上那十个键的限制——列表里点得到
-    /// 第几项，就该切到第几页。
+    /// 走的是**显示顺序** [`Self::SIDEBAR_ORDER`]，不是数字键落点：鼠标不受
+    /// 键盘上那十个键的限制——列表里点得到第几项，就该切到第几页。
     pub fn from_sidebar_index(index: usize) -> Option<Self> {
-        Self::ALL.get(index).copied()
+        Self::SIDEBAR_ORDER.get(index).copied()
     }
 }
 
@@ -214,7 +208,7 @@ pub enum Focus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HitTarget {
-    /// 侧边栏标签，值为标签下标（0-4）。
+    /// 侧边栏标签，值为它在 [`Tab::SIDEBAR_ORDER`]（显示顺序）里的位置。
     Tab(usize),
     /// 主区的「条目列表」（歌单/歌手/榜单）。
     Entries,
@@ -638,33 +632,95 @@ pub struct CloudPane {
 pub struct CoverArt {
     /// 封面属于哪首歌（用 hash 标识）。`None` 表示还没有封面。
     pub hash: Option<String>,
-    /// 半块字符画，每行等宽。**只在拿不到图形协议时的兜底**。
-    pub lines: Vec<String>,
-    /// 图片真实宽高比（宽/高），决定封面占多少列。
+    /// 图片真实宽高比（宽/高）。
     ///
     /// 封面不都是正方形——单曲封面多为方图，但歌手照、歌单头图常有 16:9 之类
-    /// 的比例。按真实比例算列数才不会把图压扁或拉长。拿不到时按 1.0（方图）。
+    /// 的比例。拿不到时按 1.0（方图）。
     pub aspect: f32,
+    /// 解码后的原图。
+    ///
+    /// **必须留着**：封面要按目标区域重新裁剪，而区域会变——改窗口大小、切到别的
+    /// 页面都会让它变。`Picker::new_resize_protocol` 会吃掉 image，所以用 `Arc`
+    /// 存一份，重建时克隆。
+    source: Option<std::sync::Arc<image::DynamicImage>>,
     /// 图形协议的图片状态，由 `ratatui-image` 管理。
     ///
     /// 有它就不用自己往 stdout 写转义序列了——widget 会把图片画进 ratatui 的
     /// Buffer，由框架的 diff 统一决定输出什么：既不会阻塞写入，也不会打乱
     /// 光标跟踪（这两点正是之前卡死与闪烁的根因），而且内容没变时一个字节
     /// 都不会重发（kitty 走「已传输图片 + 占位符」引用）。
-    pub protocol: Option<ratatui_image::protocol::StatefulProtocol>,
+    ///
+    /// 由 [`Self::fit_to`] 按需构建，不是加载封面时就建好的。
+    protocol: Option<ratatui_image::protocol::StatefulProtocol>,
+    /// `protocol` 是按什么编出来的。
+    ///
+    /// 图片协议是按**目标区域的尺寸**编码的：区域或铺满方式一变就必须重编，
+    /// 否则图还是上一次的尺寸，画出来会缩在区域一角（「泳池只给左上角注水」
+    /// 说的就是这个）。有它才能判断「要不要重编」。
+    build: Option<CoverBuild>,
+}
+
+/// [`CoverArt::fit_to`] 编协议时的入参与结果。
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CoverBuild {
+    /// 铺满方式（来自 [`crate::config::CoverFill`]）。
+    mode: crate::config::CoverFill,
+    /// 调用方请求的区域。
+    requested: Rect,
+    /// 实际渲染进去的矩形。`CoverFill::Fit` 下它比 `requested` 小（图不铺满）。
+    render: Rect,
 }
 
 impl CoverArt {
+    /// 换一张封面。
+    pub fn set_image(&mut self, hash: String, image: image::DynamicImage, aspect: f32) {
+        self.hash = Some(hash);
+        self.aspect = aspect;
+        self.source = Some(std::sync::Arc::new(image));
+        self.protocol = None;
+        self.build = None;
+    }
+
     /// 是否属于这首歌。
     pub fn belongs_to(&self, hash: &str) -> bool {
         self.hash.as_deref() == Some(hash)
     }
 
     /// 有没有可以画出来的内容。
-    ///
-    /// 图形协议优先；探测不出终端能力时才轮到字符画。
     pub fn is_drawable(&self) -> bool {
-        self.protocol.is_some() || !self.lines.is_empty()
+        self.source.is_some()
+    }
+
+    /// 取一份「按 `mode` 铺进 `area`」的图片协议，必要时重新编码。
+    ///
+    /// 返回（协议, 真正要渲染进去的矩形）。没有原图时返回 `None`。
+    ///
+    /// 只在区域或铺满方式**变了**的时候重编：区域稳定时一帧都不会重发数据，
+    /// 这是「不卡死、不闪」的前提。
+    pub fn fit_to(
+        &mut self,
+        mode: crate::config::CoverFill,
+        area: Rect,
+        picker: &ratatui_image::picker::Picker,
+    ) -> Option<(&mut ratatui_image::protocol::StatefulProtocol, Rect)> {
+        let source = self.source.as_ref()?;
+
+        let stale = self
+            .build
+            .is_none_or(|build| build.mode != mode || build.requested != area);
+        if stale {
+            let (image, render) =
+                crate::ui::views::prepare_cover(source, area, picker.font_size(), mode);
+            self.protocol = Some(picker.new_resize_protocol(image));
+            self.build = Some(CoverBuild {
+                mode,
+                requested: area,
+                render,
+            });
+        }
+
+        let render = self.build?.render;
+        Some((self.protocol.as_mut()?, render))
     }
 }
 
@@ -674,7 +730,8 @@ impl std::fmt::Debug for CoverArt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CoverArt")
             .field("hash", &self.hash)
-            .field("lines", &self.lines.len())
+            .field("aspect", &self.aspect)
+            .field("source", &self.source.is_some())
             .field("protocol", &self.protocol.is_some())
             .finish()
     }
@@ -685,16 +742,13 @@ impl std::fmt::Debug for CoverArt {
 /// 与 `CoverArt` 分开：封面是当前歌曲的专辑图，切歌就换；头像在登录期间不变。
 #[derive(Default)]
 pub struct Avatar {
-    /// 图形协议的图片状态，由 `ratatui-image` 管理。探测不到终端能力时为 None。
+    /// 图形协议的图片状态，由 `ratatui-image` 管理。没取到头像时为 None。
     pub protocol: Option<ratatui_image::protocol::StatefulProtocol>,
-    /// 半块字符画兜底，只在没有图形协议时用。
-    pub lines: Vec<String>,
 }
 
 impl std::fmt::Debug for Avatar {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Avatar")
-            .field("lines", &self.lines.len())
             .field("protocol", &self.protocol.is_some())
             .finish()
     }
@@ -721,6 +775,12 @@ pub struct AppState {
     pub config: Config,
     /// 是否已配置登录 cookie。未登录时云端功能不可用。
     pub logged_in: bool,
+    /// 终端图形能力（封面 / 头像用哪种图片协议、单元格像素尺寸）。
+    ///
+    /// 放这里而不是 `App` 上：渲染封面时要按目标区域的像素尺寸裁图，而区域只有
+    /// 渲染时才知道，所以渲染路径必须能拿到它。它不参与任何后台线程，
+    /// 不违反「`Picker` 不是 `Send`」这条约束。
+    pub picker: Option<ratatui_image::picker::Picker>,
 
     // ---- 界面 ----
     pub tab: Tab,
@@ -1115,6 +1175,8 @@ impl AppState {
         let mut state = Self {
             config,
             logged_in,
+            // 由 `App::new` 探测终端能力后填入
+            picker: None,
             tab: Tab::default(),
             focus: Focus::default(),
             last_qr_key_at: None,
@@ -1253,13 +1315,7 @@ impl AppState {
                 }
             }
             // 其余页面没有条目列表
-            Tab::Search
-            | Tab::Home
-            | Tab::Queue
-            | Tab::Lyrics
-            | Tab::Cover
-            | Tab::Visualizer
-            | Tab::Settings => {}
+            Tab::Search | Tab::Home | Tab::Queue | Tab::Visualizer | Tab::Settings => {}
         }
     }
 
@@ -1279,13 +1335,7 @@ impl AppState {
             Tab::Artists => Some(&self.artists.songs),
             Tab::Ranks => Some(&self.ranks.songs),
             Tab::Cloud => Some(&self.cloud.songs),
-            Tab::Home
-            | Tab::Queue
-            | Tab::Lyrics
-            | Tab::Cover
-            | Tab::Visualizer
-            | Tab::Sources
-            | Tab::Settings => None,
+            Tab::Home | Tab::Queue | Tab::Visualizer | Tab::Sources | Tab::Settings => None,
         }
     }
 
@@ -1297,13 +1347,7 @@ impl AppState {
             Tab::Artists => Some(&mut self.artists.songs),
             Tab::Ranks => Some(&mut self.ranks.songs),
             Tab::Cloud => Some(&mut self.cloud.songs),
-            Tab::Home
-            | Tab::Queue
-            | Tab::Lyrics
-            | Tab::Cover
-            | Tab::Visualizer
-            | Tab::Sources
-            | Tab::Settings => None,
+            Tab::Home | Tab::Queue | Tab::Visualizer | Tab::Sources | Tab::Settings => None,
         }
     }
 
@@ -1545,15 +1589,47 @@ mod tests {
         }
     }
 
-    /// 数字键落点没被显示重排影响：`ALL` 的前 10 个仍对应 1-9 与 0。
+    /// 数字键落点没被显示重排影响，删掉歌词/封面两页后也**没有顺延**。
+    ///
+    /// 顺延的话 `0`（可视化）会被顶到 `8`、音源/设置也跟着前移，老用户已经形成
+    /// 的肌肉记忆就全乱了。这条测试就是钉住「1-7 与 0 一个都没动」。
     #[test]
     fn number_keys_follow_all_order() {
         assert_eq!(Tab::ALL[0].number_key(), Some('1'));
+        assert_eq!(Tab::ALL[6].number_key(), Some('7'));
         assert_eq!(Tab::ALL[8].number_key(), Some('9'));
         assert_eq!(Tab::ALL[9].number_key(), Some('0'));
-        // 超出数字键范围的两个（音源、设置）没有键
-        assert_eq!(Tab::ALL[10].number_key(), None);
-        assert_eq!(Tab::ALL[11].number_key(), None);
+
+        // 1-7 与 0 是删页之前就定下的，必须一个都没动
+        assert_eq!(Tab::from_number(1), Some(Tab::Home));
+        assert_eq!(Tab::from_number(2), Some(Tab::Search));
+        assert_eq!(Tab::from_number(7), Some(Tab::Queue));
+        assert_eq!(Tab::from_number(0), Some(Tab::Visualizer));
+
+        // 空出来的 8、9 给了原先够不到数字键的音源与设置
+        assert_eq!(Tab::from_number(8), Some(Tab::Sources));
+        assert_eq!(Tab::from_number(9), Some(Tab::Settings));
+
+        // 越界被挡住：11 是 1 基索引下的第 11 项，而标签页只有 10 个
+        assert_eq!(Tab::from_number(11), None, "越界的数字键不该切到任何页");
+    }
+
+    /// 鼠标点击侧边栏必须能到**每一页**，且下标按**显示顺序**解释。
+    ///
+    /// 命中区登记的就是 `SIDEBAR_ORDER` 里的位置，所以这里必须拿它比对——
+    /// 拿 `ALL` 比会「测试全绿、点哪都跳错页」。
+    #[test]
+    fn sidebar_click_reaches_every_tab() {
+        for (index, expected) in Tab::SIDEBAR_ORDER.iter().enumerate() {
+            assert_eq!(
+                Tab::from_sidebar_index(index),
+                Some(*expected),
+                "侧边栏第 {index} 项应当切到 {expected:?}"
+            );
+        }
+        // 第一项是首页——侧边栏置顶的那个，点它必须回到首页
+        assert_eq!(Tab::from_sidebar_index(0), Some(Tab::Home));
+        assert!(Tab::from_sidebar_index(Tab::SIDEBAR_ORDER.len()).is_none());
     }
 
     fn named(name: &str) -> Song {
@@ -1658,52 +1734,6 @@ mod tests {
         state.select(Some(5));
         move_selection(&mut state, 0, 1);
         assert_eq!(state.selected(), None);
-    }
-
-    #[test]
-    fn tab_numbers_map_to_tabs() {
-        // 1-9 按 ALL 的顺序；0 是第 10 项（可视化）
-        assert_eq!(Tab::from_number(1), Some(Tab::Home));
-        assert_eq!(Tab::from_number(2), Some(Tab::Search));
-        assert_eq!(Tab::from_number(6), Some(Tab::Cloud));
-        assert_eq!(Tab::from_number(7), Some(Tab::Queue));
-        assert_eq!(Tab::from_number(8), Some(Tab::Lyrics));
-        assert_eq!(Tab::from_number(9), Some(Tab::Cover));
-        assert_eq!(
-            Tab::from_number(0),
-            Some(Tab::Visualizer),
-            "0 键 = 第 10 项"
-        );
-        // 音源管理排在 NUMBERED 之外，数字键够不到（用 v 打开）。
-        // 11 是 1 基索引下的第 11 项，正好指向 Sources，应当被挡住。
-        assert_eq!(Tab::from_number(11), None, "音源页不该被数字键够到");
-    }
-
-    /// 鼠标点击侧边栏必须能到**每一页**，包括数字键够不到的那几页。
-    ///
-    /// 之前点击走的是 `from_number`，结果点第 11 项（音源）拿到 None，
-    /// 表现就是「点了没反应」。
-    #[test]
-    fn sidebar_click_reaches_every_tab() {
-        for (index, expected) in Tab::ALL.iter().enumerate() {
-            assert_eq!(
-                Tab::from_sidebar_index(index),
-                Some(*expected),
-                "侧边栏第 {index} 项应当切到 {expected:?}"
-            );
-        }
-        // 最后一页正是数字键够不到、但鼠标必须够得到的那个。
-        // 不写死下标：以后再加标签页时这条不用跟着改。
-        let last = Tab::ALL.len() - 1;
-        assert_eq!(
-            Tab::from_sidebar_index(last),
-            Some(*Tab::ALL.last().unwrap())
-        );
-        assert!(
-            Tab::from_number(Tab::ALL.len() as u8).is_none(),
-            "最后一页数字键够不到，才更要点得到"
-        );
-        assert!(Tab::from_sidebar_index(Tab::ALL.len()).is_none());
     }
 
     /// 5fps（200ms 一拍）下，鼓点的瞬时冲击不能被一帧走完——否则块字符在

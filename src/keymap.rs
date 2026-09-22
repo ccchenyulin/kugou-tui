@@ -93,7 +93,7 @@ pub enum Action {
     // ---- 业务 ----
     /// 打开搜索输入框。
     OpenSearch,
-    /// 打开设置页（数字键够不到它，所以要有直达键）。
+    /// 打开设置页（直达键；它同时也够得到数字键 9）。
     OpenSettings,
     /// 下载当前播放歌曲到设置页里选的目录。
     DownloadCurrent,
@@ -141,7 +141,7 @@ pub enum Action {
     RaiseSourcePriority,
     LowerSourcePriority,
     /// 按下了数字 1-9。语义由 App 按当前焦点决定：
-    /// 侧边栏 → 切标签页；列表内 → 跳到第 N 项。
+    /// 侧边栏 → 切标签页。数字键只做这一件事，不会去选中列表项。
     Digit(u8),
 
     /// 未绑定。
@@ -416,8 +416,8 @@ fn resolve_normal(key: KeyEvent) -> Action {
 
         // ---- 业务 ----
         KeyCode::Char('/') => Action::OpenSearch,
-        // 设置页排在侧边栏最后，数字键（1-9 加 0）够不到，得给它一个直达键。
-        // 逗号在多数键盘上挨着 m/n 那一排，且不与任何现有键冲突。
+        // 设置页的直达键。它现在也够得到数字键 9，但逗号仍在多数键盘上挨着
+        // m/n 那一排、不与任何现有键冲突，留着当第二条路径。
         KeyCode::Char(',') => Action::OpenSettings,
         KeyCode::Char('R') => Action::Reload,
         KeyCode::Char('a') => Action::QueueAppend,
@@ -451,9 +451,13 @@ fn resolve_normal(key: KeyEvent) -> Action {
         KeyCode::Char('K') => Action::RaiseSourcePriority,
         KeyCode::Char('J') => Action::LowerSourcePriority,
 
-        // 1-9 的语义按焦点决定：侧边栏里是切标签页，列表里是跳到对应项。
+        // 0-9 的语义按焦点决定：侧边栏里是切标签页，列表里是跳到对应项。
         // keymap 只产出「按了数字几」，具体含义交给 App 层判断。
-        KeyCode::Char(digit @ '1'..='9') => Action::Digit(digit as u8 - b'0'),
+        //
+        // `0` 必须在内：它是第 10 个标签页（可视化）的键，`Tab::number_key()`
+        // 会把它印在侧边栏上。原先这里写的是 `'1'..='9'`，于是侧边栏显示
+        // 「0 可视化」、按下去却毫无反应——文档和界面都在骗人。
+        KeyCode::Char(digit @ '0'..='9') => Action::Digit(digit as u8 - b'0'),
         // Shift 组合的字母键已被上面的显式分支吃掉，这里兜底避免误触发
         KeyCode::Char(_) if shift => Action::None,
         _ => Action::None,
@@ -466,10 +470,12 @@ pub const CHEATSHEET: &[(&str, &str, &str)] = &[
     ("? / F1", "打开本帮助", "全局"),
     ("\\", "显示/隐藏侧边栏", "全局"),
     ("v", "切换音源", "全局"),
-    // 数字键只有 1-9 加 0，够不到最后两页（音源、设置）——它们得靠鼠标点侧边栏
-    // 或各自的直达键。改标签页数量时必须同步这里，否则帮助面板会指向一个不存在
-    // 的键，用户照着按却没反应，很难自查。
-    ("1..9 / 0", "侧边栏切换标签页 / 列表内跳到第 N 项", "导航"),
+    // 数字键 1-9 加 0 覆盖全部 10 个标签页，落点见 `Tab::ALL`。
+    // **只切标签页，不做「列表内跳到第 N 项」**——焦点通常在歌曲列表上，
+    // 若数字键改成跳列表项，最常用的「按数字切页」就没了。
+    // 改标签页数量时必须同步这里，否则帮助面板会指向一个不存在的键，
+    // 用户照着按却没反应，很难自查。
+    ("1..9 / 0", "切换标签页", "导航"),
     ("Tab / S-Tab", "切换焦点区域", "导航"),
     ("j / k", "上下移动", "导航"),
     ("g / G", "跳到首行 / 末行", "导航"),
@@ -564,5 +570,23 @@ mod tests {
         let forced = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(resolve(forced, KeyMode::Normal), Action::ForceQuit);
         assert_eq!(resolve(forced, KeyMode::TextInput), Action::ForceQuit);
+    }
+
+    /// 10 个数字键必须**全部**能产出 `Action::Digit`，包括 `0`。
+    ///
+    /// 原先的分支写的是 `'1'..='9'`，把 `0` 漏掉了：侧边栏印着「0 可视化」、
+    /// 文档写着「1–9、0」、`Tab::number_key()` 也照常返回 `'0'`，但按下去
+    /// 什么都不会发生——界面和文档一起骗人，而且没有任何报错。
+    /// 这条测试按 `Tab::ALL` 的落点逐个验，改标签页数量时也会一起被钉住。
+    #[test]
+    fn every_digit_key_reaches_a_tab() {
+        for digit in '0'..='9' {
+            let event = KeyEvent::new(KeyCode::Char(digit), KeyModifiers::NONE);
+            assert_eq!(
+                resolve(event, KeyMode::Normal),
+                Action::Digit(digit as u8 - b'0'),
+                "「{digit}」应当是切标签页"
+            );
+        }
     }
 }
