@@ -36,6 +36,21 @@ pub enum PlaylistSource {
     Cloud,
 }
 
+/// 同步当日「概念版」VIP 的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VipClaimOutcome {
+    /// 这次领到了（领一天 + 升级两步都过了）。
+    Claimed,
+    /// 服务端说今天已经领过了。
+    ///
+    /// **单独分一档是必要的**：领取接口对这种情况只回一个 `error_code`、不给描述，
+    /// 混进 `Failed` 就会显示成「领取失败 · 请到手机端领取」——而事实恰恰相反，
+    /// 手机上领过了才是原因。
+    AlreadyClaimed,
+    /// 真的失败了，附带可读原因。
+    Failed(String),
+}
+
 /// 一次异步任务的产出。
 ///
 /// 每个变体都自带「这次请求是针对什么」的上下文（关键词、歌单、歌手、歌曲 hash），
@@ -132,6 +147,16 @@ pub enum Loaded {
     /// 当前账号的会员信息摘要（用于界面显示）。
     VipStatus {
         label: String,
+    },
+    /// 同步「概念版」当天 VIP 的结果。
+    VipClaimed {
+        day: String,
+        outcome: VipClaimOutcome,
+        /// 是不是用户手动触发的（按 `V` 或点那一行）。
+        ///
+        /// 自动触发时「今天已经领过」不该弹提示——那会每次启动都刷一条没用的
+        /// 状态栏消息，而面板上本来就写着「今日 VIP 已领取」。
+        manual: bool,
     },
     /// 当前登录用户的资料（昵称 / 头像 / 等级 / 听歌时长）。
     ///

@@ -220,6 +220,8 @@ pub enum HitTarget {
     Progress,
     /// 设置页的条目列表。
     Settings,
+    /// 「我的资料」里的「领取今日 VIP」那一行。
+    VipClaim,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -886,6 +888,12 @@ pub struct AppState {
     pub cover: CoverArt,
     /// 当前账号的会员摘要（如「概念版 SVIP · 至 09-21」），未登录或未取到时为 None。
     pub vip_label: Option<String>,
+    /// 上一次领取「概念版」当天 VIP 的日期（`2026-09-23`），随会话持久化。
+    ///
+    /// 用来做到「每天只领一次」——上游文档写着「尽量别频繁调用」，接口还带风控。
+    pub vip_claimed_day: Option<String>,
+    /// 正在领 VIP。期间界面上那一行显示「领取中…」，并且挡住重复触发。
+    pub vip_claiming: bool,
     /// 当前登录用户的资料（昵称 / 头像 / 等级 / 听歌时长）。
     pub user_info: Option<crate::api::cloud::UserInfo>,
     /// 登录用户的头像。和 `cover`（当前歌曲专辑图）分开存。
@@ -1236,6 +1244,8 @@ impl AppState {
             quality_picker: None,
             prompt: None,
             vip_label: None,
+            vip_claimed_day: None,
+            vip_claiming: false,
         };
 
         state.apply_empty_hints();

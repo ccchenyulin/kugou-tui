@@ -606,6 +606,20 @@ const AVATAR_COLUMNS: u16 = 12;
 /// 固定值，不能被封面框挤掉——封面用剩下的空间。
 const ACCOUNT_HEIGHT: u16 = 8;
 
+/// 今天的「概念版」VIP 是否已经领过。
+///
+/// 比较的是**本地日期**，必须和领取时用的是同一套算法（[`crate::util::today_local`]）
+/// ——两边不一致会出现「领了却显示没领」，于是每次都白打一遍接口。
+///
+/// 取不到本地日期时返回 `false`（显示成「还没领」）而不是 `true`：那种情况下
+/// 按 `V` 会得到一句「取不到本地日期」的解释，比默默显示「已领取」这个谎话好。
+fn claimed_today(state: &AppState) -> bool {
+    let Some(today) = crate::util::today_local() else {
+        return false;
+    };
+    state.vip_claimed_day.as_deref() == Some(today.as_str())
+}
+
 /// 首页左下角的账号区：头像 + 昵称 · 等级 · 累计听歌时长。
 ///
 /// **刻意不放**粉丝数、关注数、访客、星座、勋章——`/user/detail` 返回十几个
@@ -684,6 +698,33 @@ fn render_account(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &T
             truncate_to_width(label, text_area.width as usize),
             theme.now_playing(),
         )));
+    }
+
+    // 领取今日 VIP。**只有概念版音源才显示**——这是概念版专属接口，标准版账号
+    // 调了只会拿到错误码，摆一个按了没用的入口比不摆更糟。
+    if state.config.active_source_kind() == crate::source::SourceKind::KugouConcept
+        && (lines.len() as u16) < text_area.height
+    {
+        let (text, style) = if state.vip_claiming {
+            ("领取中…".to_string(), theme.dim())
+        } else if claimed_today(state) {
+            ("今日 VIP 已领取".to_string(), theme.dim())
+        } else {
+            ("领取今日 VIP · 按 V".to_string(), theme.key_hint())
+        };
+
+        let row = text_area.y + lines.len() as u16;
+        lines.push(Line::from(Span::styled(
+            truncate_to_width(&text, text_area.width as usize),
+            style,
+        )));
+        // 鼠标点这一行也能领（键盘是 V）
+        state.add_hit_zone(
+            Rect::new(text_area.x, row, text_area.width, 1),
+            HitTarget::VipClaim,
+            0,
+            1,
+        );
     }
 
     // 累计听歌时长

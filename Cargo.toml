@@ -70,6 +70,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
 
+# --- 本地日期 ---
+# 只用来算「今天是几号」：领取概念版 VIP 要传本地日期，而 UTC 日期在凌晨那几个
+# 小时还停在昨天（见 `util::today_local`）。不用 chrono——只要一个 YYYY-MM-DD，
+# 为它拉一整个日期库不划算。`time` 本来就在依赖树里（local-offset 已被启用），
+# 这里不引入新编译。
+time = { version = "0.3", default-features = false, features = ["std", "local-offset"] }
+
 # --- 错误处理 ---
 thiserror = "2"
 anyhow = "1"

@@ -29,7 +29,7 @@ use crate::source::SourceKind;
 use crate::audio::download::{Downloader, PREROLL_BYTES};
 use crate::audio::engine::{AudioEvent, PlaybackState, SEEK_STEP_MS, VOLUME_STEP};
 use crate::audio::spectrum::BAND_COUNT;
-use crate::event::{Event, Loaded, PlaylistSource};
+use crate::event::{Event, Loaded, PlaylistSource, VipClaimOutcome};
 use crate::keymap::{Action, KeyMode};
 use crate::logger::tlog;
 use crate::ui::theme::ThemeName;
@@ -106,6 +106,29 @@ fn not_logged_in_hint(source: SourceKind) -> String {
         SourceKind::Kugou | SourceKind::KugouConcept => {
             "云端歌单需要登录，请配置 cookie（--cookie 或配置文件）".to_string()
         }
+    }
+}
+
+/// 领取当日概念版 VIP：**先领一天，再升级成畅听 VIP**。
+///
+/// 两步是连着的——上游要求先领一天才能升级，中间隔 500ms 让服务端状态落库。
+/// MoeKoeMusic 的 `getVip()` 也是这两步加同一个间隔。
+async fn claim_and_upgrade(api: &crate::api::ApiClient, day: &str) -> crate::error::Result<()> {
+    api.claim_day_vip(day).await?;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    api.upgrade_day_vip().await?;
+    Ok(())
+}
+
+/// 从错误里取出**该给用户看**的那句话。
+///
+/// `AppError::Api` 的 Display 是「接口 /youth/day/vip 返回错误：code=30201 今日已领取」。
+/// 路径那半句对用户是纯噪音（他只有一个可能的操作），而且会把状态栏挤爆、
+/// 把真正有用的原因截掉——实测过，112 列的终端上「今日已领取」正好被切没。
+fn readable_reason(error: &AppError) -> String {
+    match error {
+        AppError::Api { message, .. } => message.clone(),
+        other => other.to_string(),
     }
 }
 
@@ -203,6 +226,7 @@ impl App {
             }
             HitTarget::Progress => self.click_progress(zone, mouse),
             HitTarget::Settings => self.click_setting(zone, mouse),
+            HitTarget::VipClaim => self.claim_daily_vip(),
         }
     }
 
@@ -235,7 +259,9 @@ impl App {
                 self.focus_hit_target(zone.target);
                 self.state.queue_cursor.select(Some(index));
             }
-            HitTarget::Tab(_) | HitTarget::Progress | HitTarget::Settings => return,
+            HitTarget::Tab(_) | HitTarget::Progress | HitTarget::Settings | HitTarget::VipClaim => {
+                return;
+            }
         }
 
         self.open_context_menu();
@@ -376,7 +402,9 @@ impl App {
                 self.focus_hit_target(zone.target);
                 self.state.queue_cursor.select(Some(index));
             }
-            HitTarget::Tab(_) | HitTarget::Progress | HitTarget::Settings => return,
+            HitTarget::Tab(_) | HitTarget::Progress | HitTarget::Settings | HitTarget::VipClaim => {
+                return;
+            }
         }
 
         self.focus_hit_target(zone.target);
@@ -715,7 +743,8 @@ impl App {
             HitTarget::Songs => Focus::Secondary,
             HitTarget::Queue => Focus::Queue,
             HitTarget::Settings => Focus::Primary,
-            HitTarget::Tab(_) | HitTarget::Progress => return,
+            // 领取 VIP 是一行即时动作，不改变焦点——点完继续看首页
+            HitTarget::Tab(_) | HitTarget::Progress | HitTarget::VipClaim => return,
         };
 
         if self.state.focus == Focus::Primary && focus != Focus::Primary {
@@ -1048,6 +1077,7 @@ impl App {
             Action::OpenRanks => self.switch_tab(Tab::Ranks),
             Action::OpenCloud => self.switch_tab(Tab::Cloud),
             Action::Login => self.start_login(),
+            Action::ClaimVip => self.claim_daily_vip(),
             Action::CycleArtistFilter => self.cycle_artist_filter(),
             Action::SyncToCloud => self.sync_queue_to_cloud(),
             Action::AddToCloud => self.add_focused_song_to_cloud(),
@@ -2377,6 +2407,9 @@ impl App {
                 // 顺带取一次会员信息，界面上能直接看到服务端认定的会员形态
                 self.fetch_vip_status();
                 self.fetch_user_info();
+                // 概念版账号刚登录就把当天的 VIP 领了——这就是它的机制，
+                // 「登录就是 VIP」。今天已经领过的话内部会直接返回。
+                self.maybe_claim_daily_vip();
             }
             Err(error) => {
                 self.finish_login(false, format!("保存登录凭据失败：{error}"));
@@ -2412,6 +2445,7 @@ impl App {
                 self.state.success("登录成功，按 Esc 关闭");
                 self.fetch_vip_status();
                 self.fetch_user_info();
+                self.maybe_claim_daily_vip();
             }
             Err(error) => {
                 self.finish_login(false, format!("保存登录凭据失败：{error}"));
@@ -2590,6 +2624,10 @@ impl App {
                 self.fetch_vip_status();
                 self.fetch_user_info();
                 self.ensure_device_fingerprint();
+                // 切到概念版就把当天 VIP 领了。放在这里而不只在启动时做：
+                // 常用标准版的人切换过来时，启动那次早就过去了，否则永远等不到
+                // 自动领取。今天已经领过的话内部会直接返回，不会重复打接口。
+                self.maybe_claim_daily_vip();
                 let capability = kind.capability();
                 if !capability.catalog {
                     self.state.warn(format!(
@@ -2686,6 +2724,106 @@ impl App {
                 // 取不到会员信息不影响听歌，静默降级即可
                 Err(error) => tlog!(crate::logger::LEVEL_WARN, "获取会员信息失败：{error}"),
             }
+        });
+    }
+
+    /// 启动 / 登录 / 切到概念版时**自动**同步当天的概念版 VIP。
+    ///
+    /// 与手动触发（[`Self::claim_daily_vip`]）的唯一区别：本地已经记着今天领过时
+    /// **直接返回，不打网络**。上游文档写着「尽量别频繁调用」，这接口还带风控。
+    pub fn maybe_claim_daily_vip(&mut self) {
+        if !self.state.logged_in
+            || self.state.config.active_source_kind() != SourceKind::KugouConcept
+        {
+            return;
+        }
+        let Some(day) = crate::util::today_local() else {
+            // 取不到本地日期就不自动领；手动按键时会给出明确提示
+            return;
+        };
+        if self.state.vip_claimed_day.as_deref() == Some(day.as_str()) {
+            return;
+        }
+        self.start_vip_sync(day, false);
+    }
+
+    /// 手动同步当天的概念版 VIP（快捷键 `V`，或点「我的资料」里那一行）。
+    ///
+    /// 手动时不看本地日期，一律问服务端——本地那个日期只记「**这台机器**领过」，
+    /// 你在手机上领过它是不知道的。
+    pub fn claim_daily_vip(&mut self) {
+        if self.state.vip_claiming {
+            return;
+        }
+        if !self.state.logged_in {
+            self.state.warn("领取 VIP 需要先登录（按 L 扫码）");
+            return;
+        }
+        if self.state.config.active_source_kind() != SourceKind::KugouConcept {
+            self.state
+                .warn("领取 VIP 是概念版专属功能，先按 v 切到「酷狗概念版」");
+            return;
+        }
+        let Some(day) = crate::util::today_local() else {
+            // 宁可放弃也不猜：猜错就是白领一天已经过去的 VIP
+            self.state
+                .warn("取不到本地日期，无法领取 VIP（可到手机端领取）");
+            return;
+        };
+        self.start_vip_sync(day, true);
+    }
+
+    /// 同步当日 VIP 的实际动作：**先问服务端今天领过没，没领过才去领**。
+    ///
+    /// # 为什么必须先查记录
+    ///
+    /// 领取接口对「今天已经领过」**只回一个 `error_code`、不给描述**（实测如此），
+    /// 界面只能显示「服务端未提供错误描述」，看着像程序坏了；更糟的是原来的文案
+    /// 会补一句「反复失败请到手机端领取」，而事实恰恰相反——手机上领过了才是原因。
+    ///
+    /// 只读的 `/youth/month/vip/record` 能直接回答这个问题，而且比本地记的日期可靠：
+    /// 领取可能发生在手机或另一台机器上。查到已经领过就不打写请求了，既省一次调用
+    /// （接口带风控），也不会报一个与事实相反的错。
+    fn start_vip_sync(&mut self, day: String, manual: bool) {
+        let api = match self.client_for(SourceKind::KugouConcept) {
+            Ok(client) => client,
+            Err(error) => {
+                self.state.error(format!("无法连接概念版接口：{error}"));
+                return;
+            }
+        };
+        let bus = self.bus.clone();
+
+        self.state.vip_claiming = true;
+        self.state.info("正在同步今日 VIP…");
+
+        self.runtime.spawn(async move {
+            // 查不到记录就当没领过，照常尝试——不能因为一个只读接口失败就放弃领取
+            let already = match api.claimed_vip_days().await {
+                Ok(days) => days.iter().any(|claimed| claimed == &day),
+                Err(error) => {
+                    tlog!(crate::logger::LEVEL_WARN, "查询 VIP 领取记录失败：{error}");
+                    false
+                }
+            };
+
+            let outcome = if already {
+                VipClaimOutcome::AlreadyClaimed
+            } else {
+                match claim_and_upgrade(&api, &day).await {
+                    Ok(()) => VipClaimOutcome::Claimed,
+                    Err(error) => {
+                        tlog!(crate::logger::LEVEL_WARN, "领取 VIP 失败：{error}");
+                        VipClaimOutcome::Failed(readable_reason(&error))
+                    }
+                }
+            };
+
+            bus.emit(Loaded::VipClaimed {
+                day,
+                outcome,
+                manual,
+            });
         });
     }
 
@@ -3401,6 +3539,39 @@ impl App {
 
             Loaded::VipStatus { label } => {
                 self.state.vip_label = Some(label);
+            }
+
+            Loaded::VipClaimed {
+                day,
+                outcome,
+                manual,
+            } => {
+                self.state.vip_claiming = false;
+                match outcome {
+                    VipClaimOutcome::Claimed => {
+                        // 只有真的领到才记进会话。失败不该占掉「今天已经领过」的
+                        // 名额，否则用户想重试都没有机会。
+                        self.state.vip_claimed_day = Some(day);
+                        self.state.success("已领取今日概念版 VIP");
+                        // 会员摘要跟着变了，重新取一次，让「我的资料」显示到账后的状态
+                        self.fetch_vip_status();
+                    }
+                    VipClaimOutcome::AlreadyClaimed => {
+                        // 服务端说今天领过了（可能是手机或别的机器上领的），
+                        // 记下来，省掉今天剩下的所有重复查询。
+                        self.state.vip_claimed_day = Some(day);
+                        if manual {
+                            self.state.info("今日 VIP 已经领过了，无需重复领取");
+                        }
+                        self.fetch_vip_status();
+                    }
+                    VipClaimOutcome::Failed(message) => {
+                        // 上游对失败原因常常只给一个码。这里不再补「请到手机端领取」
+                        // 那种猜测——现在能区分「已经领过」和「真失败」了，
+                        // 剩下的失败补一句猜测只会误导。
+                        self.state.warn(format!("领取 VIP 失败：{message}"));
+                    }
+                }
             }
 
             Loaded::Failed { context, error } => {

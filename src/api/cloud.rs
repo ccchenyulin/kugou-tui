@@ -240,6 +240,62 @@ impl ApiClient {
         Ok(info)
     }
 
+    /// 领取「概念版」某一天的 VIP。
+    ///
+    /// `receive_day` 是**要领取的那一天**（`2026-09-23`），不是「今天」——传过去的
+    /// 日期就是领到的那天，所以补领也行。官方文档同时提醒「建议不要领太多天」。
+    ///
+    /// # 仅概念版可用
+    ///
+    /// 上游是概念版接口（`source_id: 90139`）。标准版账号会拿到业务错误码，由
+    /// [`check_error_code`] 抛出——调用方要先按音源挡掉，别让用户白点。
+    ///
+    /// 返回原始响应：上游在「今天已经领过」「账号被风控」这类情况下**不一定**给
+    /// 非零 `error_code`，把响应交给调用方才能如实描述结果，而不是替它断言成功。
+    pub async fn claim_day_vip(&self, receive_day: &str) -> Result<Value> {
+        self.get_json(
+            "/youth/day/vip",
+            &[("receive_day", receive_day.to_string())],
+        )
+        .await
+    }
+
+    /// 把刚领到的一天 VIP 升级成「畅听 VIP」。
+    ///
+    /// **必须先 [`Self::claim_day_vip`]**——官方文档写明「需要先领取一天 VIP」。
+    /// 上游用 cookie 里的 userid 定位账号，这里不需要额外参数。
+    pub async fn upgrade_day_vip(&self) -> Result<Value> {
+        self.get_json("/youth/day/vip/upgrade", &[]).await
+    }
+
+    /// 已经领取过 VIP 的日期（`2026-09-23` 这种）。
+    ///
+    /// # 为什么需要它
+    ///
+    /// 领取接口对「今天已经领过」**只回一个 `error_code`、不给描述**，实测就是
+    /// 这样：界面只能显示「服务端未提供错误描述」，用户看着像程序坏了。
+    /// 而「今天到底领过没有」是能直接问到的——这个只读接口返回最近约三个月的
+    /// 每日记录，比本地记一个日期可靠得多：你可能是在**手机端或另一台机器**上领的。
+    ///
+    /// 只统计 `receive_vip == 1` 的日子；返回的列表按服务端顺序，调用方只需要
+    /// 「今天在不在里面」。
+    pub async fn claimed_vip_days(&self) -> Result<Vec<String>> {
+        let root = self
+            .get_json_uncached("/youth/month/vip/record", &[])
+            .await?;
+        let list = data_of(&root)
+            .get("list")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+
+        Ok(list
+            .iter()
+            .filter(|entry| pick_i64(entry, &["receive_vip"]) == Some(1))
+            .filter_map(|entry| pick_string(entry, &["day"]))
+            .collect())
+    }
+
     /// 获取设备指纹 `dfid`。
     ///
     /// `/song/url` 缺了这个参数会返回「本次请求需要验证」。拿到后应回写配置，

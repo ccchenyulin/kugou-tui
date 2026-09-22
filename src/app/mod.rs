@@ -208,6 +208,8 @@ impl App {
         app.refresh_cache_usage();
         app.fetch_vip_status();
         app.fetch_user_info();
+        // 放在 restore_session 之后：去重要用到会话里记的「上次领取日期」
+        app.maybe_claim_daily_vip();
 
         let tab = app.state.tab;
         app.ensure_tab_loaded(tab);
@@ -352,10 +354,11 @@ impl App {
             queue: self.state.queue.items().to_vec(),
             cursor: self.state.queue.cursor(),
             position_ms: self.state.position_ms,
+            vip_claimed_day: self.state.vip_claimed_day.clone(),
         };
-        if session.is_empty() {
-            return;
-        }
+        // **队列为空也要写**：`vip_claimed_day` 还得落盘。原先这里 `is_empty()`
+        // 就 return，于是从没排过队的用户「今天已经领过 VIP」这个事实永远存不下来，
+        // 下次启动又会去领一次——正撞在上游「尽量别频繁调用」和风控上。
         session.save();
         tlog!(
             crate::logger::LEVEL_INFO,
@@ -373,6 +376,12 @@ impl App {
         let Some(session) = crate::app::session::Session::load() else {
             return;
         };
+
+        // 先恢复「上次领取 VIP 的日期」——它和队列无关，而下面队列为空会提前
+        // return。漏在这里的话，从没排过队的用户每次启动都会重领一次 VIP，
+        // 正好踩在上游「尽量别频繁调用」和风控上。
+        self.state.vip_claimed_day = session.vip_claimed_day.clone();
+
         if session.is_empty() {
             return;
         }

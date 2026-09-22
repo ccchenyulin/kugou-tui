@@ -119,6 +119,8 @@ pub enum Action {
     OpenCloud,
     /// 扫码登录（应用内渲染二维码）。
     Login,
+    /// 领取「概念版」当天 VIP（领一天 → 升级成畅听 VIP）。
+    ClaimVip,
     /// 在歌手列表里轮换地区筛选：全部 → 华语 → 欧美 → 日韩 → 其他。
     CycleArtistFilter,
     /// 把当前播放队列同步到指定的云端歌单。
@@ -260,6 +262,7 @@ pub fn action_from_name(name: &str) -> Option<Action> {
         "open_ranks" => Action::OpenRanks,
         "open_cloud" => Action::OpenCloud,
         "login" => Action::Login,
+        "claim_vip" => Action::ClaimVip,
         "cycle_artist_filter" => Action::CycleArtistFilter,
         "sync_to_cloud" => Action::SyncToCloud,
         "add_to_cloud" => Action::AddToCloud,
@@ -434,6 +437,9 @@ fn resolve_normal(key: KeyEvent) -> Action {
         KeyCode::Char('b') => Action::OpenRanks,
         KeyCode::Char('c') => Action::OpenCloud,
         KeyCode::Char('L') => Action::Login,
+        // 大写 V：小写 v 已经是「切换音源」了，而领取 VIP 正是要配合音源用
+        // （只有概念版能领），放同一个键上容易误触。
+        KeyCode::Char('V') => Action::ClaimVip,
         KeyCode::Char('f') => Action::CycleArtistFilter,
         KeyCode::Char('S') => Action::SyncToCloud,
         KeyCode::Char('s') => Action::AddToCloud,
@@ -495,6 +501,7 @@ pub const CHEATSHEET: &[(&str, &str, &str)] = &[
     ("y", "切换音质（下一首生效）", "业务"),
     ("b / c", "排行榜 / 云端歌单", "业务"),
     ("L", "扫码登录（酷狗 / 网易云）", "业务"),
+    ("V", "领取今日概念版 VIP（仅概念版音源）", "业务"),
     ("f", "歌手地区筛选（在歌手页）", "业务"),
     ("s / S", "收藏单曲到云端 / 把整个队列同步到云端", "业务"),
     ("d / D", "从云端歌单移除 / 删除歌单（需确认）", "业务"),
@@ -588,5 +595,17 @@ mod tests {
                 "「{digit}」应当是切标签页"
             );
         }
+    }
+
+    /// 领取 VIP 是**大写** `V`，小写 `v` 仍然是切换音源。
+    ///
+    /// 两个键挨着、又都和音源相关，最容易在改键位时被合并成一个。
+    #[test]
+    fn capital_v_claims_vip_and_lowercase_v_switches_source() {
+        let capital = KeyEvent::new(KeyCode::Char('V'), KeyModifiers::NONE);
+        assert_eq!(resolve(capital, KeyMode::Normal), Action::ClaimVip);
+
+        let lower = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE);
+        assert_eq!(resolve(lower, KeyMode::Normal), Action::SwitchSource);
     }
 }

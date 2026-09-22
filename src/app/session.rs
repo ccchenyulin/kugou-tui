@@ -18,6 +18,15 @@ pub struct Session {
     pub cursor: Option<usize>,
     /// 当前这首歌播到几毫秒。
     pub position_ms: u64,
+    /// 上一次领取「概念版」当天 VIP 的日期（`2026-09-23`）。
+    ///
+    /// 存下来是为了**每天只领一次**：上游文档明确写着「尽量别频繁调用」，
+    /// 而这个接口还带风控。没有它的话，一天里开几次程序就打几次。
+    ///
+    /// `#[serde(default)]` 是必须的：老版本写下的 `session.json` 里没有这个字段，
+    /// 不给默认值会让整个文件解析失败，用户会莫名其妙丢掉一次「上次听到哪」。
+    #[serde(default)]
+    pub vip_claimed_day: Option<String>,
 }
 
 impl Session {
@@ -57,5 +66,34 @@ impl Session {
     /// 这个会话有没有值得恢复的东西。
     pub fn is_empty(&self) -> bool {
         self.queue.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 老版本写下的 `session.json` 里**没有** `vip_claimed_day`。
+    ///
+    /// 加了新字段之后它必须还能解析——否则用户升级一次就莫名其妙丢掉「上次听到
+    /// 哪」，而且看不出原因。这条就是钉住那个 `#[serde(default)]`。
+    #[test]
+    fn legacy_session_without_the_vip_field_still_parses() {
+        let legacy = r#"{"queue":[],"cursor":null,"position_ms":0}"#;
+        let session: Session = serde_json::from_str(legacy).expect("老会话文件应当仍可解析");
+        assert_eq!(session.vip_claimed_day, None);
+        assert_eq!(session.position_ms, 0);
+    }
+
+    /// 领取日期能存能读——「每天只领一次」全靠它。
+    #[test]
+    fn vip_claimed_day_round_trips() {
+        let session = Session {
+            vip_claimed_day: Some("2026-09-23".to_string()),
+            ..Default::default()
+        };
+        let text = serde_json::to_string(&session).expect("序列化不该失败");
+        let back: Session = serde_json::from_str(&text).expect("反序列化不该失败");
+        assert_eq!(back.vip_claimed_day.as_deref(), Some("2026-09-23"));
     }
 }

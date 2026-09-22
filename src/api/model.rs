@@ -361,7 +361,11 @@ pub fn check_error_code(path: &str, root: &Value) -> Result<()> {
         return Ok(());
     }
     let message = pick_string(root, &["error_msg", "errmsg", "msg", "message"])
-        .unwrap_or_else(|| "服务端未提供错误描述".to_string());
+        .filter(|text| !text.trim().is_empty())
+        // 带上错误码：不少接口（例如领取概念版 VIP）失败时**只给码不给描述**，
+        // 界面上一句「服务端未提供错误描述」等于什么都没说，用户和我们都无从下手。
+        // 有码至少能拿去搜、能对照服务端日志。
+        .unwrap_or_else(|| format!("服务端未提供错误描述（错误码 {code}）"));
     Err(AppError::Api {
         path: path.to_string(),
         code,

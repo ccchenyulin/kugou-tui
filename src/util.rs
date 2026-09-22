@@ -66,6 +66,26 @@ fn seed() -> u64 {
     nanos ^ address.rotate_left(17) ^ u64::from(std::process::id())
 }
 
+/// 本地时区的「今天」，格式 `2026-09-23`。
+///
+/// # 为什么必须是**本地**日期
+///
+/// 酷狗的领取接口要传「要领取的那一天」，传过去的日期就是领到的那天。UTC 日期
+/// 在 UTC+8 的凌晨 0 点到 8 点之间还停在昨天，那时按 UTC 算就会去领一天已经过去的
+/// VIP——白打一次接口，而且那天的权益也拿不回来。
+///
+/// 拿不到本地时区时返回 `None`（多线程环境下 `time` 可能拒绝推断偏移）。调用方
+/// 应当**放弃领取并如实告知**，而不是退回 UTC 猜一个：猜错是白领，不领只是少一天。
+pub fn today_local() -> Option<String> {
+    let now = time::OffsetDateTime::now_local().ok()?;
+    Some(format!(
+        "{:04}-{:02}-{:02}",
+        now.year(),
+        u8::from(now.month()),
+        now.day()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,5 +108,28 @@ mod tests {
     fn timestamp_is_plausible() {
         // 2020-01-01 之后的毫秒时间戳
         assert!(now_unix_millis() > 1_577_836_800_000);
+    }
+
+    /// 日期格式必须正好是接口要的 `YYYY-MM-DD`：多一个空格、少一个前导零，
+    /// 服务端都只当是「那一天不存在」，报错还看不出原因。
+    #[test]
+    fn today_local_is_a_plain_iso_date() {
+        let Some(today) = today_local() else {
+            // 多线程下 time 可能拒绝推断本地偏移，这时调用方会放弃领取。
+            // 测试不能因此变成偶发失败。
+            return;
+        };
+        assert_eq!(today.len(), 10, "应当是 YYYY-MM-DD：{today}");
+        let parts: Vec<&str> = today.split('-').collect();
+        assert_eq!(parts.len(), 3, "应当是三段：{today}");
+        assert_eq!(parts[0].len(), 4, "年份四位：{today}");
+        assert_eq!(parts[1].len(), 2, "月份两位（要补零）：{today}");
+        assert_eq!(parts[2].len(), 2, "日期两位（要补零）：{today}");
+        assert!(
+            parts
+                .iter()
+                .all(|part| part.chars().all(|c| c.is_ascii_digit())),
+            "只该有数字和短横线：{today}"
+        );
     }
 }
