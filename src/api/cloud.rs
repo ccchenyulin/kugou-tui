@@ -43,21 +43,26 @@ pub struct UserInfo {
     pub pic: Option<String>,
     /// 用户等级（`p_grade`）。
     pub grade: Option<u32>,
-    /// 累计听歌时长（秒）。
-    pub duration_sec: Option<u64>,
+    /// 累计听歌时长（**分钟**）。
+    ///
+    /// 单位是从实测反推的：真实时长 1320 小时 39 分 = 79239 分钟，而接口给的
+    /// `duration` 正是 79239。之前当成秒，算出来是「22 小时 0 分」——差了 60 倍。
+    /// 酷狗这个字段没有文档，只有对得上的那个单位才是对的。
+    pub duration_min: Option<u64>,
 }
 
 impl UserInfo {
-    /// 听歌时长的人类可读形式：「22 小时 3 分」这种。
+    /// 听歌时长的人类可读形式：「1320 小时 39 分」这种。
     ///
-    /// 只保留两级单位：秒级的精度对「听了多久」没有意义，写全了反而像日志。
+    /// 输入是分钟（见 `duration_min` 的注释），所以直接 /60 和 %60 就够，
+    /// 不用再换算秒。只保留两级单位：秒级精度对「听了多久」没有意义。
     pub fn duration_text(&self) -> Option<String> {
-        let total = self.duration_sec?;
-        if total == 0 {
+        let total_min = self.duration_min?;
+        if total_min == 0 {
             return None;
         }
-        let hours = total / 3600;
-        let minutes = (total % 3600) / 60;
+        let hours = total_min / 60;
+        let minutes = total_min % 60;
         Some(if hours > 0 {
             format!("{hours} 小时 {minutes} 分")
         } else {
@@ -196,7 +201,7 @@ impl ApiClient {
             nickname: pick_string(data, &["nickname"]).unwrap_or_default(),
             pic: pick_string(data, &["pic"]).filter(|url| !url.trim().is_empty()),
             grade: pick_i64(data, &["p_grade"]).and_then(|v| u32::try_from(v).ok()),
-            duration_sec: pick_i64(data, &["duration"]).and_then(|v| u64::try_from(v).ok()),
+            duration_min: pick_i64(data, &["duration"]).and_then(|v| u64::try_from(v).ok()),
         })
     }
 
@@ -501,5 +506,58 @@ mod tests {
         for entry in payload.split(',') {
             assert_eq!(entry.split('|').count(), 4);
         }
+    }
+
+    #[test]
+    fn listen_duration_is_minutes_not_seconds() {
+        // 实测：真实听歌时长 1320 小时 39 分，接口 /user/detail 给的
+        // `duration` 是 79239 —— 正好是分钟数（1320*60 + 39）。
+        // 之前当成秒，算出来是「22 小时 0 分」，差 60 倍。
+        let info = UserInfo {
+            duration_min: Some(79239),
+            ..Default::default()
+        };
+        assert_eq!(info.duration_text().as_deref(), Some("1320 小时 39 分"));
+    }
+
+    #[test]
+    fn listen_duration_edge_cases() {
+        // 0 表示没数据，不显示
+        assert_eq!(
+            UserInfo {
+                duration_min: Some(0),
+                ..Default::default()
+            }
+            .duration_text(),
+            None
+        );
+        assert_eq!(
+            UserInfo {
+                duration_min: None,
+                ..Default::default()
+            }
+            .duration_text(),
+            None
+        );
+        // 不足一小时只显示分钟
+        assert_eq!(
+            UserInfo {
+                duration_min: Some(39),
+                ..Default::default()
+            }
+            .duration_text()
+            .as_deref(),
+            Some("39 分")
+        );
+        // 整小时
+        assert_eq!(
+            UserInfo {
+                duration_min: Some(120),
+                ..Default::default()
+            }
+            .duration_text()
+            .as_deref(),
+            Some("2 小时 0 分")
+        );
     }
 }

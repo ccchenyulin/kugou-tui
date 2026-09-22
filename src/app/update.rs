@@ -3459,6 +3459,21 @@ impl App {
                 bus.emit(Loaded::DownloadProgress { received, total });
             };
 
+            // 要跳到中间（续播上次的位置）时**不能**走流式：缓冲里只有开头那点
+            // 数据，seek 到几百秒的位置会阻塞等下载、超时失败，结果从头播
+            // ——用户实测「边听边下载会直接从最开始听」就是这个。
+            if start_at_ms > 0 {
+                match downloader.fetch_to(&url, &target, &progress).await {
+                    Ok(_) => bus.emit(Loaded::StreamCached {
+                        song: Box::new(song),
+                        path: target,
+                        start_at_ms,
+                    }),
+                    Err(error) => bus.fail(format!("下载《{label}》失败"), error),
+                }
+                return;
+            }
+
             // 边下边播：先起流式下载（立即返回缓冲），攒够开头就开播，
             // 剩下的在后台继续下并落盘到缓存。
             //
@@ -3646,6 +3661,14 @@ impl App {
     fn tick(&mut self) {
         self.state.ticks = self.state.ticks.wrapping_add(1);
         self.state.playback = self.audio.state();
+
+        // 定期落盘会话。只在正常退出时存是不够的——关机、断电、进程被杀时
+        // `shutdown()` 根本不会执行，上次进度就丢了（用户实测「重启就没了」）。
+        // 这里每 30 秒存一次兜底，最坏情况丢半分钟进度。
+        if self.last_session_save.elapsed() >= std::time::Duration::from_secs(30) {
+            self.persist_session();
+            self.last_session_save = std::time::Instant::now();
+        }
         // 只在音频引擎真的持有曲目时才用它上报的位置。
         //
         // 否则（Stopped）`audio.position_ms()` 返回 0，会把会话恢复出来的进度

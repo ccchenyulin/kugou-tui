@@ -93,6 +93,10 @@ pub struct App {
     /// 上一帧的时间戳，用来算出真实经过时长（dt），供动画做时间无关的缓动。
     last_frame_at: Instant,
 
+    /// 上次把会话写盘的时间。关机/被杀时 `shutdown()` 不会执行，靠 tick 里
+    /// 的定期保存兜底——只在退出时存的话，非正常退出就丢进度了。
+    last_session_save: Instant,
+
     /// MPRIS 句柄。没有 D-Bus 时为 `None`（不影响播放，只是桌面集成不可用）。
     mpris: Option<crate::mpris::MprisHandle>,
 
@@ -149,6 +153,7 @@ impl App {
             downloader,
             runtime,
             last_frame_at: Instant::now(),
+            last_session_save: Instant::now(),
             mpris,
             picker: None,
         };
