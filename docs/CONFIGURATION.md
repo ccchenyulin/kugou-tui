@@ -90,6 +90,66 @@ cover_fill = "crop"                 # 首页大封面怎么铺满，见下方说
 
 音量、播放模式、歌词偏移会在退出时自动写回。
 
+### 自定义键位
+
+用 `[keymap]` 段把**动作名**映射到**按键**。动作名是 `Action` 变体的 snake_case：
+
+```toml
+[keymap]
+reload = "f"                 # 刷新当前列表（默认 R）改到 f
+help = "f1"                  # 帮助面板
+quit = "Z"
+cycle_artist_filter = "ctrl+f"
+```
+
+**未列出的动作沿用默认键位**，所以老配置文件不用改，只写想改的那几条。
+
+按键名怎么写的规则：
+
+| 形式 | 例子 |
+|---|---|
+| 单个字符（**区分大小写**） | `q`、`Q`、`/`、`[` |
+| 具名键 | `space`、`enter`、`esc`、`tab`、`backtab`、`up`、`down`、`left`、`right`、`home`、`end`、`pgup`、`pgdn`、`backspace`、`delete`、`insert` |
+| 功能键 | `f1` – `f12` |
+| 带修饰键 | `ctrl+n`、`alt+1`、`shift+tab` |
+
+可用的动作名（59 个，按用途分组）：
+
+```
+# 全局
+quit  force_quit  help  toggle_sidebar  switch_source
+# 导航
+move_up  move_down  move_top  move_bottom  page_up  page_down
+focus_next  focus_prev  submit  cancel
+backspace  delete  cursor_left  cursor_right  cursor_home  cursor_end
+# 播放
+play_pause  next  prev  seek_forward  seek_backward
+volume_up  volume_down  toggle_mute
+cycle_playback_mode  cycle_quality
+toggle_lyric_panel  lyric_delay  lyric_advance
+# 业务
+open_search  open_settings  reload  load_more_search  download_current
+queue_append  queue_play_next  add_all_to_queue  remove_from_queue  clear_queue
+clear_cache  toggle_sort_order  open_ranks  open_cloud
+login  claim_vip  cycle_artist_filter
+add_to_cloud  remove_from_cloud  sync_to_cloud  delete_cloud_playlist  new_cloud_playlist
+set_default_source  raise_source_priority  lower_source_priority
+```
+
+**非法条目只跳过、不中断启动**，并在日志里记一条 WARN
+（`~/.cache/kugou-tui/kugou-tui.log`）——键位错了只是不顺手，不该让程序起不来：
+
+| 情况 | 日志 |
+|---|---|
+| 动作名不存在 | `键位配置：未知动作 "xxx"（键 "yyy"），已忽略` |
+| 按键名解析不了 | `键位配置：无法解析按键 "yyy"（动作 xxx），已忽略` |
+| 一个键绑了两个动作 | `键位配置：… 同时绑定了 …，以 … 为准` |
+
+启动成功时会有一行 `已加载 N 条自定义键位`，用它核对生效条数。
+
+> 带参数的动作（切换标签页、跳转到指定进度、输入字符）不在清单里——它们的值来自
+> 运行时，配置文件里写不出完整语义。
+
 ### 会话持久化
 
 退出时会把**播放队列 + 当前曲目 + 播放位置**存到

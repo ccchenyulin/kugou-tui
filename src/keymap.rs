@@ -311,6 +311,11 @@ fn parse_key(text: &str) -> Option<(KeyCode, KeyModifiers)> {
         "backspace" | "bs" => KeyCode::Backspace,
         "delete" | "del" => KeyCode::Delete,
         "insert" | "ins" => KeyCode::Insert,
+        // 单个字符**必须先判**，否则会被下面的 F1~F12 分支吃掉：
+        // `f` 也满足「长度 ≤ 3 且以 f 开头」，于是 `f[1..]` 是空串、parse 失败、
+        // 整条返回 None —— 结果是「歌手地区筛选」的 `f` 唯独没法通过配置重绑，
+        // 而其余单字母都行。这是写测试时才发现的。
+        single if single.chars().count() == 1 => KeyCode::Char(single.chars().next()?),
         // f1 ~ f12
         function if function.len() <= 3 && function.starts_with('f') => {
             let number: u8 = function[1..].parse().ok()?;
@@ -320,7 +325,6 @@ fn parse_key(text: &str) -> Option<(KeyCode, KeyModifiers)> {
                 return None;
             }
         }
-        single if single.chars().count() == 1 => KeyCode::Char(single.chars().next()?),
         _ => return None,
     };
 
@@ -559,6 +563,23 @@ mod tests {
         assert_eq!(parse_key("不存在的键"), None);
     }
 
+    /// `f` 必须解析成字母 `f`，不能掉进 F1~F12 那条分支。
+    ///
+    /// 实测踩到过：F 键那条判的是「长度 ≤ 3 且以 `f` 开头」，`f` 也满足，于是
+    /// `f[1..]` 是空串、parse 失败、整条返回 `None`——**只有 `f`（歌手地区筛选）
+    /// 没法通过配置重绑**，其余单字母都行。写「面板里的键都真绑过」那条测试时才发现。
+    #[test]
+    fn single_letter_f_is_not_swallowed_by_the_function_key_branch() {
+        assert_eq!(
+            parse_key("f"),
+            Some((KeyCode::Char('f'), KeyModifiers::NONE)),
+            "`f` 是普通字母键，不是功能键"
+        );
+        // 功能键本身不受影响
+        assert_eq!(parse_key("f1"), Some((KeyCode::F(1), KeyModifiers::NONE)));
+        assert_eq!(parse_key("f12"), Some((KeyCode::F(12), KeyModifiers::NONE)));
+    }
+
     #[test]
     fn action_names_round_trip() {
         assert_eq!(action_from_name("quit"), Some(Action::Quit));
@@ -608,5 +629,68 @@ mod tests {
 
         let lower = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE);
         assert_eq!(resolve(lower, KeyMode::Normal), Action::SwitchSource);
+    }
+
+    /// 帮助面板里写出来的每个键，都必须是**真的绑过的**。
+    ///
+    /// 面板是用户唯一的速查入口，写一个按下去没反应的键比不写更糟。这条测试把
+    /// `CHEATSHEET` 逐条喂给 `resolve`，对不上就失败——加键位时忘了同步面板、
+    /// 或面板里留了个早就删掉的键，都会在这里现形。
+    ///
+    /// **反方向测不了**：`resolve_normal` 是个大 match（还有区间与 guard 分支），
+    /// 枚举不出它到底绑了哪些键，所以「绑了但面板没写」只能靠人查。真要做成
+    /// 自动的，得先把那张表改成数据——代价大于收益，先不划算。
+    #[test]
+    fn every_shortcut_shown_in_help_is_actually_bound() {
+        /// 面板里的写法 → `parse_key` 认的写法。
+        ///
+        /// 面板是给人看的，`←` 比 `left` 直观，`S-Tab` 比 `backtab` 眼熟。
+        fn parse_as_keymap_knows(token: &str) -> Option<String> {
+            // 别名要先判：`←` 也是「一个字符」，会被下面那条单字符捷径截走，
+            // 于是变成 `Char('←')`——而 `resolve_normal` 绑的是 `KeyCode::Left`。
+            if let Some(name) = match token {
+                "←" => Some("left"),
+                "→" => Some("right"),
+                "↑" => Some("up"),
+                "↓" => Some("down"),
+                "S-Tab" => Some("backtab"),
+                _ => None,
+            } {
+                return Some(name.to_string());
+            }
+            // `1..9` 是个范围，不是单个键，没法喂给 parse_key
+            if token.contains("..") {
+                return None;
+            }
+            // 单个字符必须**保留大小写**：`q` 与 `Q` 是两个不同的动作
+            if token.chars().count() == 1 {
+                return Some(token.to_string());
+            }
+            Some(token.to_lowercase())
+        }
+
+        let mut unbound = Vec::new();
+        for (keys, description, _) in CHEATSHEET {
+            // 用 `" / "` 分隔而不是 `"/"`：条目 12 的键就是 `/`（搜索），
+            // 按单斜杠切会把它切成两个空串，等于跳过不查。
+            for token in keys.split(" / ").map(str::trim).filter(|t| !t.is_empty()) {
+                let Some(name) = parse_as_keymap_knows(token) else {
+                    continue;
+                };
+                let Some((code, modifiers)) = parse_key(&name) else {
+                    unbound.push(format!("「{token}」({description}) 连写法都不认识"));
+                    continue;
+                };
+                if resolve(KeyEvent::new(code, modifiers), KeyMode::Normal) == Action::None {
+                    unbound.push(format!("「{token}」({description})"));
+                }
+            }
+        }
+
+        assert!(
+            unbound.is_empty(),
+            "帮助面板里这些键其实没绑定：{}",
+            unbound.join("、")
+        );
     }
 }
