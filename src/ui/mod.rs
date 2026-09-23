@@ -117,8 +117,8 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     views::render_status(frame, status_area, state, busy, &theme);
 
     // 帮助面板是模态的，最后画，盖住其它一切
-    if state.show_help {
-        views::render_help(frame, area, &theme);
+    if state.help.is_open() {
+        views::render_help(frame, area, state, &theme);
     }
 
     // 登录弹窗优先级高于帮助

@@ -36,6 +36,36 @@ pub enum PlaylistSource {
     Cloud,
 }
 
+/// 一次异步载入失败时，该把哪一处「载入中」标记收掉。
+///
+/// 存在的理由：`loading` 原本只在成功路径（`replace()`）里清零，于是任何一次
+/// 请求失败都会让面板**永远停在「载入中…」**——状态栏报着错，面板里还在转圈，
+/// 用户既不知道是失败了、也不知道该按什么。失败路径必须能指名道姓地关掉它。
+///
+/// 用枚举而不是「失败就清掉全部」：同时有两个请求在飞时，清全部会把另一个
+/// 仍在进行中的列表也标成已结束。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadingTarget {
+    /// 搜索页的结果列表。
+    SearchResults,
+    /// 歌单广场的条目列表。
+    Playlists,
+    /// 歌手条目列表。
+    Artists,
+    /// 排行榜条目列表。
+    Ranks,
+    /// 云端歌单的条目列表。
+    CloudPlaylists,
+    /// 某一侧（广场 / 云端）的歌曲列表。
+    PlaylistSongs(PlaylistSource),
+    /// 歌手页的歌曲列表。
+    ArtistSongs,
+    /// 排行榜的歌曲列表。
+    RankSongs,
+    /// 当前登录用户的资料（首页「我的资料」）。
+    UserInfo,
+}
+
 /// 同步当日「概念版」VIP 的结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VipClaimOutcome {
@@ -88,6 +118,18 @@ pub enum Loaded {
     Lyric {
         hash: String,
         lyric: Lyric,
+    },
+    /// 歌词取失败。
+    ///
+    /// 单独一个变体，而不是复用 [`Self::Lyric`] 塞一份空歌词：那样面板会显示
+    /// 「暂无歌词」——**把「没取到」说成「这首歌本来就没有」**，正是这个项目里
+    /// 反复出现的那类谎（「已连接」「已暂停」「载入中…」都是同一族）。
+    ///
+    /// 也不走 [`Self::Failed`]：那条路会往状态栏写一条错误，而歌词失败不影响
+    /// 播放，每切一首歌闪一条错误太吵。面板里说清楚就够了。
+    LyricFailed {
+        hash: String,
+        reason: String,
     },
     /// 已经拿到播放直链。
     StreamReady {
@@ -144,10 +186,12 @@ pub enum Loaded {
         /// 原始字节——省掉主线程再解一次。
         image: image::DynamicImage,
     },
-    /// 当前账号的会员信息摘要（用于界面显示）。
-    VipStatus {
-        label: String,
-    },
+    /// 当前账号的会员信息。
+    ///
+    /// 传结构体而不是拼好的字符串：侧边栏窄、首页宽，两处要的形态不同
+    /// （见 `VipInfo::label` / `VipInfo::short_label`），在这里就定型的话
+    /// 渲染层没法按自己的宽度挑。
+    VipStatus(Box<crate::api::cloud::VipInfo>),
     /// 同步「概念版」当天 VIP 的结果。
     VipClaimed {
         day: String,
@@ -186,7 +230,48 @@ pub enum Loaded {
     Failed {
         context: String,
         error: AppError,
+        /// 这次失败该收掉哪一处「载入中」。不是载入类请求（下载、写云端…）
+        /// 就是 `None`。
+        target: Option<LoadingTarget>,
     },
+}
+
+impl Loaded {
+    /// 这个事件是不是「KuGouMusicApi 服务回了一次话」。
+    ///
+    /// 只用来判断连通性。**必须把本地产生的事件排除在外**：缓存占用、下载进度、
+    /// 封面解码这些都是本机算出来的，接口挂着也照样会到；把它们算成「服务回应」
+    /// 的话，侧边栏会在服务已经死掉时显示「已连通」——那就又变成了一个没验证过
+    /// 的断言，正是要修掉的那个毛病。
+    ///
+    /// 反过来，业务错误码（需要登录、页码越界…）算**是**回应：服务回了话，
+    /// 只是拒绝了这次请求。
+    ///
+    /// 新增变体时要想一下它从哪来：`bus.emit(...)` 在请求成功后发的是，
+    /// 在主线程本地算完发的不算。
+    pub fn is_api_response(&self) -> bool {
+        matches!(
+            self,
+            Self::Search { .. }
+                | Self::Playlists { .. }
+                | Self::PlaylistTracks { .. }
+                | Self::Artists(_)
+                | Self::ArtistSongs { .. }
+                | Self::RankBoards(_)
+                | Self::RankTracks { .. }
+                | Self::CloudPlaylists(_)
+                | Self::Lyric { .. }
+                | Self::StreamReady { .. }
+                | Self::LoginQr { .. }
+                | Self::LoginStatus { .. }
+                | Self::LoginSucceeded { .. }
+                | Self::LoginFailed { .. }
+                | Self::VipStatus(_)
+                | Self::VipClaimed { .. }
+                | Self::UserInfo(_)
+                | Self::DeviceFingerprint(_)
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -243,10 +328,32 @@ impl EventBus {
     }
 
     /// 上报一次异步失败，`context` 说明是哪个操作失败了。
+    ///
+    /// 用于不涉及「载入中」状态的失败（下载、云端写操作、登录…）。
     pub fn fail(&self, context: impl Into<String>, error: AppError) {
+        self.fail_with_target(None, context, error);
+    }
+
+    /// 上报一次**载入类**请求的失败，顺带收掉对应的「载入中」标记。
+    pub fn fail_loading(
+        &self,
+        target: LoadingTarget,
+        context: impl Into<String>,
+        error: AppError,
+    ) {
+        self.fail_with_target(Some(target), context, error);
+    }
+
+    fn fail_with_target(
+        &self,
+        target: Option<LoadingTarget>,
+        context: impl Into<String>,
+        error: AppError,
+    ) {
         self.emit(Loaded::Failed {
             context: context.into(),
             error,
+            target,
         });
     }
 }
@@ -254,5 +361,58 @@ impl EventBus {
 impl Default for EventBus {
     fn default() -> Self {
         Self::new().0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 本地产生的事件不能被当成「服务回了话」。
+    ///
+    /// 这条断言就是为「侧边栏在接口全挂时显示『已连通』」那个 bug 立的：缓存占用、
+    /// 下载进度都是本机算出来的，把它们算进去，接口挂着也照样显示已连通。
+    #[test]
+    fn locally_produced_events_are_not_api_responses() {
+        let local = [
+            Loaded::CacheUsage(1024),
+            Loaded::DownloadProgress {
+                received: 1,
+                total: Some(2),
+            },
+            Loaded::CloudNotice("已收藏".to_string()),
+            Loaded::CloudPlaylistChanged {
+                playlist: Box::new(crate::api::model::Playlist::default()),
+            },
+        ];
+        for loaded in &local {
+            assert!(
+                !loaded.is_api_response(),
+                "{loaded:?} 是本机产生的，不该被算成服务回应"
+            );
+        }
+    }
+
+    /// 从服务拿到回应的都算——包括「业务上失败」的那种。
+    #[test]
+    fn responses_from_the_service_count_as_reachable() {
+        let remote = [
+            Loaded::Search {
+                keyword: "海阔天空".to_string(),
+                songs: Vec::new(),
+                append: false,
+            },
+            Loaded::VipStatus(Box::default()),
+            Loaded::DeviceFingerprint("dfid".to_string()),
+            Loaded::LoginFailed {
+                message: "二维码已过期".to_string(),
+            },
+        ];
+        for loaded in &remote {
+            assert!(
+                loaded.is_api_response(),
+                "{loaded:?} 是服务的回应，应算作已连通"
+            );
+        }
     }
 }

@@ -92,18 +92,29 @@ fn shrink_horizontal(area: Rect, amount: u16) -> Rect {
 
 /// 每根柱子占几列：由**可用宽度和频段数**算出来，而不是写死。
 ///
-/// 以前固定 2 列（柱体 1 + 空隙 1），于是柱数 = 宽度/2，再被频段数（64）截断。
-/// 结果宽屏下 `宽度/2 > 64`，柱子只占左边一小段，**右边一大片空着**——全屏
-/// 看尤其明显。现在按「可用宽 ÷ 频段数」算，宽屏下柱子自然变宽铺满。
+/// 两条意图，缺一不可：
 ///
-/// 空隙仍然是观感的关键：把频段直接铺满每一列，柱子之间**没有分隔**，相邻
-/// 柱子一旦都亮起来就粘成一整片。所以 stride >= 2 时留出 1 列空隙，只有窄到
-/// 放不下才让柱子贴着。
+/// * **铺满宽度**。早先固定 2 列（柱体 1 + 空隙 1），柱数被频段数（64）截断后，
+///   宽屏下柱子只占左边一小段、右边一大片空着。改成按「可用宽 ÷ 频段数」算，
+///   宽屏下柱子自然变宽铺满。
+/// * **柱子之间要留空隙**。把频段铺满每一列的话相邻柱子会**粘成一整片**，
+///   看不出是一根根柱子。
+///
+/// 这两条在「可用宽 ÷ 频段数 == 1」时会打架：那个区间里柱子只有 1 列宽，空隙
+/// 是 0（粘成一片），而且宽度从 64 到 127 列都有余量没铺满。所以这个区间改走
+/// 2 列步长——柱数减半，但既有空隙又铺满。聚合时取的是每组的**最大值**，
+/// 鼓点那种尖峰不会被平均掉，减半的代价只是频段分辨率。
 fn bar_stride(area_width: usize, bands: usize) -> usize {
     if bands == 0 {
         return 1;
     }
-    (area_width / bands).max(1)
+    let fit = area_width / bands;
+    if fit >= 2 {
+        return fit;
+    }
+    // fit <= 1：频段数不少于可用列数，柱子只能是 1 列宽。
+    // 此时若还有余量（宽度 > 频段数），走 2 列步长换取空隙 + 铺满。
+    if area_width > bands { 2 } else { 1 }
 }
 
 /// 画柱状频谱：底部对齐，越高越亮，柱顶带一条缓慢下落的峰值刻度。
@@ -142,13 +153,28 @@ fn render_bars(frame: &mut Frame, area: Rect, levels: &[f32], peaks: &[f32], the
     let columns = aggregate(levels);
     let caps = aggregate(peaks);
 
+    // 柱子整块居中。
+    //
+    // `bars = min(宽度 / stride, 频段数)`：当「宽度 / stride」比频段数大时，柱子
+    // 只占 `bars * stride` 列，剩下的列全是空的。靠左铺的话右边会空出一大条
+    // ——112 列的终端下实测空 15 列，看着像图没画完。居中的话两侧留白对称，
+    // 一眼能看出是「画完了、就这么宽」。
+    //
+    // 不改成「把柱子加宽铺满」是因为那会得到宽度不一的柱子：79 列塞 64 根柱子，
+    // 多出来的 15 列只能分给其中一部分，柱体粗细不匀比留白更难看。
+    let used = (bars - 1) * stride + body;
+    let pad = (area.width as usize).saturating_sub(used) / 2;
+
     let mut lines = Vec::with_capacity(height);
     for row in 0..height {
         // 从底部数起的行号，用来判断这一格要不要点亮
         let from_bottom = height - row;
         let style = bar_style(row, height, theme);
 
-        let mut text = String::with_capacity(bars * stride);
+        let mut text = String::with_capacity(used + pad);
+        for _ in 0..pad {
+            text.push(' ');
+        }
         for (bar, &level) in columns.iter().enumerate() {
             let filled = (level * height as f32).round() as usize;
             let cap = (caps[bar] * height as f32).round() as usize;
@@ -258,6 +284,7 @@ fn render_track_info(frame: &mut Frame, area: Rect, state: &AppState, theme: &Th
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::spectrum::BAND_COUNT;
     use crate::ui::theme::ThemeName;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -319,6 +346,61 @@ mod tests {
         // 100 列，只有 4 个频段 → 4 根柱子（每根会被拉宽铺满）
         let buffer = bars_of(100, 2, &[1.0; 4]);
         assert_eq!(count_blocks(&buffer, 100, 1), 4, "柱子数应当等于频段数");
+    }
+
+    /// 柱子整块居中，两侧留白对称。
+    ///
+    /// `bars = min(宽度 / stride, 频段数)`：宽度除不尽时剩下的列全是空的。靠左铺
+    /// 的话右边会空出一大条（112 列的终端实测空 15 列），看着像图没画完。
+    #[test]
+    fn bars_are_centered_when_they_do_not_fill_the_width() {
+        let width = 10u16;
+        let buffer = bars_of(width, 2, &[1.0; 4]);
+        let bottom = 1;
+
+        let lit: Vec<usize> = (0..width as usize)
+            .filter(|x| buffer[(*x as u16, bottom)].symbol() == "█")
+            .collect();
+        assert!(!lit.is_empty(), "应当有柱子被点亮");
+
+        let left = lit[0];
+        let right = width as usize - 1 - lit[lit.len() - 1];
+        assert!(left > 0, "宽度除不尽时应两侧留白，而不是贴着左边缘");
+        assert!(
+            left.abs_diff(right) <= 1,
+            "两侧留白应当对称：左 {left} 列、右 {right} 列"
+        );
+    }
+
+    /// 「可用宽 ÷ 频段数 == 1」且还有余量时，改走 2 列步长。
+    ///
+    /// 那个区间里 1 列步长会得到「1 列宽 + 0 空隙」的柱子：既粘成一整片（看不出
+    /// 是一根根柱子），又因为宽度从 64 到 127 列都有余量而铺不满。
+    #[test]
+    fn stride_prefers_gaps_when_one_column_would_not_fill() {
+        assert_eq!(bar_stride(100, 64), 2, "有余量时应改走 2 列步长");
+        assert_eq!(bar_stride(64, 64), 1, "正好等于频段数时 1 列就铺满");
+        assert_eq!(bar_stride(40, 64), 1, "比频段数还少只能贴着放");
+        assert_eq!(bar_stride(192, 64), 3, "宽屏下柱子直接变宽");
+        assert_eq!(bar_stride(80, 0), 1, "没有频段时不能除零");
+    }
+
+    /// 64 个频段在 100 列的终端上要铺满，而不是只占左边 64 列。
+    #[test]
+    fn sixty_four_bands_fill_a_hundred_columns() {
+        let width = 100usize;
+        let buffer = bars_of(width as u16, 2, &[1.0; BAND_COUNT]);
+        let bottom = 1;
+
+        let lit: Vec<usize> = (0..width)
+            .filter(|x| buffer[(*x as u16, bottom)].symbol() == "█")
+            .collect();
+        assert!(!lit.is_empty(), "应当有柱子被点亮");
+        let span = lit[lit.len() - 1] - lit[0] + 1;
+        assert!(
+            span >= width * 95 / 100,
+            "柱子应铺满宽度，实际只占 {span} / {width} 列"
+        );
     }
 
     /// 宽屏下柱子要横向铺满，而不是只占左边一段。

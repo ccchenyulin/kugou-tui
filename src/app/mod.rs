@@ -291,13 +291,20 @@ impl App {
         Ok(())
     }
 
+    /// 启动时的一行提示。
+    ///
+    /// **只说配置与登录态，不断言连通性。** 这个方法在启动路径上跑，那一刻程序
+    /// 一个请求都还没发过；早先它写的是「已连接 {base}」，于是接口全挂也照样这么
+    /// 说——用户看到「已连接」就把网络问题排除掉了，然后往别处找原因。
+    /// 连通性由真实请求的结果驱动（`App::note_connection`），连上了才会改口。
     fn announce_readiness(&mut self) {
         let base = self.api.base().to_string();
+        let source = self.state.config.active_source_kind().label();
         if self.state.logged_in {
-            self.state.info(format!("已连接 {base}（已登录）"));
+            self.state.info(format!("音源 {source} · {base}（已登录）"));
         } else {
             self.state
-                .warn(format!("已连接 {base}（未登录，云端歌单不可用）"));
+                .warn(format!("音源 {source} · {base}（未登录，云端歌单不可用）"));
         }
     }
 

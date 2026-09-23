@@ -13,7 +13,7 @@ use crate::app::state::{EntryList, SearchPane, SongList};
 use crate::app::update::{artist_subtitle, playlist_subtitle, rank_subtitle};
 use crate::audio::engine::PlaybackState;
 use crate::ui::theme::Theme;
-use crate::ui::views::{empty_placeholder, loading_placeholder};
+use crate::ui::views::{empty_placeholder, failed_placeholder, loading_placeholder};
 use crate::ui::widgets::{
     RowContext, display_width, entry_row, panel, selection_list, song_row, truncate_to_width,
 };
@@ -57,8 +57,13 @@ pub fn render_song_list(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if list.loading {
+    if list.load.is_loading() {
         frame.render_widget(loading_placeholder(theme), inner);
+        return;
+    }
+    // 失败态优先于空态：没取到和「本来就是空的」是两回事
+    if let Some(reason) = list.load.error() {
+        frame.render_widget(failed_placeholder(reason, Some("按 R 重试"), theme), inner);
         return;
     }
     if list.songs.is_empty() {
@@ -183,8 +188,12 @@ fn render_entry_list<T: EntryTitle>(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if list.loading {
+    if list.load.is_loading() {
         frame.render_widget(loading_placeholder(theme), inner);
+        return;
+    }
+    if let Some(reason) = list.load.error() {
+        frame.render_widget(failed_placeholder(reason, Some("按 R 重试"), theme), inner);
         return;
     }
     if list.entries.is_empty() {

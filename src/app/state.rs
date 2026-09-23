@@ -222,6 +222,8 @@ pub enum HitTarget {
     Settings,
     /// 「我的资料」里的「领取今日 VIP」那一行。
     VipClaim,
+    /// 「我的资料」里资料载入失败后的重试提示行。
+    ProfileRetry,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -351,12 +353,60 @@ impl TextInput {
     }
 }
 
+/// 一次列表载入的三态：空闲 / 载入中 / 载入失败。
+///
+/// # 为什么把 loading 和 error 绑在一起
+///
+/// 之前它们是散在两个字段上的（`loading: bool` 加渲染时的空态判断），而
+/// `loading` 只在成功路径里清零。结果是：任何一次请求失败，面板就**永远停在
+/// 「载入中…」**——状态栏报着错，面板里还在转圈，用户既不知道失败了、也不知道
+/// 该按什么。三个状态必须由同一处代码迁移，才不会漏掉失败这条边。
+#[derive(Debug, Default, Clone)]
+pub struct LoadState {
+    /// 是否正在载入。
+    loading: bool,
+    /// 上一次载入失败的原因（面向用户的一行）。
+    error: Option<String>,
+}
+
+impl LoadState {
+    /// 开始一次载入：清掉上一次的失败原因，立起「载入中」。
+    pub fn begin(&mut self) {
+        self.loading = true;
+        self.error = None;
+    }
+
+    /// 载入成功：收掉「载入中」，清掉失败原因。
+    pub fn succeed(&mut self) {
+        self.loading = false;
+        self.error = None;
+    }
+
+    /// 载入失败：收掉「载入中」，把原因留下来。
+    ///
+    /// 只写 `loading = false` 是不够的——面板会退回「暂无数据」，用户会以为这份
+    /// 数据本来就是空的，而不是没取到。
+    pub fn fail(&mut self, reason: impl Into<String>) {
+        self.loading = false;
+        self.error = Some(reason.into());
+    }
+
+    pub fn is_loading(&self) -> bool {
+        self.loading
+    }
+
+    /// 上一次失败的原因。`None` 表示没失败过（不代表已经载入完成）。
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+}
+
 /// 条目列表（歌单 / 歌手 / 排行榜），带持久化的滚动偏移。
 #[derive(Debug)]
 pub struct EntryList<T> {
     pub entries: Vec<T>,
     pub cursor: ListState,
-    pub loading: bool,
+    pub load: LoadState,
 }
 
 impl<T> Default for EntryList<T> {
@@ -364,7 +414,7 @@ impl<T> Default for EntryList<T> {
         Self {
             entries: Vec::new(),
             cursor: ListState::default(),
-            loading: false,
+            load: LoadState::default(),
         }
     }
 }
@@ -401,7 +451,7 @@ impl<T> EntryList<T> {
     /// 用新数据替换列表，并把选中项复位到第一行。
     pub fn replace(&mut self, entries: Vec<T>) {
         self.entries = entries;
-        self.loading = false;
+        self.load.succeed();
         if self.entries.is_empty() {
             self.cursor.select(None);
         } else {
@@ -429,7 +479,7 @@ pub struct SongList {
     pub title: String,
     pub songs: Vec<Song>,
     pub cursor: ListState,
-    pub loading: bool,
+    pub load: LoadState,
     /// 空列表时的提示语。
     ///
     /// 各标签页空态的原因不同（没搜过 / 还没载入 / 筛选无结果），一律显示
@@ -510,7 +560,7 @@ impl SongList {
     pub fn replace(&mut self, title: impl Into<String>, songs: Vec<Song>) {
         self.title = title.into();
         self.songs = songs;
-        self.loading = false;
+        self.load.succeed();
         if self.songs.is_empty() {
             self.cursor.select(None);
         } else {
@@ -756,13 +806,108 @@ impl std::fmt::Debug for Avatar {
     }
 }
 
+/// 帮助面板状态。
+///
+/// # 为什么要滚动
+///
+/// `CHEATSHEET` 有 38 条，34 行的终端只放得下 26 条。早先这里只有一个 `bool`，
+/// 面板是模态的、按键全被吞掉，于是最后 12 条（Space / n·p / ←·→ / +·- / m / r /
+/// l / [·] / W——**整块播放控制**）在常见尺寸下永远看不到，也没有任何提示说还有内容。
+///
+/// 偏移和「打开」这个动作绑在一起：面板没有关闭动画，忘了归零的话第二次打开会
+/// 停在上次的位置。
+#[derive(Debug, Default)]
+pub struct HelpPane {
+    open: bool,
+    /// 首行在 `CHEATSHEET` 里的下标。
+    offset: usize,
+    /// 上一帧实际可见的行数，由渲染函数回填——滚动钳位要用它，而视口高度只有
+    /// 渲染时才知道。
+    viewport: usize,
+}
+
+impl HelpPane {
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
+    /// 打开，并把滚动位置复位到顶部。
+    pub fn open(&mut self) {
+        self.open = true;
+        self.offset = 0;
+    }
+
+    pub fn close(&mut self) {
+        self.open = false;
+    }
+
+    /// 滚动 `delta` 行。偏移会被钳到「最后一行刚好贴住视口底部」。
+    pub fn scroll_by(&mut self, delta: isize, total: usize) {
+        self.offset = clamp_offset(self.offset as isize + delta, total, self.viewport);
+    }
+
+    /// 翻一页。步长取「视口高度 - 1」——留一行重叠，翻页后视线有个锚点。
+    pub fn scroll_page(&mut self, direction: isize, total: usize) {
+        let step = self.viewport.saturating_sub(1).max(1) as isize;
+        self.scroll_by(step * direction.signum(), total);
+    }
+
+    pub fn scroll_to_top(&mut self) {
+        self.offset = 0;
+    }
+
+    pub fn scroll_to_bottom(&mut self, total: usize) {
+        self.offset = clamp_offset(isize::MAX, total, self.viewport);
+    }
+
+    /// 渲染用：登记本帧的视口行数，返回应该显示的行区间。
+    pub fn visible_range(&mut self, total: usize, viewport: usize) -> std::ops::Range<usize> {
+        self.viewport = viewport;
+        self.offset = clamp_offset(self.offset as isize, total, viewport);
+        self.offset..(self.offset + viewport).min(total)
+    }
+}
+
+/// 把滚动偏移钳进 `0..=(total - viewport)`。视口比内容长时只能贴顶。
+fn clamp_offset(offset: isize, total: usize, viewport: usize) -> usize {
+    let max = total.saturating_sub(viewport);
+    offset.clamp(0, max as isize) as usize
+}
+
+/// 与 KuGouMusicApi 的连通性。
+///
+/// **只能由真实请求的结果驱动。** 启动那一刻程序一个请求都还没发过，所以初始值
+/// 是 `Unknown`。早先这里没有这个概念，启动时直接打印「已连接 {base}」——接口
+/// 全挂也照样这么说，用户看到「已连接」就把网络问题排除掉了，然后往别处找原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Connection {
+    /// 还没发过请求，不知道。
+    #[default]
+    Unknown,
+    /// 最近一次请求成功了（业务错误码也算——那说明服务是通的）。
+    Connected,
+    /// 最近一次请求是传输层失败：连接被拒 / 超时。
+    Unreachable,
+}
+
+impl Connection {
+    /// 侧边栏「连接」区块标题上的后缀。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "未验证",
+            Self::Connected => "已连通",
+            Self::Unreachable => "未连通",
+        }
+    }
+}
+
 /// 歌词面板状态。
 #[derive(Debug, Default)]
 pub struct LyricPane {
     /// 当前歌词属于哪首歌，用于丢弃过期的异步结果。
     pub hash: Option<String>,
     pub lyric: Lyric,
-    pub loading: bool,
+    pub load: LoadState,
     /// 已渲染过的当前行下标，用于只在换行时重新计算居中偏移。
     pub active_line: Option<usize>,
 }
@@ -777,6 +922,8 @@ pub struct AppState {
     pub config: Config,
     /// 是否已配置登录 cookie。未登录时云端功能不可用。
     pub logged_in: bool,
+    /// 与 API 服务的连通性。由真实请求的结果驱动，见 [`Connection`]。
+    pub connection: Connection,
     /// 终端图形能力（封面 / 头像用哪种图片协议、单元格像素尺寸）。
     ///
     /// 放这里而不是 `App` 上：渲染封面时要按目标区域的像素尺寸裁图，而区域只有
@@ -788,7 +935,7 @@ pub struct AppState {
     pub tab: Tab,
     pub focus: Focus,
     pub sidebar_visible: bool,
-    pub show_help: bool,
+    pub help: HelpPane,
     pub show_lyric_panel: bool,
     /// 这一帧歌词**真的画到了屏幕上**。由 `render_lyric` 回填、`begin_frame` 复位。
     ///
@@ -886,8 +1033,11 @@ pub struct AppState {
     pub settings_cursor: usize,
     /// 当前封面，以及它属于哪首歌（避免切歌后继续显示上一张）。
     pub cover: CoverArt,
-    /// 当前账号的会员摘要（如「概念版 SVIP · 至 09-21」），未登录或未取到时为 None。
-    pub vip_label: Option<String>,
+    /// 当前账号的会员信息，未登录或未取到时为 None。
+    ///
+    /// 存结构体而不是拼好的字符串：侧边栏窄、首页宽，两处要的形态不同
+    /// （`VipInfo::short_label` / `VipInfo::label`），在这儿定型就没得挑了。
+    pub vip_info: Option<crate::api::cloud::VipInfo>,
     /// 上一次领取「概念版」当天 VIP 的日期（`2026-09-23`），随会话持久化。
     ///
     /// 用来做到「每天只领一次」——上游文档写着「尽量别频繁调用」，接口还带风控。
@@ -896,6 +1046,12 @@ pub struct AppState {
     pub vip_claiming: bool,
     /// 当前登录用户的资料（昵称 / 头像 / 等级 / 听歌时长）。
     pub user_info: Option<crate::api::cloud::UserInfo>,
+    /// 用户资料的载入状态。
+    ///
+    /// 和 `user_info` 分开：取不到资料时 `user_info` 仍是 `None`，而界面必须能
+    /// 区分「还在取」和「取失败了」——之前只有前者，接口挂掉时首页会永远显示
+    /// 「加载中…」，用户没有任何线索。
+    pub user_info_load: LoadState,
     /// 登录用户的头像。和 `cover`（当前歌曲专辑图）分开存。
     pub avatar: Avatar,
     /// 会话恢复待续播的位置：(歌曲 hash, 毫秒)。
@@ -1189,6 +1345,7 @@ impl AppState {
         let mut state = Self {
             config,
             logged_in,
+            connection: Connection::default(),
             // 由 `App::new` 探测终端能力后填入
             picker: None,
             tab: Tab::default(),
@@ -1196,10 +1353,11 @@ impl AppState {
             last_qr_key_at: None,
             context_menu: None,
             user_info: None,
+            user_info_load: LoadState::default(),
             avatar: Avatar::default(),
             resume: None,
             sidebar_visible: true,
-            show_help: false,
+            help: HelpPane::default(),
             show_lyric_panel: true,
             lyric_visible: false,
             should_quit: false,
@@ -1243,7 +1401,7 @@ impl AppState {
             login_picker: None,
             quality_picker: None,
             prompt: None,
-            vip_label: None,
+            vip_info: None,
             vip_claimed_day: None,
             vip_claiming: false,
         };
@@ -1574,6 +1732,103 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ================================================================
+    // LoadState：载入三态
+    // ================================================================
+
+    /// 失败必须同时收掉「载入中」并留下原因。
+    ///
+    /// 只收掉 loading 的话面板会退回「暂无数据」，用户以为这份数据本来就是空的；
+    /// 只留原因不清 loading 的话，面板会永远转圈——这两条边都踩过。
+    #[test]
+    fn load_failure_clears_loading_and_keeps_the_reason() {
+        let mut load = LoadState::default();
+        assert!(!load.is_loading());
+        assert_eq!(load.error(), None);
+
+        load.begin();
+        assert!(load.is_loading(), "begin 之后应处于载入中");
+        assert_eq!(load.error(), None, "开始载入要清掉上一次的失败原因");
+
+        load.fail("连不上");
+        assert!(!load.is_loading(), "失败必须收掉载入中，否则永久转圈");
+        assert_eq!(load.error(), Some("连不上"), "失败原因要留下来给面板显示");
+
+        // 重新载入时失败原因要消失，否则成功之后还挂着上一次的错
+        load.begin();
+        assert_eq!(load.error(), None);
+    }
+
+    #[test]
+    fn load_success_clears_both_flags() {
+        let mut load = LoadState::default();
+        load.begin();
+        load.fail("超时");
+        load.succeed();
+        assert!(!load.is_loading());
+        assert_eq!(load.error(), None, "成功之后不该还挂着旧的失败原因");
+    }
+
+    // ================================================================
+    // HelpPane：帮助面板滚动
+    // ================================================================
+
+    #[test]
+    fn help_scroll_is_clamped_to_the_last_page() {
+        let mut help = HelpPane::default();
+        help.open();
+        // 先渲染一帧，登记视口高度（滚动钳位要用它）
+        assert_eq!(help.visible_range(37, 27), 0..27);
+
+        help.scroll_by(1, 37);
+        assert_eq!(help.visible_range(37, 27), 1..28);
+
+        // 一直往下：最后一页必须正好贴住底部，不能滚过头留出空白
+        help.scroll_to_bottom(37);
+        assert_eq!(help.visible_range(37, 27), 10..37);
+
+        help.scroll_by(999, 37);
+        assert_eq!(help.visible_range(37, 27), 10..37, "越界要被钳住");
+
+        // 往上同理
+        help.scroll_by(-999, 37);
+        assert_eq!(help.visible_range(37, 27), 0..27);
+    }
+
+    /// 视口比内容长时只能贴顶显示，不能因为「total - viewport 下溢」而崩。
+    #[test]
+    fn help_scroll_handles_content_shorter_than_the_viewport() {
+        let mut help = HelpPane::default();
+        help.open();
+        help.scroll_by(5, 3);
+        assert_eq!(help.visible_range(3, 40), 0..3);
+    }
+
+    /// 打开要复位滚动位置，否则第二次打开会停在上次的地方。
+    #[test]
+    fn reopening_help_resets_the_scroll_position() {
+        let mut help = HelpPane::default();
+        help.open();
+        help.visible_range(37, 10);
+        help.scroll_by(20, 37);
+        assert_ne!(help.visible_range(37, 10).start, 0);
+
+        help.close();
+        help.open();
+        assert!(help.is_open());
+        assert_eq!(help.visible_range(37, 10), 0..10, "重新打开应回到顶部");
+    }
+
+    #[test]
+    fn help_page_scroll_moves_by_almost_a_full_viewport() {
+        let mut help = HelpPane::default();
+        help.open();
+        help.visible_range(100, 20);
+        help.scroll_page(1, 100);
+        // 步长 = 视口 - 1，留一行重叠给视线当锚点
+        assert_eq!(help.visible_range(100, 20).start, 19);
+    }
 
     /// `SIDEBAR_ORDER` 必须是 `ALL` 的一个**排列**。
     ///

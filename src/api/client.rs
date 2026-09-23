@@ -9,6 +9,7 @@
 //! 最新数据的接口，需要在 query 里塞一个时间戳让 URL 唯一。这类请求走
 //! [`ApiClient::get_json_uncached`]。
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,6 +28,42 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 const POOL_MAX_IDLE: usize = 4;
 
 const USER_AGENT_VALUE: &str = concat!("kugou-tui/", env!("CARGO_PKG_VERSION"));
+
+/// 瞬时故障的重试策略。
+///
+/// # 为什么需要
+///
+/// 本机走 fake-IP 代理，网络快慢波动大：一次连接被拒、一次响应体读到一半断掉，
+/// 都会让请求直接失败。这类失败**换个时刻重发就成功**。
+///
+/// 代价最实在的是取播放地址那条路：`song_stream_url` 会逐个试多个候选
+/// (hash, 音质)，某个候选因为一次网络抖动失败就被跳过；全都抖过去之后，
+/// 用户看到的是「**没有可用的播放地址（可能需要 VIP 或已下架）**」——
+/// 一个和真实原因（网络抖了）完全无关的结论。同理，列表加载失败也常常只是抖了一下。
+///
+/// # 判据与次数
+///
+/// 该不该重试由 [`AppError::is_transient`] 决定（见那里的说明：**超时、业务错误码、
+/// 其它 4xx 都不重试**）。次数与间隔：
+///
+/// * **总尝试 3 次**（首次 + 2 次重试）。瞬时抖动基本在第一次重试内就恢复了，
+///   再多只是让用户对着加载指示干等。
+/// * **间隔 300ms → 900ms**（×3 递增）。指数退避，但不加抖动：这是单用户的本地
+///   客户端，不存在「一群客户端同时重试」的问题。
+struct RetryPolicy;
+
+impl RetryPolicy {
+    /// 总尝试次数，含首次。
+    const MAX_ATTEMPTS: u32 = 3;
+    /// 第 1 次重试前等 300ms，第 2 次前等 900ms。
+    const BASE_DELAY_MS: u64 = 300;
+
+    /// 第 `attempt` 次尝试失败之后该等多久（`attempt` 从 1 开始）。
+    fn delay_after(attempt: u32) -> Duration {
+        let factor = 3u64.saturating_pow(attempt.saturating_sub(1));
+        Duration::from_millis(Self::BASE_DELAY_MS.saturating_mul(factor))
+    }
+}
 
 /// KuGouMusicApi 客户端。
 ///
@@ -96,6 +133,9 @@ impl ApiClient {
 
     /// 发送 GET 并解析 JSON，同时校验业务错误码。
     ///
+    /// 这是**读接口**：瞬时故障会按 [`RetryPolicy`] 自动重试。写接口请用
+    /// [`Self::get_json_mutating`]。
+    ///
     /// # 为什么先解析、后判状态码
     ///
     /// KuGouMusicApi 在业务失败时会把 `error_code` 放进响应体，而 HTTP 状态码可能同时
@@ -106,6 +146,85 @@ impl ApiClient {
     /// 所以顺序是：能解析出 JSON 就先看 `error_code`，它才是权威；只有体不可解析时
     /// 才退回用 HTTP 状态码报错。
     pub async fn get_json(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
+        self.with_retry(|| self.get_json_once(path, query))
+            .await
+    }
+
+    /// 同 [`Self::get_json`]，但在 query 里加时间戳绕开服务端 2 分钟缓存。
+    pub async fn get_json_uncached(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
+        // 时间戳在**每次重试时重算**：服务端有 2 分钟响应缓存，沿用同一个 URL
+        // 重试可能直接命中上一轮那份失败的响应，重试就白做了。
+        self.with_retry(|| async {
+            let mut query = query.to_vec();
+            query.push(("timestamp", now_unix_millis().to_string()));
+            self.get_json_once(path, &query).await
+        })
+        .await
+    }
+
+    /// 取原始文本响应。歌词接口在 `decode=true` 下偶尔直接返回 LRC 纯文本。
+    ///
+    /// 读接口，瞬时故障会重试。
+    pub async fn get_text(&self, path: &str, query: &[(&str, String)]) -> Result<String> {
+        self.with_retry(|| self.get_text_once(path, query)).await
+    }
+
+    /// **写接口**：与 [`Self::get_json`] 相同，但**不重试**。
+    ///
+    /// 重试的前提是「同一请求重发不会改变结果」，写操作不满足这一点。以
+    /// `/playlist/del` 为例：第一次其实已经删成功了、只是响应在路上丢了，重发会得到
+    /// 「歌单不存在」——用户看到一句失败提示，而歌单其实已经没了。相比之下直接报
+    /// 网络错误至少是诚实的：用户会自己重试，然后得到同样的「不存在」。
+    ///
+    /// 这类接口不多（收藏 / 移出 / 删歌单 / 新建歌单 / 领 VIP），逐个显式选不重试，
+    /// 比让它们默默继承重试要安全。
+    pub async fn get_json_mutating(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
+        self.get_json_once(path, query).await
+    }
+
+    /// **写接口**：同 [`Self::get_json_mutating`]，但加时间戳绕开服务端缓存。
+    pub async fn get_json_uncached_mutating(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> Result<Value> {
+        let mut query = query.to_vec();
+        query.push(("timestamp", now_unix_millis().to_string()));
+        self.get_json_once(path, &query).await
+    }
+
+    /// 跑一次 `once`，失败且属于瞬时故障时按 [`RetryPolicy`] 重试。
+    async fn with_retry<F, Fut, T>(&self, once: F) -> Result<T>
+    where
+        F: Fn() -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        let mut attempt = 1;
+        loop {
+            match once().await {
+                Ok(value) => return Ok(value),
+                Err(error) => {
+                    if attempt >= RetryPolicy::MAX_ATTEMPTS || !error.is_transient() {
+                        return Err(error);
+                    }
+                    let delay = RetryPolicy::delay_after(attempt);
+                    // 用 `{error}`（Display）而不是 `user_hint()`：可重试的失败都是
+                    // 带上下文的（HttpStatus 与 reqwest 的 Http 里都有路径），
+                    // 而 user_hint 会把路径再写一遍，日志里就成了「接口 /x … （接口 /x …）」
+                    tlog!(
+                        crate::logger::LEVEL_WARN,
+                        "第 {attempt} 次失败，{}ms 后重试：{error}",
+                        delay.as_millis()
+                    );
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
+    /// 单次尝试：发送、解析、校验业务错误码。重试逻辑在 [`Self::with_retry`]。
+    async fn get_json_once(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
         let (status, body) = self.send(path, query).await?;
 
         match serde_json::from_str::<Value>(&body) {
@@ -136,15 +255,8 @@ impl ApiClient {
         }
     }
 
-    /// 同 [`Self::get_json`]，但在 query 里加时间戳绕开服务端 2 分钟缓存。
-    pub async fn get_json_uncached(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
-        let mut query = query.to_vec();
-        query.push(("timestamp", now_unix_millis().to_string()));
-        self.get_json(path, &query).await
-    }
-
-    /// 取原始文本响应。歌词接口在 `decode=true` 下偶尔直接返回 LRC 纯文本。
-    pub async fn get_text(&self, path: &str, query: &[(&str, String)]) -> Result<String> {
+    /// 单次尝试：取原始文本响应。
+    async fn get_text_once(&self, path: &str, query: &[(&str, String)]) -> Result<String> {
         let (status, body) = self.send(path, query).await?;
         if !(200..300).contains(&status) {
             return Err(AppError::HttpStatus {
@@ -153,5 +265,23 @@ impl ApiClient {
             });
         }
         Ok(body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 重试次数与间隔是给用户看的承诺，钉住它。
+    ///
+    /// 总尝试 3 次（首次 + 2 次重试）、间隔 300ms → 900ms。所以一次抖动最多让用户
+    /// 多等 1.2 秒；再多等就不是「扛抖动」而是「拖着不报错」了。
+    #[test]
+    fn retry_backoff_is_exponential_and_bounded() {
+        assert_eq!(RetryPolicy::MAX_ATTEMPTS, 3);
+        assert_eq!(RetryPolicy::delay_after(1), Duration::from_millis(300));
+        assert_eq!(RetryPolicy::delay_after(2), Duration::from_millis(900));
+        // attempt 只会取到 MAX_ATTEMPTS - 1，但函数本身不能因此溢出
+        assert_eq!(RetryPolicy::delay_after(20), Duration::from_millis(300 * 3u64.pow(19)));
     }
 }

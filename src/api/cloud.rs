@@ -87,30 +87,60 @@ impl VipInfo {
         !matches!(self.kind, VipKind::None)
     }
 
+    /// 会员形态的中文名（`豪华` / `概念版` / 上游给的名字）。
+    fn kind_text(&self) -> &str {
+        match &self.kind {
+            VipKind::Standard => "豪华",
+            VipKind::Concept => "概念版",
+            VipKind::Other(name) => name.as_str(),
+            VipKind::None => "",
+        }
+    }
+
+    /// 到期日，形如 `09-21`。取不到就是空串。
+    ///
+    /// 只取日期部分：服务端给的是 `YYYY-MM-DD HH:MM:SS`，界面上一行放不下。
+    fn end_date(&self) -> String {
+        match self.end_time.split(' ').next() {
+            Some(date) if date.len() >= 10 => date[5..10].to_string(),
+            _ => String::new(),
+        }
+    }
+
     /// 界面用的一行摘要，例如「概念版 SVIP · 至 09-21」。
     pub fn label(&self) -> String {
         if !self.is_vip() {
             return "非会员".to_string();
         }
 
-        let kind = match &self.kind {
-            VipKind::Standard => "豪华",
-            VipKind::Concept => "概念版",
-            VipKind::Other(name) => name.as_str(),
-            VipKind::None => "",
-        };
+        let kind = self.kind_text();
         let product = self.product.to_uppercase();
-
-        // 只取日期部分，界面上一行放不下完整时间戳
-        let end = match self.end_time.split(' ').next() {
-            Some(date) if date.len() >= 10 => date[5..10].to_string(),
-            _ => String::new(),
-        };
+        let end = self.end_date();
 
         if end.is_empty() {
             format!("{kind} {product}")
         } else {
             format!("{kind} {product} · 至 {end}")
+        }
+    }
+
+    /// 窄侧边栏用的一行摘要，例如「概念版 09-28」。
+    ///
+    /// 侧边栏可用宽度最窄只有 20 列，`  会员 ` 这个前缀就占 7 列，留给值的只剩
+    /// 13 列——完整形态（「概念版 TVIP · 至 09-28」= 21 列）必然折行，折出来的
+    /// 第二行没有缩进，看着像排版坏了。所以这里连「至」字都省掉。产品名在侧边栏
+    /// 的「音源」那一行已经有了，完整形态在首页「我的资料」里。
+    pub fn short_label(&self) -> String {
+        if !self.is_vip() {
+            return "非会员".to_string();
+        }
+
+        let kind = self.kind_text();
+        let end = self.end_date();
+        if end.is_empty() {
+            kind.to_string()
+        } else {
+            format!("{kind} {end}")
         }
     }
 }
@@ -253,7 +283,7 @@ impl ApiClient {
     /// 返回原始响应：上游在「今天已经领过」「账号被风控」这类情况下**不一定**给
     /// 非零 `error_code`，把响应交给调用方才能如实描述结果，而不是替它断言成功。
     pub async fn claim_day_vip(&self, receive_day: &str) -> Result<Value> {
-        self.get_json(
+        self.get_json_mutating(
             "/youth/day/vip",
             &[("receive_day", receive_day.to_string())],
         )
@@ -265,7 +295,7 @@ impl ApiClient {
     /// **必须先 [`Self::claim_day_vip`]**——官方文档写明「需要先领取一天 VIP」。
     /// 上游用 cookie 里的 userid 定位账号，这里不需要额外参数。
     pub async fn upgrade_day_vip(&self) -> Result<Value> {
-        self.get_json("/youth/day/vip/upgrade", &[]).await
+        self.get_json_mutating("/youth/day/vip/upgrade", &[]).await
     }
 
     /// 已经领取过 VIP 的日期（`2026-09-23` 这种）。
@@ -371,7 +401,7 @@ impl ApiClient {
                 .join(",");
 
             let root = self
-                .get_json_uncached(
+                .get_json_uncached_mutating(
                     "/playlist/tracks/add",
                     &[("listid", list_id.to_string()), ("data", payload)],
                 )
@@ -418,7 +448,7 @@ impl ApiClient {
             .join(",");
 
         let root = self
-            .get_json_uncached(
+            .get_json_uncached_mutating(
                 "/playlist/tracks/del",
                 &[("listid", list_id.to_string()), ("fileids", payload)],
             )
@@ -437,7 +467,7 @@ impl ApiClient {
         if let crate::source::SourceKind::Netease = source {
             return crate::source::netease::delete_playlist(self, list_id).await;
         }
-        self.get_json_uncached("/playlist/del", &[("listid", list_id.to_string())])
+        self.get_json_uncached_mutating("/playlist/del", &[("listid", list_id.to_string())])
             .await?;
         Ok(())
     }
@@ -455,7 +485,7 @@ impl ApiClient {
             return crate::source::netease::create_playlist(self, name).await;
         }
         let root = self
-            .get_json_uncached(
+            .get_json_uncached_mutating(
                 "/playlist/add",
                 &[("name", name.to_string()), ("type", "0".to_string())],
             )
@@ -480,6 +510,47 @@ fn encode_track_entry(song: &Song) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 短形态必须省掉产品名与「至」字，且**真的放得进最窄的侧边栏**。
+    ///
+    /// 侧边栏最窄 24 列 → 可用 20 列，`  会员 ` 前缀占 7 列，留给值的只有 13 列。
+    /// 完整形态 21 列，加上前缀必然折行，折出来的第二行没有缩进，看着像排版坏了。
+    /// 这条测试就是锁住「短形态放得下」这个前提。
+    #[test]
+    fn short_label_fits_the_narrowest_sidebar() {
+        let info = VipInfo {
+            kind: VipKind::Concept,
+            product: "tvip".to_string(),
+            end_time: "2026-09-28 12:00:00".to_string(),
+        };
+
+        assert_eq!(info.label(), "概念版 TVIP · 至 09-28");
+        assert_eq!(info.short_label(), "概念版 09-28");
+
+        // 侧边栏 24 列 − 边框 2 − 左右内边距 2 = 20 列可用
+        let room = 20 - crate::ui::widgets::display_width("  会员 ");
+        let width = crate::ui::widgets::display_width(&info.short_label());
+        assert!(
+            width <= room,
+            "短形态 {width} 列，最窄的侧边栏只剩 {room} 列"
+        );
+    }
+
+    /// 非会员与取不到到期日时也不能崩、不能吐出半截字符串。
+    #[test]
+    fn labels_degrade_without_an_end_date() {
+        let no_date = VipInfo {
+            kind: VipKind::Standard,
+            product: "svip".to_string(),
+            end_time: String::new(),
+        };
+        assert_eq!(no_date.label(), "豪华 SVIP");
+        assert_eq!(no_date.short_label(), "豪华");
+
+        let none = VipInfo::default();
+        assert_eq!(none.label(), "非会员");
+        assert_eq!(none.short_label(), "非会员");
+    }
 
     /// HTTP 200 但业务失败时必须报错——否则界面会谎报「已收藏」。
     #[test]

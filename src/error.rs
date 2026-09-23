@@ -103,6 +103,50 @@ impl AppError {
         }
     }
 
+    /// 是否是「传输层根本没通」——连接被拒、DNS 失败、超时。
+    ///
+    /// 用来区分两种失败：服务没起来（连不上），和服务起来了但拒绝了这次请求
+    /// （业务错误码 / 非 2xx）。**后者恰恰证明服务是通的**，不该被当成「未连通」。
+    pub fn is_connectivity(&self) -> bool {
+        match self {
+            Self::Http(error) => error.is_connect() || error.is_timeout(),
+            _ => false,
+        }
+    }
+
+    /// 这次失败是不是「换个时刻重发就可能成功」的瞬时故障。
+    ///
+    /// 判据只有一条：**同样的请求重发一次，结果是否可能不同**。
+    ///
+    /// 会（→ 可重试）：
+    ///
+    /// * 传输层断在连接或读体上——连接被拒、连接被重置、响应体读到一半断了。
+    ///   这类错误都在毫秒级返回，正是「有网但恰好抖了一下」的样子。
+    /// * 服务端 5xx，以及 408 / 429——对端明确表示「现在不行，等会儿再来」。
+    ///
+    /// 不会（→ 直接放弃）：
+    ///
+    /// * **超时不算**。那已经等满 15 秒（连接超时 8 秒），说明对端是卡住而不是
+    ///   抖了一下；再等两轮是拿用户的时间换一个大概率相同的结果。
+    /// * 业务错误码（`AppError::Api`）——服务回了话，只是拒绝了这次请求。
+    ///   需要登录、页码越界、没有可用的播放地址都属于这一类，重发只会得到同样的答复。
+    /// * 其它 4xx——请求本身有问题（参数、鉴权），与时刻无关。
+    /// * `Json`——200 却返回非 JSON，是内容问题不是传输问题（真正的截断会走
+    ///   `is_body` / `is_decode`，那两条在上面算可重试）。
+    /// * 请求构造失败、配置 / IO / 音频错误——问题不在网络上。
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Http(error) => {
+                !error.is_timeout()
+                    && (error.is_connect() || error.is_body() || error.is_decode())
+            }
+            Self::HttpStatus { status, .. } => {
+                *status == 408 || *status == 429 || (500..600).contains(status)
+            }
+            _ => false,
+        }
+    }
+
     /// 面向用户的一行提示。避免把 reqwest 的长串错误直接糊到状态栏上。
     pub fn user_hint(&self) -> String {
         if self.is_login_expired() {
@@ -152,5 +196,57 @@ mod tests {
 
         // 从来没登录过的（152 = 搜索缺 cookie）不该说「失效」
         assert!(api(152).user_hint().contains("需要登录"));
+    }
+
+    /// 业务错误码不算「连不上」——服务回了话，只是拒绝了这次请求。
+    ///
+    /// 归错的话，界面会在服务明明活着的时候报「未连通」，把用户引到错误的排查方向。
+    #[test]
+    fn business_errors_are_not_connectivity_failures() {
+        for code in [152, 149, 20005, 20017, 20028] {
+            assert!(
+                !api(code).is_connectivity(),
+                "code={code} 是业务错误，服务是通的"
+            );
+        }
+        assert!(!AppError::Config("配置坏了".to_string()).is_connectivity());
+        assert!(!AppError::Io(std::io::Error::other("本地磁盘")).is_connectivity());
+    }
+
+    fn status(code: u16) -> AppError {
+        AppError::HttpStatus {
+            path: "/song/url".to_string(),
+            status: code,
+        }
+    }
+
+    /// 该不该重试，只看一条：**换个时刻重发，结果会不会不同**。
+    ///
+    /// 这条策略直接决定用户是「等一秒然后正常播」，还是「看到一个和真实原因
+    /// 毫无关系的错误」，所以逐类钉住。
+    ///
+    /// 注：超时那一支（`is_timeout()` → 不重试）没法在单测里构造 `reqwest::Error`，
+    /// 只能靠 `is_timeout()` 的语义保证；它由端到端的手测覆盖。
+    #[test]
+    fn only_transient_failures_are_retried() {
+        // 业务错误码：服务回了话，重发还是这个答复
+        for code in [152, 149, 20005, 20017, 31863] {
+            assert!(!api(code).is_transient(), "code={code} 是业务错误，不该重试");
+        }
+
+        // 服务端明确表示「现在不行，等会儿再来」
+        for code in [408, 429, 500, 502, 503, 504] {
+            assert!(status(code).is_transient(), "HTTP {code} 应当重试");
+        }
+
+        // 客户端错误：请求本身有问题，与时刻无关
+        for code in [400, 401, 403, 404, 410, 422] {
+            assert!(!status(code).is_transient(), "HTTP {code} 不该重试");
+        }
+
+        // 本地问题
+        assert!(!AppError::Config("坏了".to_string()).is_transient());
+        assert!(!AppError::Io(std::io::Error::other("磁盘")).is_transient());
+        assert!(!AppError::NotFound("《X》没有可用的播放地址".to_string()).is_transient());
     }
 }

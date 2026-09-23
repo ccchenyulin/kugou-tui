@@ -9,6 +9,7 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Gauge, ListState, Paragraph};
+use ratatui_image::picker::ProtocolType;
 use ratatui_image::{FontSize, Resize, StatefulImage};
 
 use crate::api::model::format_duration_ms;
@@ -17,7 +18,7 @@ use crate::app::state::{AppState, HitTarget};
 use crate::audio::engine::PlaybackState;
 use crate::config::CoverFill;
 use crate::ui::theme::{Theme, mix};
-use crate::ui::views::{empty_placeholder, loading_placeholder};
+use crate::ui::views::{empty_placeholder, failed_placeholder, loading_placeholder};
 use crate::ui::widgets::{
     RowContext, display_width, panel, selection_list, song_row, truncate_to_width,
 };
@@ -217,8 +218,15 @@ pub fn render_lyric(frame: &mut Frame, area: Rect, state: &mut AppState, theme: 
     // `draw_cover_block` 决定放不放、放多大。
     let lyric_area = inner;
 
-    if state.lyric.loading && state.lyric.lyric.is_empty() {
+    if state.lyric.load.is_loading() && state.lyric.lyric.is_empty() {
         frame.render_widget(loading_placeholder(theme), lyric_area);
+        return;
+    }
+    // 取失败要说「没取到」，不能落到下面那句「暂无歌词」——那是在替这首歌
+    // 断言「它本来就没有歌词」。没有刷新键可用，所以不给「按 X 重试」的提示：
+    // 换首歌或等下一首会自动重取。
+    if let Some(reason) = state.lyric.load.error() {
+        frame.render_widget(failed_placeholder(reason, None, theme), lyric_area);
         return;
     }
     if state.lyric.lyric.is_empty() {
@@ -605,7 +613,16 @@ pub fn render_lyric_panel(frame: &mut Frame, area: Rect, state: &mut AppState, t
 }
 
 /// 头像占的列数：6 行内容 × 字符高宽比 2 = 12 列。
+///
+/// 这是给**真图片**的：12 列 × 6 行在支持 kitty / sixel / iTerm2 的终端上是
+/// 约 108×108 像素，头像认得出来。
 const AVATAR_COLUMNS: u16 = 12;
+
+/// 半块字符模式下头像降级成昵称首字，只占 3 列（首字 + 两侧各留一列）。
+///
+/// 不沿用 12 列：一个首字占 12 列纯粹是浪费，而账号区的文字列本来就不够宽
+/// ——实测 12 列时「概念版 TVIP · 至 09-28」会被截成「至 09…」，日期等于没写。
+const AVATAR_INITIAL_COLUMNS: u16 = 3;
 
 /// 首页账号区的高度：边框 2 行 + 内容 6 行（头像要能看清，2 行只能画 4 列宽）。
 ///
@@ -641,27 +658,61 @@ fn render_account(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &T
     }
 
     let Some(info) = state.user_info.clone() else {
-        // 已登录但资料还没回来时显示「加载中」——直接写「未登录」会让人以为
-        // 登录掉了，其实只是这一秒还没到。
-        let text = if state.logged_in {
-            "加载中…"
+        // 三种「没有资料」必须分开说：未登录 / 正在取 / 取失败。
+        //
+        // 早先只区分了前两种，于是接口挂掉时首页会**永远**停在「加载中…」——
+        // 用户分不清是失败还是慢，也没有任何可以照做的动作。
+        let (text, style) = if !state.logged_in {
+            ("未登录（按 L 扫码）".to_string(), theme.dim())
+        } else if let Some(reason) = state.user_info_load.error() {
+            (
+                format!("资料载入失败：{reason}"),
+                theme.status(crate::app::state::StatusLevel::Error),
+            )
         } else {
-            "未登录（按 L 扫码）"
+            ("加载中…".to_string(), theme.dim())
         };
         frame.render_widget(
             Paragraph::new(Span::styled(
-                truncate_to_width(text, inner.width as usize),
-                theme.dim(),
+                truncate_to_width(&text, inner.width as usize),
+                style,
             )),
             inner,
         );
+
+        // 失败时给一个能照做的入口。键盘上没有「重取资料」这个键位，所以只挂
+        // 鼠标：整个账号区都可点（命中区取「后登记的优先」，这里没有别的区域）。
+        if state.user_info_load.error().is_some() && inner.height >= 2 {
+            frame.render_widget(
+                Paragraph::new(Span::styled("点这里重试", theme.key_hint())),
+                Rect::new(inner.x, inner.y + 1, inner.width, 1),
+            );
+            state.add_hit_zone(inner, HitTarget::ProfileRetry, 0, 1);
+        }
         return;
     };
 
+    // 终端只能退到半块字符时**不画照片**：12 列 × 6 行在半块模式下只有
+    // 24×12 个「像素」，任何头像在这个尺寸下都只是一团噪点——比不画还糟，
+    // 用户会以为渲染坏了。改画昵称首字，而且只占 3 列——首字用不了 12 列，
+    // 省下来的宽度留给右边的文字（那里正放不下完整的会员摘要）。
+    //
+    // 支持 kitty / sixel / iTerm2 的终端照旧走图片：那里 12×6 个单元格是真实的
+    // 像素尺寸（典型终端约 108×108），头像认得出来。
+    let text_only = state
+        .picker
+        .as_ref()
+        .is_none_or(|picker| picker.protocol_type() == ProtocolType::Halfblocks);
+    let avatar_columns = if text_only {
+        AVATAR_INITIAL_COLUMNS
+    } else {
+        AVATAR_COLUMNS
+    };
+
     // 左头像 / 右文字。窄到放不下头像就整块给文字
-    let (avatar_area, text_area) = if inner.width >= AVATAR_COLUMNS + 14 {
+    let (avatar_area, text_area) = if inner.width >= avatar_columns + 14 {
         let [left, right] =
-            Layout::horizontal([Constraint::Length(AVATAR_COLUMNS), Constraint::Min(10)])
+            Layout::horizontal([Constraint::Length(avatar_columns), Constraint::Min(10)])
                 .spacing(1)
                 .areas(inner);
         (Some(left), right)
@@ -669,8 +720,16 @@ fn render_account(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &T
         (None, inner)
     };
 
+    let name = if info.nickname.is_empty() {
+        "（无名）".to_string()
+    } else {
+        info.nickname.clone()
+    };
+
     if let Some(avatar_area) = avatar_area {
-        if let Some(protocol) = state.avatar.protocol.as_mut() {
+        if text_only {
+            render_avatar_initial(frame, avatar_area, &name, theme);
+        } else if let Some(protocol) = state.avatar.protocol.as_mut() {
             frame.render_stateful_widget(StatefulImage::default(), avatar_area, protocol);
             if let Some(Err(error)) = protocol.last_encoding_result() {
                 crate::logger::tlog!(crate::logger::LEVEL_WARN, "头像编码失败：{error}");
@@ -680,11 +739,6 @@ fn render_account(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &T
 
     // 昵称 + 等级
     let mut lines: Vec<Line> = Vec::new();
-    let name = if info.nickname.is_empty() {
-        "（无名）".to_string()
-    } else {
-        info.nickname.clone()
-    };
     lines.push(Line::from(vec![
         Span::styled(
             truncate_to_width(&name, text_area.width.saturating_sub(8) as usize),
@@ -698,10 +752,10 @@ fn render_account(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &T
         ),
     ]));
 
-    // 会员摘要（有就显示）
-    if let Some(label) = state.vip_label.as_deref() {
+    // 会员摘要（有就显示）。首页宽，用完整形态（带产品名）
+    if let Some(label) = state.vip_info.as_ref().map(crate::api::cloud::VipInfo::label) {
         lines.push(Line::from(Span::styled(
-            truncate_to_width(label, text_area.width as usize),
+            truncate_to_width(&label, text_area.width as usize),
             theme.now_playing(),
         )));
     }
@@ -742,6 +796,31 @@ fn render_account(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &T
     }
 
     frame.render_widget(Paragraph::new(lines), text_area);
+}
+
+/// 头像区的降级画法：昵称首字，**与昵称同一行**。
+///
+/// 只在终端退到半块字符时用（见 `render_account` 里的判断）——那个模式下
+/// 12 列 × 6 行只有 24×12 个「像素」，照片认不出来。
+///
+/// 顶对齐而不是垂直居中：账号区有 6 行，居中会把首字落到第 4 行，正好和
+/// 「听过 N 小时」对齐——看上去跟昵称毫无关系。贴在首行才读得出是「这个人的头像」。
+fn render_avatar_initial(frame: &mut Frame, area: Rect, nickname: &str, theme: &Theme) {
+    let Some(initial) = nickname.chars().next() else {
+        return;
+    };
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(initial.to_string(), theme.title())))
+            .alignment(Alignment::Center),
+        Rect {
+            height: 1,
+            ..area
+        },
+    );
 }
 
 /// 首页：正在播放的总览——封面在左，曲目信息与歌词在右。
@@ -792,10 +871,112 @@ pub fn render_home(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &
 mod tests {
     use super::*;
     use crate::ui::theme::ThemeName;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     /// 造一张纯色图，用来断言「裁完的尺寸对不对」。
     fn solid(width: u32, height: u32) -> image::DynamicImage {
         image::DynamicImage::ImageRgb8(image::RgbImage::new(width, height))
+    }
+
+    /// 取屏幕文本并**去掉所有空白**。
+    ///
+    /// ratatui 会给每个宽字符后面补一个占位格，所以 buffer 里的「载入失败」实际是
+    /// 「载 入 失 败」——直接 `contains` 会假失败。两边都先挤掉空白再比。
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect()
+    }
+
+    /// 半块字符模式下头像要降级成昵称首字，而不是把照片糊成一团噪点。
+    ///
+    /// 12 列 × 6 行在半块模式下只有 24×12 个「像素」，照片在这个尺寸下认不出来。
+    #[test]
+    fn avatar_falls_back_to_the_nickname_initial() {
+        let area = Rect::new(0, 0, AVATAR_COLUMNS, 6);
+        let mut terminal =
+            Terminal::new(TestBackend::new(AVATAR_COLUMNS, 6)).expect("建测试终端");
+        let theme = Theme::for_config(ThemeName::Default, false);
+
+        terminal
+            .draw(|frame| render_avatar_initial(frame, area, "惜别", &theme))
+            .expect("渲染降级头像");
+
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains('惜'), "应画昵称首字：{text}");
+        assert!(!text.contains('别'), "只画首字，不该整串铺上去：{text}");
+    }
+
+    /// 昵称取不到时不能崩，也不能画出个空框。
+    #[test]
+    fn avatar_fallback_tolerates_an_empty_nickname() {
+        let area = Rect::new(0, 0, AVATAR_COLUMNS, 6);
+        let mut terminal =
+            Terminal::new(TestBackend::new(AVATAR_COLUMNS, 6)).expect("建测试终端");
+        let theme = Theme::for_config(ThemeName::Default, false);
+
+        terminal
+            .draw(|frame| render_avatar_initial(frame, area, "", &theme))
+            .expect("空昵称也不该 panic");
+    }
+
+    /// 歌词取失败要说「没取到」，不能显示「暂无歌词」。
+    ///
+    /// 「暂无歌词」是在替这首歌断言「它本来就没有歌词」——取失败和本来没有是
+    /// 两回事，混成一句会让用户以为这首歌没歌词，转而去别处找原因。
+    #[test]
+    fn lyric_failure_is_not_reported_as_an_empty_lyric() {
+        let mut state = AppState::new(crate::config::Config::default());
+        state.lyric.hash = Some("h".to_string());
+        state.lyric.load.fail("网络请求失败：连接被拒");
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).expect("建测试终端");
+        let theme = Theme::for_config(ThemeName::Default, false);
+        terminal
+            .draw(|frame| render_lyric(frame, Rect::new(0, 0, 40, 8), &mut state, &theme))
+            .expect("渲染歌词面板");
+
+        let text = buffer_text(&terminal);
+        assert!(text.contains("载入失败"), "应说明是取失败：{text}");
+        assert!(
+            !text.contains("暂无歌词"),
+            "不能把取失败说成「这首歌没有歌词」：{text}"
+        );
+    }
+
+    /// 真的没有歌词（请求成功但内容为空）时，仍然显示「暂无歌词」。
+    #[test]
+    fn an_empty_lyric_still_reads_as_no_lyrics() {
+        let mut state = AppState::new(crate::config::Config::default());
+        // 有当前曲目才会落到「暂无歌词」；没有曲目时是「播放歌曲后显示歌词」
+        state.current = Some(crate::api::model::Song::default());
+        state.lyric.hash = Some("h".to_string());
+        state.lyric.load.succeed();
+        state.lyric.lyric = crate::api::model::Lyric::default();
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).expect("建测试终端");
+        let theme = Theme::for_config(ThemeName::Default, false);
+        terminal
+            .draw(|frame| render_lyric(frame, Rect::new(0, 0, 40, 8), &mut state, &theme))
+            .expect("渲染歌词面板");
+
+        let text = buffer_text(&terminal);
+        assert!(text.contains("暂无歌词"), "确实没有歌词时应照常说：{text}");
+        assert!(!text.contains("载入失败"), "这不是失败：{text}");
     }
 
     /// 缩略图区是「列 = 行 × 2」的方形（字符宽高比 1:2），并水平居中。
@@ -951,9 +1132,6 @@ mod tests {
     /// 这里选 `Picker::halfblocks()`：它不碰 stdio，测试里能稳定跑。
     #[test]
     fn cover_is_rendered_into_the_frame_buffer() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         // 渐变而不是纯色：半块字符在上下两格同色时会退化成空格（用底色表示），
         // 纯色图渲染出来就是一片空白，测不出东西。
         let mut pixels = image::RgbImage::new(32, 32);
