@@ -122,6 +122,19 @@
 
 ### 1. 启动 KuGouMusicApi
 
+**本项目不含任何接口实现**，数据全部来自第三方的
+[KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi)——它是**独立仓库**，
+不在本仓库里（没有 submodule，也没有 vendor 目录），所以得先把它拉下来跑起来。
+
+仓库里有个脚本把「clone → 装依赖 → 启动」合成一条命令：
+
+```bash
+./scripts/kugou-api-install kugou
+```
+
+它会 clone 到 `~/KuGouMusicApi`、`npm install`，然后调 `scripts/kugou-api start`
+把标准版（:3000）和概念版（:3001）两个实例都拉起来。只想手动来一遍的话：
+
 ```bash
 git clone https://github.com/MakcRe/KuGouMusicApi.git
 cd KuGouMusicApi
@@ -135,6 +148,7 @@ npm start          # 注意是 npm start，不是 npm run dev
 > 概念版（lite）实例要带 `platform=lite` 启动：
 > `platform=lite PORT=3001 npm start`
 > 不加这个环境变量，概念版搜索会拿不到正确结果。
+> 用 `scripts/kugou-api start` 就不用管这些，它两个实例都会带对参数起。
 
 服务默认监听 `http://127.0.0.1:3000`。验证一下：
 
@@ -146,6 +160,9 @@ curl -s "http://127.0.0.1:3000/register/dev"
 
 > **只用「酷狗」音源的话，起这一个实例就够了。**
 > 想用「酷狗概念版」音源，见[常见问题](docs/FAQ.md)里的「概念版音源怎么配」。
+>
+> 服务目录默认是 `~/KuGouMusicApi`，用 `KUGOU_API_DIR` 可以改（启动脚本和
+> `kugou-api` 都认这个变量）。
 
 ### 2. 编译本客户端
 

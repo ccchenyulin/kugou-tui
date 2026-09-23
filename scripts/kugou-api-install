@@ -9,9 +9,12 @@
 # 用法：
 #   kugou-api-install netease       # 安装并启动网易云服务
 #   kugou-api-install kugou         # 安装并启动酷狗两个实例（标准版 + 概念版）
-#   kugou-api-install qqmusic       # 安装并启动 QQ 音乐服务
 #   kugou-api-install all           # 全部
 #   kugou-api-install               # 列出可安装项与当前状态
+#
+# 目前只支持 kugou / netease 两个音源——`REPO` 与 `dir_for()` 里没有的项目
+# 会落到「未知音源」分支。加新音源时这三处要一起改：
+# `REPO`、`PORT_LABEL` / `dir_for`、以及下面 `case` 里的启动分支。
 #
 set -euo pipefail
 

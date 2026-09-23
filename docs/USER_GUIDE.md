@@ -149,6 +149,9 @@ cd NeteaseCloudMusicApi && npm install
 env PORT=3002 node app.js          # ⚠️ 只认 PORT 环境变量，不认 --port=
 ```
 
+> 也可以用仓库脚本一步做完：`./scripts/kugou-api-install netease`
+> （clone 到 `~/NeteaseCloudMusicApi` + `npm install` + 启动）。
+
 把地址填进配置（默认就是 `3002`）：
 
 ```toml

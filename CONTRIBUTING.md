@@ -6,11 +6,22 @@
 ## 先把环境跑起来
 
 1. **Rust 1.86+**（本项目用 edition 2024；下限由 `ratatui-image` 11.x 决定）。
-2. **Node.js 12+**，用于运行 [KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi)：
+2. **Node.js 12+**，用于运行 [KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi)。
+   它是**独立仓库**，不在本仓库里（无 submodule、无 vendor），得单独拉一份。
+   最省事的是用仓库自带的脚本：
+
+   ```bash
+   ./scripts/kugou-api-install kugou   # clone + npm install + 起两个实例
+   ```
+
+   手动来一遍也可以，但**要固定到 README 里那个经过验证的提交**——上游是活跃
+   仓库，接口字段会漂移，跟 master 可能某天就解析不出歌名或歌词：
 
    ```bash
    git clone https://github.com/MakcRe/KuGouMusicApi.git
-   cd KuGouMusicApi && npm install && npm start   # 注意是 npm start
+   cd KuGouMusicApi
+   git checkout a5a98013cce79fe0ae2ad65fc84b68176ebcfc1e
+   npm install && npm start            # 注意是 npm start，不是 npm run dev
    ```
 
 3. 编译并运行本客户端：
