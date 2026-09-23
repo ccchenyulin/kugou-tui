@@ -133,7 +133,10 @@
 ```
 
 它会 clone 到 `~/KuGouMusicApi`、`npm install`，然后调 `scripts/kugou-api start`
-把标准版（:3000）和概念版（:3001）两个实例都拉起来。只想手动来一遍的话：
+把标准版（:3000）和概念版（:3001）两个实例都拉起来。`./scripts/kugou-api-install`
+不带参数会列出各音源的仓库、**钉住的提交**与当前运行状态。
+
+只想手动来一遍的话：
 
 ```bash
 git clone https://github.com/MakcRe/KuGouMusicApi.git
@@ -144,6 +147,10 @@ git checkout a5a98013cce79fe0ae2ad65fc84b68176ebcfc1e
 npm install
 npm start          # 注意是 npm start，不是 npm run dev
 ```
+
+> 这个提交号在 `scripts/kugou-api-install` 的 `PINNED[kugou]` 里也有一份，
+> 脚本会按它做**浅取**（`git fetch --depth 1 origin <sha>`，只拉那一个提交）。
+> 换验证过的提交时两处一起改。
 
 > 概念版（lite）实例要带 `platform=lite` 启动：
 > `platform=lite PORT=3001 npm start`

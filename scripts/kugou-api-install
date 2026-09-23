@@ -21,13 +21,21 @@ set -euo pipefail
 # 安装根目录（各服务会放到它的子目录里）
 ROOT="${KUGOU_API_ROOT:-$HOME}"
 
-# 各音源对应的上游仓库与端口。
+# 各音源对应的上游仓库、**经过验证的提交**、与端口。
+#
+# 为什么固定提交：上游是活跃仓库，接口字段会漂移——直接跟 master 可能某天就
+# 解析不出歌名或歌词。这个提交号在 README 的「安装」一节里也写着，改这里要顺手
+# 同步那边（两处都是「某个验证过的提交」，就算一时不同步也只是版本新旧之差，
+# 不会坏；真正会坏的是「一处钉、一处跟 master」）。
+#
 # 端口必须与 src/source/mod.rs 里 default_api_base() 保持一致，改这里也要改那边。
-declare -A REPO PORT_LABEL
+declare -A REPO PINNED PORT_LABEL
 REPO[kugou]="https://github.com/MakcRe/KuGouMusicApi.git"
+PINNED[kugou]="a5a98013cce79fe0ae2ad65fc84b68176ebcfc1e"
 # 注意：原 Binaryify/NeteaseCloudMusicApi 已因版权问题停止维护（仓库只剩占位文件）。
-# 这里用社区持续维护的分支版本。
+# 这里用社区持续维护的分支版本。它没有稳定提交可钉，跟默认分支。
 REPO[netease]="https://github.com/neteasecloudmusicapienhanced/api-enhanced.git"
+PINNED[netease]=""
 
 PORT_LABEL[kugou]="3000(标准版) / 3001(概念版)"
 PORT_LABEL[netease]="3002"
@@ -57,9 +65,15 @@ status_of() {
 }
 
 start_kugou() {
-  # 酷狗要起两个实例（platform 不同），交给现成的 kugou-api 脚本
-  if [ -x "$(dirname "$0")/kugou-api" ]; then
-    "$(dirname "$0")/kugou-api" start
+  # 酷狗要起两个实例（platform 不同），交给现成的 kugou-api 脚本。
+  #
+  # **必须把安装目录传下去**：`KUGOU_API_ROOT`（这个脚本的）与 `KUGOU_API_DIR`
+  # （kugou-api 的）是两套变量，不传的话 ROOT 非默认值时就会出现
+  # 「装在一处、从另一处起」——装到 /mnt/x 了，起的还是 ~/KuGouMusicApi。
+  local dir="$1"
+  local sibling; sibling="$(dirname "$0")/kugou-api"
+  if [ -x "$sibling" ]; then
+    KUGOU_API_DIR="$dir" "$sibling" start
   else
     printf '  \033[33m找不到 kugou-api 脚本，请手动执行：kugou-api start\033[0m\n'
   fi
@@ -91,26 +105,56 @@ install_one() {
   # 判断「装好了没有」要看入口文件，不能只看目录在不在——
   # clone 中断、只拉到 README 之类的情况都会留下一个空壳目录。
   local entry="app.js"
+  local pin="${PINNED[$name]:-}"
 
   if [ -f "$dir/$entry" ]; then
     printf '  已安装：%s\n' "$dir"
+    # 已经装好不代表装在对的提交上：之前跟 master 装的人会停在一个未经验证的
+    # 版本上。这里只提示、不自动切——用户可能正依赖当前版本的行为。
+    if [ -n "$pin" ] && [ -d "$dir/.git" ]; then
+      local head
+      head=$(cd "$dir" && git rev-parse HEAD 2>/dev/null || true)
+      if [ -n "$head" ] && [ "$head" != "$pin" ]; then
+        printf '  \033[33m注意：当前停在 %s，脚本钉的是 %s\033[0m\n' \
+          "${head:0:7}" "${pin:0:7}"
+        printf '  若遇到「解析不出歌名/歌词」，先切过去试试：\n'
+        printf '    git -C "%s" fetch --depth 1 origin %s && git -C "%s" checkout FETCH_HEAD\n' \
+          "$dir" "$pin" "$dir"
+      fi
+    fi
   elif [ -d "$dir" ] && [ -n "$(ls -A "$dir" 2>/dev/null)" ]; then
     printf '  \033[31m目录已存在但没有 %s，疑似安装不完整：%s\033[0m\n' "$entry" "$dir"
     printf '  确认无误后可手动删除该目录再重试。\n'
     return 1
   else
-    # 空目录（或不存在）：清掉再克隆，避免 git 报「目标已存在」
+    # 空目录（或不存在）：清掉再建，避免 git 报「目标已存在」
     [ -d "$dir" ] && rmdir "$dir"
     printf '  克隆 %s → %s\n' "${REPO[$name]}" "$dir"
-    git clone --depth 1 "${REPO[$name]}" "$dir" || {
-      printf '  \033[31m克隆失败\033[0m\n'; return 1; }
-    printf '  安装依赖（首次约需一两分钟）…\n'
-    ( cd "$dir" && npm install ) || {
-      printf '  \033[31m依赖安装失败\033[0m\n'; return 1; }
+    if [ -n "$pin" ]; then
+      printf '  固定到 %s\n' "${pin:0:7}"
+    fi
+
+    # 不用 `git clone --depth 1`：它只拿默认分支的 tip，钉不住提交。
+    # `git fetch --depth 1 origin <sha>` 只拉那一个提交，既准确又不比全量慢
+    # （GitHub 支持按 SHA 取；实测 1 秒内完成）。
+    git init -q "$dir" || { printf '  \033[31m初始化仓库失败\033[0m\n'; return 1; }
+    if (
+      cd "$dir" &&
+        git remote add origin "${REPO[$name]}" &&
+        git fetch -q --depth 1 origin "${pin:-HEAD}" &&
+        git checkout -q FETCH_HEAD
+    ); then
+      printf '  安装依赖（首次约需一两分钟）…\n'
+      ( cd "$dir" && npm install ) || {
+        printf '  \033[31m依赖安装失败\033[0m\n'; return 1; }
+    else
+      printf '  \033[31m克隆失败\033[0m\n'
+      return 1
+    fi
   fi
 
   case "$name" in
-    kugou) start_kugou ;;
+    kugou) start_kugou "$dir" ;;
     netease) start_simple netease 3002 "$dir" ;;
   esac
   printf '  端口：%s\n' "${PORT_LABEL[$name]}"
@@ -126,7 +170,10 @@ case "${1:-list}" in
   list|"")
     printf '可安装的音源服务（安装到 %s）：\n\n' "$ROOT"
     for name in kugou netease; do
-      printf '  %-8s %-45s %s\n' "$name" "${REPO[$name]}" "$(status_of "$name")"
+      pin_label=""
+      [ -n "${PINNED[$name]:-}" ] && pin_label="固定提交 ${PINNED[$name]:0:7}，"
+      printf '  %-8s %s\n' "$name" "${REPO[$name]}"
+      printf '           %s%s\n' "$pin_label" "$(status_of "$name")"
     done
     printf '\n用法：kugou-api-install <kugou|netease|all>\n'
     ;;
