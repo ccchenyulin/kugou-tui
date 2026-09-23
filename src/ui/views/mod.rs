@@ -192,12 +192,15 @@ pub fn render_sidebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &T
         kv("上限", &limit, width, theme),
         // 缓存目录与清理按键挤在一行：侧边栏很窄，完整路径用 `--print-config` 看。
         // 这里只显示目录最后一段，指个方向就够。
+        //
+        // 键位用 `[C]` 的方括号写法，和状态栏的 `[?] 帮助 [q] 退出` 一致——
+        // 写成 `C清理 kugou-tui` 的话键位和目录名粘成一个词，读不出来。
         Line::from(vec![
-            Span::styled("  C清理 ", theme.dim()),
+            Span::styled("  [C] 清理 ", theme.dim()),
             Span::styled(
                 truncate_to_width(
                     &dir_basename(&state.config.cache_dir),
-                    (width as usize).saturating_sub(8),
+                    (width as usize).saturating_sub(display_width("  [C] 清理 ")),
                 ),
                 theme.body(),
             ),
@@ -792,6 +795,22 @@ mod tests {
         assert!(
             text.contains("另有"),
             "有内容没显示时必须说明，不能静默裁掉：{text}"
+        );
+    }
+
+    /// 「清理缓存」的键位不能和目录名粘成一个词。
+    ///
+    /// 早先写成 `C清理 kugou-tui`，键位和目录名连在一起读不出来。改成 `[C]` 的
+    /// 方括号写法，和状态栏的「[?] 帮助 [q] 退出」一致。
+    #[test]
+    fn cache_clear_hint_is_separated_from_the_directory_name() {
+        let state = AppState::new(Config::default());
+        // 112×60：三块都放得下，缓存块才在
+        let text = screen_text(&draw_sidebar(&state, 112, 60));
+        assert!(text.contains("缓存"), "60 行终端应显示缓存块：{text}");
+        assert!(
+            text.contains("[C]清理"),
+            "键位应写成 [C] 并与目录名分开：{text}"
         );
     }
 

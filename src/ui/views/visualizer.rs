@@ -224,11 +224,19 @@ fn bar_style(row: usize, height: usize, theme: &Theme) -> Style {
 }
 
 /// 未播放：给一句能直接照做的引导，而不是干瘪的「无数据」。
+///
+/// **停止和暂停必须分开说**。早先这里只判「有没有当前曲目」，于是 `Stopped` 也
+/// 显示「已暂停 —— 按 Space 继续」。可停止是「播完了 / 还没开始」，按 Space 是
+/// **从头播**；暂停是「停在半路」，按 Space 是**接着播**。混成一句的话，用户
+/// 按下 Space 的下一秒就知道界面在骗人。
 fn render_idle(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
-    let text = if state.current.is_some() {
-        "已暂停 —— 按 Space 继续"
-    } else {
-        "未在播放 —— 到「歌单」或「排行榜」里按 Enter 播一首"
+    let text = match state.playback {
+        PlaybackState::Paused => "已暂停 —— 按 Space 接着播",
+        PlaybackState::Stopped if state.current.is_some() => "已停止 —— 按 Space 从头播",
+        PlaybackState::Stopped => "未在播放 —— 到「歌单」或「排行榜」里按 Enter 播一首",
+        // 走到这里说明是 Playing 但还没采到频谱（刚起播的那一瞬）。
+        // 说「已暂停」或「已停止」都是谎话，那就照实说在采数据
+        PlaybackState::Loading | PlaybackState::Playing => "正在播放 —— 频谱数据还没到",
     };
     frame.render_widget(
         ratatui::widgets::Paragraph::new(Line::from(Span::styled(text, theme.dim())))
@@ -369,6 +377,51 @@ mod tests {
         assert!(
             left.abs_diff(right) <= 1,
             "两侧留白应当对称：左 {left} 列、右 {right} 列"
+        );
+    }
+
+    /// **停止和暂停必须分开说**。
+    ///
+    /// 早先这里只判「有没有当前曲目」，`Stopped` 也显示「已暂停 —— 按 Space 继续」。
+    /// 可两者按 Space 的后果不同：停止是**从头播**，暂停是**接着播**。
+    /// 混成一句的话，用户按下去的下一秒就知道界面在骗人。
+    #[test]
+    fn stopped_and_paused_read_differently() {
+        fn idle_text(playback: PlaybackState, has_song: bool) -> String {
+            let mut state = AppState::new(crate::config::Config::default());
+            state.playback = playback;
+            state.current = has_song.then(crate::api::model::Song::default);
+            let mut terminal = Terminal::new(TestBackend::new(60, 8)).expect("建测试终端");
+            let theme = Theme::for_config(ThemeName::Default, false);
+            terminal
+                .draw(|frame| {
+                    render_visualizer(frame, Rect::new(0, 0, 60, 8), &state, false, &theme)
+                })
+                .expect("渲染可视化");
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect()
+        }
+
+        let stopped = idle_text(PlaybackState::Stopped, true);
+        assert!(stopped.contains("已停止"), "停止应说停止：{stopped}");
+        assert!(!stopped.contains("已暂停"), "停止不能说成暂停：{stopped}");
+
+        let paused = idle_text(PlaybackState::Paused, true);
+        assert!(paused.contains("已暂停"), "暂停应说暂停：{paused}");
+        assert!(!paused.contains("已停止"), "暂停不能说成停止：{paused}");
+
+        let nothing = idle_text(PlaybackState::Stopped, false);
+        assert!(
+            nothing.contains("未在播放"),
+            "没有曲目时应引导去播一首：{nothing}"
         );
     }
 
