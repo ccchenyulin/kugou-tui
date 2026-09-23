@@ -174,12 +174,40 @@ ln -s "$PWD/scripts/kugou-tui" "$PWD/scripts/kugou-api" ~/.local/bin/
 只用一个音源时，装 `kugou-tui` 就够；两个音源都要用，再装 `kugou-api`：
 
 ```bash
-kugou-api          # 启动两个实例（已在跑的会跳过）
-kugou-api status   # 查看状态
-kugou-api stop     # 停止
+kugou-api start     # 启动两个实例（已在跑的会跳过），打印 PID / 日志路径 / 访问地址
+kugou-api status    # 查看状态（运行中会显示 PID；端口被别人占着也会如实说明）
+kugou-api restart   # 先停再起（改了端口/配置后用它）
+kugou-api stop      # 停止（按 PID 精确停止）
+kugou-api help      # 完整说明
 ```
 
-启动器用几个环境变量控制行为，都有默认值：
+`start` 之前会做一轮预检，缺什么补什么：`node`、KuGouMusicApi 目录、
+`node_modules`（缺了自动 `npm install --omit=dev`）、客户端二进制（缺了自动
+`cargo build --release`）。任一步失败都会带着明确原因终止，不会留一个半死不活的进程。
+不想让它碰编译就设 `KUGOU_API_SKIP_BUILD=1`（`stop` / `status` 本来就不触发编译）。
+
+参数按**环境变量 > 配置文件 > 默认值**取值。配置文件是可选的
+`~/.config/kugou-tui/api.env`，每行一个 `KEY=VALUE`：
+
+```bash
+# 临时换端口起一次，不动任何文件
+KUGOU_STANDARD_PORT=3100 KUGOU_LITE_PORT=3101 kugou-api restart
+```
+
+`kugou-api` 认这些（配置文件里写同名键）：
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `KUGOU_API_DIR` | `$HOME/KuGouMusicApi` | 服务所在目录 |
+| `KUGOU_API_LOG_DIR` | `$XDG_CACHE_HOME/kugou-tui` | 日志与 PID 文件目录 |
+| `KUGOU_API_HOST` | `127.0.0.1` | 监听地址 |
+| `KUGOU_STANDARD_PORT` | `3000` | 标准版端口 |
+| `KUGOU_LITE_PORT` | `3001` | 概念版端口 |
+| `KUGOU_API_BIN` | `<仓库>/target/release/kugou-tui` | 客户端二进制路径 |
+| `KUGOU_API_SKIP_BUILD` | 空 | 设为 `1` 跳过编译预检 |
+| `KUGOU_API_CONFIG` | `$XDG_CONFIG_HOME/kugou-tui/api.env` | 配置文件路径 |
+
+`scripts/kugou-tui`（播放器启动器）认的是另一组：
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|

@@ -1,116 +1,434 @@
 #!/usr/bin/env bash
 #
-# kugou-api —— 一次拉起两个 KuGouMusicApi 实例（标准版 / 概念版）。
+# kugou-api —— KuGouMusicApi 服务的启停管理（start / stop / restart / status）。
 #
-# 为什么需要两个：酷狗的两个平台是两套独立的鉴权体系，平台由服务端 `platform`
+# 为什么需要两个实例：酷狗的两个平台是两套独立的鉴权体系，平台由服务端 `platform`
 # 环境变量决定（`lite` = 概念版），而一个 Node 进程只能加载一份配置。所以要同时
 # 用两个音源，就得起两个进程、各占一个端口。
 #
 # 注意：两个平台的登录态不通用。切到概念版音源后需要按 L 重新扫码。
 #
 # 用法：
-#   kugou-api          # 启动两个实例（已在跑的会跳过）
-#   kugou-api status   # 查看状态
-#   kugou-api stop     # 停止两个实例
+#   ./scripts/kugou-api start     # 启动两个实例（已在跑的跳过）
+#   ./scripts/kugou-api stop      # 停止（按 PID 精确停止，不是按名字模糊杀）
+#   ./scripts/kugou-api restart   # 先停再起
+#   ./scripts/kugou-api status    # 查看运行状态、PID、日志路径
+#   ./scripts/kugou-api help      # 打印这份说明
+#
+# 首次使用给执行权限：
+#   chmod +x scripts/kugou-api
+#   # 想全局可用就软链到 PATH 里，脚本用 readlink -f 定位仓库根目录，软链也不跑偏：
+#   ln -s "$(pwd)/scripts/kugou-api" ~/.local/bin/kugou-api
+#
+# 参数怎么给（优先级：**环境变量 > 配置文件 > 内置默认值**）：
+#
+#   KUGOU_API_DIR        KuGouMusicApi 的目录        默认 ~/KuGouMusicApi
+#   KUGOU_API_LOG_DIR    日志与 PID 文件目录          默认 ${XDG_CACHE_HOME:-~/.cache}/kugou-tui
+#   KUGOU_API_HOST       监听地址                    默认 127.0.0.1
+#   KUGOU_STANDARD_PORT  标准版端口                  默认 3000
+#   KUGOU_LITE_PORT      概念版端口                  默认 3001
+#   KUGOU_API_BIN        客户端二进制路径             默认 <仓库>/target/release/kugou-tui
+#   KUGOU_API_SKIP_BUILD 设为 1 时跳过编译预检        默认空（会检查并在缺失时编译）
+#
+# 配置文件（可选）：`${XDG_CONFIG_HOME:-~/.config}/kugou-tui/api.env`，
+# 每行一个 `KEY=VALUE`，键名就是上面那些环境变量名。文件里出现未知键会警告并忽略
+# ——不加限制地 source 一个用户文件，等于允许它改写脚本里的任何变量（包括二进制
+# 路径），那是没必要的风险。
+#
+# 例：临时换个端口起一次，不改任何文件
+#   KUGOU_STANDARD_PORT=3100 ./scripts/kugou-api restart
 #
 set -euo pipefail
 
-API_DIR="${KUGOU_API_DIR:-$HOME/KuGouMusicApi}"
-LOG_DIR="${KUGOU_API_LOG_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/kugou-tui}"
+# ==================================================================
+# 参数解析
+# ==================================================================
 
-# 端口与平台一一对应：3000 标准版（不设 platform）、3001 概念版（platform=lite）
-STANDARD_PORT="${KUGOU_STANDARD_PORT:-3000}"
-LITE_PORT="${KUGOU_LITE_PORT:-3001}"
+CONFIG_FILE="${KUGOU_API_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/kugou-tui/api.env}"
 
-if [ ! -d "$API_DIR" ]; then
-  printf '\033[31m找不到 KuGouMusicApi：%s\033[0m\n' "$API_DIR" >&2
-  printf '先执行：\n  git clone https://github.com/MakcRe/KuGouMusicApi.git "%s"\n  cd "%s" && npm install --omit=dev\n' \
-    "$API_DIR" "$API_DIR" >&2
-  exit 1
+# 只认这些键。多出来的键一律警告并忽略（理由见上面注释）。
+KNOWN_KEYS="KUGOU_API_DIR KUGOU_API_LOG_DIR KUGOU_API_HOST KUGOU_STANDARD_PORT KUGOU_LITE_PORT KUGOU_API_BIN KUGOU_API_SKIP_BUILD"
+
+declare -A CFG=()
+if [ -r "$CONFIG_FILE" ]; then
+  while IFS='=' read -r key value || [ -n "$key" ]; do
+    # 跳过空行与注释
+    case "$key" in
+      '' | \#*) continue ;;
+    esac
+    # 去掉首尾空白，再剥掉一层引号
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    value="${value#\"}"
+    value="${value%\"}"
+    value="${value#\'}"
+    value="${value%\'}"
+    case " $KNOWN_KEYS " in
+      *" $key "*) CFG["$key"]="$value" ;;
+      *)
+        printf '\033[33m配置 %s 里有未知键「%s」，已忽略\033[0m\n' \
+          "$CONFIG_FILE" "$key" >&2
+        ;;
+    esac
+  done <"$CONFIG_FILE"
 fi
 
-# 健康检查走 `/`：express.static 直接吐静态页，是纯本地操作；
-# /register/dev 会真的请求酷狗服务器，冷缓存时要 1 秒以上。
-alive() { curl -sf --max-time 2 "http://127.0.0.1:$1/" 2>/dev/null | grep -q '酷狗'; }
+# 取值：环境变量 > 配置文件 > 默认值
+pick() {
+  local env_name="$1" default="$2" value
+  value="${!env_name:-}"
+  if [ -n "$value" ]; then
+    printf '%s' "$value"
+  else
+    printf '%s' "${CFG[$env_name]:-$default}"
+  fi
+}
 
-start_one() {
-  local port="$1" platform="$2" log="$3"
-  if alive "$port"; then
-    printf '  :%s 已在运行\n' "$port"
+self_dir=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)
+repo_dir=$(dirname -- "$self_dir")
+
+API_DIR="$(pick KUGOU_API_DIR "$HOME/KuGouMusicApi")"
+LOG_DIR="$(pick KUGOU_API_LOG_DIR "${XDG_CACHE_HOME:-$HOME/.cache}/kugou-tui")"
+HOST="$(pick KUGOU_API_HOST 127.0.0.1)"
+STANDARD_PORT="$(pick KUGOU_STANDARD_PORT 3000)"
+LITE_PORT="$(pick KUGOU_LITE_PORT 3001)"
+BIN="$(pick KUGOU_API_BIN "$repo_dir/target/release/kugou-tui")"
+SKIP_BUILD="$(pick KUGOU_API_SKIP_BUILD "")"
+
+# 两个实例：名字 / 端口 / platform（标准版不传 platform，服务端默认就是手机版）
+INSTANCES="standard:$STANDARD_PORT: lite:$LITE_PORT:--platform=lite"
+
+# ==================================================================
+# 小工具
+# ==================================================================
+
+# 探活走 `/`：express.static 直接吐静态页，是纯本地操作。
+# /register/dev 会真的请求酷狗服务器，冷缓存时要 1 秒以上。
+alive() { curl -sf --max-time 2 -o /dev/null "http://$HOST:$1/" 2>/dev/null; }
+
+# 监听该端口的进程 PID；没人监听就返回空。
+#
+# ss 的输出形如 `LISTEN 0 511 *:3001 *:* users:(("node",pid=101898,fd=21))`，
+# 所以先按端口筛行，再从 users 段里抠出 pid。
+port_pid() {
+  ss -ltnp 2>/dev/null |
+    grep -E "[:.]$1([[:space:]]|$)" |
+    grep -oE 'pid=[0-9]+' | head -n 1 | cut -d= -f2
+}
+
+pid_file() { printf '%s/api-%s.pid' "$LOG_DIR" "$1"; }
+log_file() { printf '%s/api-%s.log' "$LOG_DIR" "$1"; }
+
+# PID 文件里存「PID 端口」两个字段。
+#
+# 只存 PID 是不够的：改了端口重启（或只改配置没重启）时，旧进程还活着，
+# 单看 `kill -0 $pid` 会通过，于是 status 拿**新**端口报一个「运行中」——
+# 而那个进程其实监听在旧端口上。实测踩到过：配置文件把端口从 3001 改成 3101，
+# status 却显示「:3101 运行中」，实际服务还在 3001 上。
+pid_of() {
+  local pid _port
+  [ -s "$1" ] || return 0
+  read -r pid _port <"$1" 2>/dev/null || true
+  printf '%s' "${pid:-}"
+}
+port_of() {
+  local _pid port
+  [ -s "$1" ] || return 0
+  read -r _pid port <"$1" 2>/dev/null || true
+  printf '%s' "${port:-}"
+}
+
+die() {
+  printf '\033[31m%s\033[0m\n' "$1" >&2
+  exit 1
+}
+
+# ==================================================================
+# 启动前预检：缺什么就补什么，补不上就带着明确原因终止
+# ==================================================================
+
+require_node() {
+  command -v node >/dev/null 2>&1 || die "找不到 node。先装 Node（>= 18），或把它放进 PATH。"
+}
+
+ensure_api_dir() {
+  if [ ! -d "$API_DIR" ]; then
+    printf '\033[31m找不到 KuGouMusicApi：%s\033[0m\n' "$API_DIR" >&2
+    printf '用项目里的安装脚本拉一份（它会自动 clone + npm install）：\n' >&2
+    printf '  %s/scripts/kugou-api-install kugou\n' "$repo_dir" >&2
+    exit 1
+  fi
+}
+
+# 依赖缺失就自动装——这就是这个服务现有的构建命令。
+# 以前这里只打印一句「请先 npm install」，用户得自己复制粘贴；既然脚本已经
+# 知道该怎么装，就该直接装。
+ensure_deps() {
+  if [ -d "$API_DIR/node_modules" ]; then
+    return 0
+  fi
+  if [ ! -f "$API_DIR/package.json" ]; then
+    die "「$API_DIR」里没有 package.json，看着不是 KuGouMusicApi。检查 KUGOU_API_DIR。"
+  fi
+
+  printf '\033[36m缺少依赖，正在安装（npm install --omit=dev）…\033[0m\n' >&2
+  if ! (cd "$API_DIR" && npm install --omit=dev) >&2; then
+    printf '\033[31m依赖安装失败\033[0m\n' >&2
+    printf '手动重试：cd "%s" && npm install --omit=dev\n' "$API_DIR" >&2
+    exit 1
+  fi
+}
+
+# 客户端二进制缺失就自动编译。
+#
+# 放在这里是刻意的：一键启动要的是「整套能用」，只起服务、客户端没编译，
+# 用户接着跑 ./scripts/kugou-tui 还是会撞上「找不到可执行文件」。
+# 已经编译过时这一步只是一次 `-x` 判断，开销可忽略；不想编译就设
+# KUGOU_API_SKIP_BUILD=1，或只对 stop / status 调用（这两个不触发编译）。
+ensure_binary() {
+  [ -n "$SKIP_BUILD" ] && return 0
+  [ -x "$BIN" ] && return 0
+
+  if ! command -v cargo >/dev/null 2>&1; then
+    printf '\033[33m没有 cargo，跳过编译：%s\033[0m\n' "$BIN" >&2
     return 0
   fi
 
-  mkdir -p "$LOG_DIR"
-  # 端口与平台用命令行参数传，不用 `env`：空平台展开成 `env ""` 会直接报错
-  # （标准版没有 platform，历史上就是栽在这上面）。
-  # setsid 让服务脱离当前会话，避免终端退出时被一起回收
-  if command -v setsid >/dev/null 2>&1; then
-    ( cd "$API_DIR" && setsid nohup node app.js --port="$port" \
-        ${platform:+--platform=$platform} >>"$log" 2>&1 </dev/null & )
-  else
-    ( cd "$API_DIR" && nohup node app.js --port="$port" \
-        ${platform:+--platform=$platform} >>"$log" 2>&1 </dev/null & )
+  printf '\033[36m客户端二进制不存在，正在编译（cargo build --release）…\033[0m\n' >&2
+  if ! (cd "$repo_dir" && cargo build --release) >&2; then
+    printf '\033[31m编译失败\033[0m\n' >&2
+    printf '手动重试：cd "%s" && cargo build --release\n' "$repo_dir" >&2
+    exit 1
   fi
+  [ -x "$BIN" ] || die "编译后仍然找不到 $BIN，检查 KUGOU_API_BIN。"
+}
+
+# 日志目录必须存在且可写：写不进去的话服务会起不来，
+# 而失败原因会藏在一句含糊的 nohup 报错里，很难查。
+ensure_log_dir() {
+  if ! mkdir -p "$LOG_DIR" 2>/dev/null; then
+    die "创建日志目录失败：${LOG_DIR}（检查权限，或用 KUGOU_API_LOG_DIR 换一个位置）"
+  fi
+  if [ ! -w "$LOG_DIR" ]; then
+    die "日志目录不可写：${LOG_DIR}（检查权限，或用 KUGOU_API_LOG_DIR 换一个位置）"
+  fi
+}
+
+# ==================================================================
+# 启停
+# ==================================================================
+
+start_one() {
+  local name="$1" port="$2" platform_flag="$3"
+  local pidf log running_pid recorded_port
+  pidf="$(pid_file "$name")"
+  log="$(log_file "$name")"
+  running_pid="$(pid_of "$pidf")"
+  recorded_port="$(port_of "$pidf")"
+
+  # 已经是我们起的实例：读 PID 文件确认，不要重复拉第二个进程
+  if [ -n "$running_pid" ] && kill -0 "$running_pid" 2>/dev/null; then
+    if [ -n "$recorded_port" ] && [ "$recorded_port" != "$port" ]; then
+      # 进程活着，但当初是给别的端口起的——多半是改了端口没重启。
+      # 这时候既不能报「已在运行」（新端口上没有服务），也不能硬起第二个
+      # （旧进程还占着它自己的端口，用户会以为配置没生效）。
+      printf '\033[33m%s 的旧实例仍在运行（PID %s，端口 %s），但本次配置的端口是 %s\033[0m\n' \
+        "$name" "$running_pid" "$recorded_port" "$port" >&2
+      printf '  先停掉它再起：%s restart\n' "$0" >&2
+      return 1
+    fi
+    printf '  \033[33m%s :%s 已在运行（PID %s），跳过\033[0m\n' \
+      "$name" "$port" "$running_pid"
+    return 0
+  fi
+
+  # 端口被别的进程占着：这是最容易看走眼的一种失败——
+  # 不区分的话会当成「已在运行」，用户以为服务起了，实际监听的是别的东西。
+  if alive "$port"; then
+    local owner upper
+    owner="$(port_pid "$port")"
+    upper="$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')"
+    printf '\033[31m端口 :%s 已被占用（PID %s），无法启动 %s\033[0m\n' \
+      "$port" "${owner:-未知}" "$name" >&2
+    printf '  换个端口起：KUGOU_%s_PORT=3100 %s start\n' "$upper" "$0" >&2
+    printf '  或先停掉占用者：kill %s\n' "${owner:-<PID>}" >&2
+    return 1
+  fi
+
+  # 两个都给（环境变量 + 命令行参数），因为 KuGouMusicApi 认 `--port=`。
+  # 用 shell 内联赋值而不是 `env` 命令：后者在值为空时会直接报错。
+  #
+  # `exec setsid` 是关键：把子 shell 直接替换成 node，这样 `$!` 拿到的就是
+  # node 自己的 PID；否则 PID 文件里记的是 setsid / nohup 那一层，
+  # stop 时 kill 了也停不掉真正的服务。
+  if command -v setsid >/dev/null 2>&1; then
+    (
+      cd "$API_DIR"
+      exec setsid env PORT="$port" node app.js --port="$port" \
+        ${platform_flag:+$platform_flag} >>"$log" 2>&1 </dev/null
+    ) &
+  else
+    (
+      cd "$API_DIR"
+      exec env PORT="$port" node app.js --port="$port" \
+        ${platform_flag:+$platform_flag} >>"$log" 2>&1 </dev/null
+    ) &
+  fi
+  local pid=$!
+  printf '%s %s' "$pid" "$port" >"$pidf"
 
   for _ in $(seq 1 40); do
     sleep 0.5
     alive "$port" && break
   done
 
-  if alive "$port"; then
-    printf '  \033[32m:%s 已就绪\033[0m\n' "$port"
-  else
-    printf '  \033[31m:%s 启动失败，日志：%s\033[0m\n' "$port" "$log" >&2
-    tail -n 10 "$log" >&2 || true
+  if ! alive "$port"; then
+    printf '  \033[31m%s :%s 启动失败（PID %s）\033[0m\n' "$name" "$port" "$pid" >&2
+    printf '    日志：%s\n' "$log" >&2
+    tail -n 10 "$log" >&2 2>/dev/null || true
+    rm -f "$pidf"
     return 1
   fi
+
+  printf '  \033[32m%s :%s 已就绪\033[0m  PID %s\n' "$name" "$port" "$pid"
+  printf '      地址 http://%s:%s/   日志 %s\n' "$HOST" "$port" "$log"
+  return 0
+}
+
+stop_one() {
+  local name="$1" port="$2"
+  local pidf pid
+  pidf="$(pid_file "$name")"
+  pid="$(pid_of "$pidf")"
+
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    # 给一点时间退出；还在就升级到 -9
+    for _ in $(seq 1 20); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.25
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" 2>/dev/null || true
+      sleep 0.3
+    fi
+    printf '  %s 已停止（PID %s）\n' "$name" "$pid"
+  elif alive "$port"; then
+    # PID 文件丢了但端口还活着：按端口找回来，不要漏掉
+    pid="$(port_pid "$port")"
+    if [ -n "$pid" ]; then
+      kill "$pid" 2>/dev/null || true
+      printf '  %s :%s 已停止（PID %s，PID 文件缺失，按端口找回）\n' "$name" "$port" "$pid"
+    else
+      printf '  \033[33m%s :%s 端口有人在监听，但查不到 PID，未处理\033[0m\n' \
+        "$name" "$port" >&2
+    fi
+  else
+    printf '  %s :%s 未运行\n' "$name" "$port"
+  fi
+  rm -f "$pidf"
+}
+
+status_one() {
+  local name="$1" port="$2"
+  local pidf log pid recorded
+  pidf="$(pid_file "$name")"
+  log="$(log_file "$name")"
+  pid="$(pid_of "$pidf")"
+  recorded="$(port_of "$pidf")"
+
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    if [ -n "$recorded" ] && [ "$recorded" != "$port" ]; then
+      printf '  \033[33m●\033[0m %-8s :%-5s 旧实例仍在运行（PID %s，端口 %s）——配置的端口变了，需 restart\n' \
+        "$name" "$port" "$pid" "$recorded"
+      printf '           旧地址 http://%s:%s/\n' "$HOST" "$recorded"
+    else
+      printf '  \033[32m●\033[0m %-8s :%-5s 运行中  PID %s\n' "$name" "$port" "$pid"
+      printf '           地址 http://%s:%s/\n' "$HOST" "$port"
+      printf '           日志 %s\n' "$log"
+    fi
+  elif alive "$port"; then
+    printf '  \033[33m●\033[0m %-8s :%-5s 端口有响应，但不是本脚本起的（PID %s）\n' \
+      "$name" "$port" "$(port_pid "$port")"
+    printf '           地址 http://%s:%s/\n' "$HOST" "$port"
+  else
+    printf '  \033[31m○\033[0m %-8s :%-5s 未运行\n' "$name" "$port"
+    printf '           日志 %s\n' "$log"
+  fi
+}
+
+# ==================================================================
+# 命令分发
+# ==================================================================
+
+usage() {
+  # 打印文件头的注释块（第 3 行起，到 `set -euo` 为止），并去掉行首的 "# "。
+  # 不写死行号：以前是 `sed -n '3,40p'`，注释一长就被截在半句话上。
+  awk 'NR >= 3 && /^set -euo/ { exit } NR >= 3 { sub(/^# ?/, ""); print }' \
+    "${BASH_SOURCE[0]}"
 }
 
 case "${1:-start}" in
   start)
-    printf '启动 KuGouMusicApi（%s）\n' "$API_DIR"
-    # 标准版不传 platform（服务端默认就是手机版）
-    start_one "$STANDARD_PORT" "" "$LOG_DIR/api.log"
-    start_one "$LITE_PORT" "lite" "$LOG_DIR/api-lite.log"
-    printf '标准版 :%s ／ 概念版 :%s\n' "$STANDARD_PORT" "$LITE_PORT"
-    ;;
+    require_node
+    ensure_api_dir
+    ensure_deps
+    ensure_binary
+    ensure_log_dir
 
-  status)
-    for entry in "$STANDARD_PORT:标准版" "$LITE_PORT:概念版"; do
-      port="${entry%%:*}"
-      name="${entry##*:}"
-      if alive "$port"; then
-        printf '  \033[32m●\033[0m %s :%s 运行中\n' "$name" "$port"
-      else
-        printf '  \033[31m○\033[0m %s :%s 未运行\n' "$name" "$port"
-      fi
+    printf '启动 KuGouMusicApi（%s）\n' "$API_DIR"
+    failed=0
+    for entry in $INSTANCES; do
+      name="${entry%%:*}"
+      rest="${entry#*:}"
+      port="${rest%%:*}"
+      platform_flag="${rest#*:}"
+      start_one "$name" "$port" "$platform_flag" || failed=1
     done
+    printf '标准版 :%s ／ 概念版 :%s\n' "$STANDARD_PORT" "$LITE_PORT"
+    printf '试一个：curl "%s/search?keywords=海阔天空&limit=1"\n' \
+      "http://$HOST:$STANDARD_PORT"
+    [ "$failed" -eq 0 ] || exit 1
     ;;
 
   stop)
-    # 只杀 `node app.js` 起的实例，避免误伤其它 Node 进程。
-    #
-    # pattern 有两条硬性要求，都是实测踩出来的：
-    #
-    # 1. **必须锚定 `^`**。`-f` 匹配的是完整命令行，不锚定的话任何「命令行里含
-    #    这段文本」的进程都会中招——包括正在执行这条命令的 shell 自己（它的
-    #    cmdline 里就有这串字）。实测 `pgrep -af 'node app.js'` 会把
-    #    `bash -c "... node app.js ..."` 一起列出来，等于自杀。
-    # 2. **绝不能为空**。空 pattern 会匹配每一个进程（内核线程的 cmdline 是空的，
-    #    所以连 kthreadd 都会命中），pkill 就从 pid 1 开始挨个发信号。
-    targets=$(pgrep -f '^node app\.js' 2>/dev/null || true)
-    if [ -z "$targets" ]; then
-      printf '没有正在运行的实例\n'
-    else
-      # shellcheck disable=SC2086
-      kill $targets 2>/dev/null || true
-      printf '已停止 %s 个实例：%s\n' \
-        "$(printf '%s\n' "$targets" | wc -l)" "$(printf '%s' "$targets" | tr '\n' ' ')"
-    fi
+    printf '停止 KuGouMusicApi\n'
+    for entry in $INSTANCES; do
+      name="${entry%%:*}"
+      rest="${entry#*:}"
+      stop_one "$name" "${rest%%:*}"
+    done
+    ;;
+
+  restart)
+    printf '重启 KuGouMusicApi\n'
+    for entry in $INSTANCES; do
+      name="${entry%%:*}"
+      rest="${entry#*:}"
+      stop_one "$name" "${rest%%:*}"
+    done
+    # 端口释放需要一点时间，不等的话下一轮会把「还没退干净」误判成端口占用
+    sleep 1
+    exec "$0" start
+    ;;
+
+  status)
+    printf 'KuGouMusicApi 状态\n'
+    for entry in $INSTANCES; do
+      name="${entry%%:*}"
+      rest="${entry#*:}"
+      status_one "$name" "${rest%%:*}"
+    done
+    ;;
+
+  help | -h | --help)
+    usage
     ;;
 
   *)
-    printf '用法：kugou-api [start|status|stop]\n' >&2
+    printf '未知命令：%s\n\n' "$1" >&2
+    usage >&2
     exit 1
     ;;
 esac
