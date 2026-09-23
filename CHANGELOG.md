@@ -4,6 +4,44 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.2] - 2026-09-24
+
+### 修复
+
+- **`f` 没法通过 `[keymap]` 重绑**：`parse_key` 里 F1–F12 那条判的是「长度 ≤ 3 且
+  以 `f` 开头」，`f` 也满足，于是 `f[1..]` 是空串、解析失败、整条返回 `None`。
+  结果是**只有 `f`（歌手地区筛选）**在配置里绑不上，其余单字母都行。写「帮助面板
+  里的键都真绑过」那条测试时才发现的——测试第一次跑就挂在它上面。
+- `scripts/kugou-api-install` 用 `git clone --depth 1` 拉默认分支的 tip，而 README
+  要求固定到验证过的提交；两处说法不一致，且浅克隆里根本 `checkout` 不到那个 SHA。
+  现在改用 `git fetch --depth 1 origin <sha>` 只拉那一个提交（实测 1 秒内完成，
+  `.git` 仅 416K），并且**已装好的那份也会检查**——HEAD 与钉的提交不一致时给出
+  提示与切换命令，但不擅自切。
+- `scripts/kugou-api-install` 的 `start_kugou` 没把安装目录传给 `kugou-api`。
+  `KUGOU_API_ROOT` 与 `KUGOU_API_DIR` 是两套变量，ROOT 非默认值时会「装在一处、
+  从另一处起」。
+- `kugou-api-install` 的用法注释里写着 `qqmusic`，但实现只支持 kugou 与 netease
+  ——那条示例按下去只会得到「未知音源」。
+
+### 新增
+
+- **`scripts/kugou-api` 补齐 restart、PID 管理与启动预检**：预检会补 `node_modules`
+  （自动 `npm install --omit=dev`）与客户端二进制（自动 `cargo build --release`）；
+  参数按「环境变量 > 配置文件 > 默认值」取值；后台启动后打印 PID、日志路径与访问
+  地址；新增 `restart`；端口被占用与「已在运行」分开判。详见脚本头部注释。
+
+### 文档
+
+- **`[keymap]`（自定义键位）此前在文档里一个字都没有**。CONFIGURATION.md 新增
+  「自定义键位」一节：段写法、按键名规则、59 个可用动作名（按用途分组，已与
+  `action_from_name` 逐字核对）、三种非法条目各自的日志文案。
+- 补上 5 个「能按但任何地方都没写」的键位：`E` / `J` / `K`（音源页的设为默认与
+  调优先级——调整音源优先级的唯一入口）进帮助面板，`Home` / `End`（`g` / `G` 的
+  别名）进 KEYBINDINGS.md。
+- README 安装步骤 1 现在把 `scripts/kugou-api-install` 列为推荐路径，并点明
+  KuGouMusicApi 是**独立仓库**（无 submodule、无 vendor），本地没有就跑不起来；
+  CONTRIBUTING 的手动 clone 也补上了提交固定。
+
 ## [0.3.1] - 2026-09-24
 
 ### 修复
