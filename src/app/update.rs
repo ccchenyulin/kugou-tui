@@ -2087,6 +2087,16 @@ impl App {
                 }
             };
 
+            // 首屏走的是 `ApiClient` 的分页方法（不经本模块带盖章的 `*_tracks_all`
+            // 封装），解析时 `Song::source` 只会拿到默认值 `Kugou`。在概念版音源下
+            // 不补盖这一章，这些歌就会被当成标准版的歌——播放时把取链请求打到
+            // 标准版端口，而标准版没有概念版会员，只能给 60 秒试听/低码率。
+            // 后台补全的那一批（`*_tracks_all`）自带盖章，所以只有首屏这批是坏的。
+            let first = first.map(|mut songs| {
+                active_source.stamp(&mut songs);
+                songs
+            });
+
             match first {
                 Ok(songs) => {
                     let has_more = songs.len() >= PAGE_LIMIT as usize;

@@ -359,6 +359,19 @@ fn stamp_songs(songs: &mut [Song], kind: SourceKind) {
 }
 
 impl SourceKind {
+    /// 给一批歌曲盖上本音源的来源章（公开版，供调用方在分派层之外补盖）。
+    ///
+    /// 为什么需要它：歌单首屏为了「先用上界面」，直接调 `ApiClient` 的分页方法
+    /// （`user_playlist_tracks` / `playlist_tracks`）拿第一页，绕过了本模块里
+    /// 会盖章的 `*_tracks_all` 封装。而解析函数给 `Song::source` 填的是默认值
+    /// `Kugou`——在概念版下就不盖章会导致取链打到标准版端口（标准版没有概念版
+    /// 会员，只能给 60 秒试听/低码率），表现为「手机能听完整、TUI 里是试听」。
+    ///
+    /// 所以首屏这条路径必须自己补盖一次。
+    pub fn stamp(self, songs: &mut [Song]) {
+        stamp_songs(songs, self);
+    }
+
     /// 单曲搜索。
     pub async fn search_songs(
         self,
