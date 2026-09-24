@@ -4,6 +4,43 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### 新增
+
+- **系统托盘**：启动时注册为 `org.kde.StatusNotifierItem`，Quickshell / waybar /
+  KDE 等状态栏会显示图标，悬停显示当前曲目，**右键弹出菜单**（播放 / 暂停、
+  上一首、下一首，走 `com.canonical.dbusmenu`）。**自适配**，三层降级都静默跳过、
+  不影响播放：没有图形会话（既无 `WAYLAND_DISPLAY` 也无 `DISPLAY`）→ 完全不连
+  D-Bus；没有 session bus → 跳过；状态栏没提供 `org.kde.StatusNotifierWatcher` →
+  注册调用失败后放弃。不需要时用 `--no-tray` 或配置里的 `tray = false` 关闭
+  （**重启生效**）。图标是内嵌的（源 `assets/tray.svg`，运行时缩放到 22 / 64 两个
+  尺寸），不依赖系统图标主题。
+- **托盘右键菜单**必须给 `Menu` 属性一个**真实对象路径**。SNI 规范里 `/` 表示
+  「无菜单」，但实测 Quickshell 会据此把右键整个跳过（`hasMenu` 为假），
+  于是「点了没反应」——所以这里注册了 `/StatusNotifierItem/menu` 并实现
+  `com.canonical.dbusmenu`。左键的 `activate()` 仍按用户要求留空。
+- **托盘菜单里的「最小化 / 显示窗口」**：把 TUI 从平铺布局里收起来（音乐照常播），
+  再点一次放回去。终端程序没法自己最小化窗口（xdg-shell 没有这个请求），只能借
+  compositor 的 IPC——走 niri 的 `toggle-window-minimized`。**怎么找到自己的窗口**
+  是这里唯一的难点：niri 给的 `pid` 是**终端模拟器**的（kitty 等），匹配不上，所以
+  启动时用 OSC 0 把终端标题设成 `kugou-tui`，之后按标题**精确**匹配找回窗口
+  （不能用 `contains`：实测有浏览器标签页的标题里也带着 `kugou-tui`，会把浏览器
+  最小化掉）。只有检测到 `NIRI_SOCKET` 时这一项才出现在菜单里——不是 niri 就整项
+  不出现，而不是置灰。
+
+### 修复
+
+- **TUI 画面被音频后端的报错污染（乱码）**：libjack / libasound 会**直接往 fd 2
+  写报错**，例如 `jack server is not running or cannot be started`、
+  `JackShmReadWritePtr::~JackShmReadWritePtr - Init not done for -1, skipping unlock`、
+  `ALSA lib pcm_oss.c:404 ... Cannot open device /dev/dsp`。TUI 在 alternate screen 上
+  时，这些字符直接打在 ratatui 画好的界面里，而**增量重绘只写「内容变了的单元格」**
+  ——屏幕上的第三方字符不在任何 buffer 里，永远不会被覆盖，于是残留成一片乱码。
+  **窗口越窄越明显**：报错行会被终端折行成多行，而最大化时一行就够、几乎看不出来。
+  现在进入 TUI 之前把 stderr 接到日志文件（`logger::redirect_stderr_to_log`，
+  用 `dup2`）：画面干净了，报错仍留在日志里——排查「没声音」时它正是关键线索。
+
 ## [0.3.2] - 2026-09-24
 
 ### 修复

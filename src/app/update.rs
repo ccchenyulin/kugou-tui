@@ -1010,6 +1010,8 @@ impl App {
             Action::ToggleSidebar => {
                 self.state.sidebar_visible = !self.state.sidebar_visible;
             }
+            // 托盘菜单触发：把 TUI 从平铺布局里收起来（或放回去），音乐照常播。
+            Action::ToggleWindow => self.toggle_window(),
             // 数字键：焦点在侧边栏时切标签页，在列表里时跳到第 N 项
             Action::Digit(number) => self.handle_digit(number),
             Action::FocusNext => self.state.cycle_focus(true),
@@ -1520,6 +1522,35 @@ impl App {
         handle.update(info);
     }
 
+    /// 把当前播放信息推给系统托盘，让 ToolTip 和状态图标跟着变。
+    ///
+    /// 设计取舍和 [`Self::sync_mpris`] 一致：只把数据写到快照里，DBus 的属性刷新
+    /// 和 `New*` 信号由托盘线程自己轮询+发，避免反向调用主线程。
+    fn sync_tray(&mut self) {
+        // 没注册成功时跳过——还没连上 watcher 的进程每帧构造一次快照是白干。
+        let Some(handle) = self.tray.as_ref().filter(|handle| handle.is_connected()) else {
+            return;
+        };
+
+        let info = match self.state.current.as_ref() {
+            Some(song) => crate::tray::TrayInfo {
+                title: song.name.clone(),
+                artists: song
+                    .singers
+                    .iter()
+                    .map(|singer| singer.name.clone())
+                    .collect(),
+                status: self.state.playback,
+            },
+            None => crate::tray::TrayInfo {
+                status: self.state.playback,
+                ..Default::default()
+            },
+        };
+
+        handle.update(info);
+    }
+
     /// 绝对定位到 `position_ms`。
     ///
     /// 与 [`Self::seek_by`] 的区别：那个是相对步进，这个是"跳到某处"。
@@ -1626,6 +1657,24 @@ impl App {
         self.state.volume = next;
         self.audio.set_volume(next);
         self.state.info(format!("音量 {:.0}%", next * 100.0));
+    }
+
+    /// 切换窗口的最小化状态（仅 niri，目前由托盘菜单触发）。
+    ///
+    /// 把 TUI 从平铺布局里收起来但**音乐照常播**——收起来之后键盘就够不着了，
+    /// 这时托盘菜单与 MPRIS 是唯一的控制入口。
+    ///
+    /// 失败只提示一句 + 记日志：窗口操作不成功不该影响播放。
+    fn toggle_window(&mut self) {
+        if !crate::window::available() {
+            self.state.warn("当前环境不支持窗口控制（需要 niri）");
+            return;
+        }
+        if crate::window::toggle_minimized() {
+            self.state.info("已切换窗口最小化");
+        } else {
+            self.state.warn("窗口操作失败（详见日志）");
+        }
     }
 
     fn toggle_mute(&mut self) {
@@ -4026,6 +4075,7 @@ impl App {
         self.state.advance_visualizer(elapsed);
 
         self.sync_mpris();
+        self.sync_tray();
 
         if self.state.playback == PlaybackState::Playing {
             self.update_active_lyric();

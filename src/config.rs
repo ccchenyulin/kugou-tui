@@ -135,6 +135,16 @@ pub struct Config {
     #[serde(default)]
     pub cover_fill: CoverFill,
 
+    /// 是否注册系统托盘（KDE/MATE 风格的 StatusNotifierItem）。
+    ///
+    /// 默认开启。探测失败（无图形会话 / 无 `StatusNotifierWatcher` / 无 session bus）
+    /// 时静默跳过，不影响播放。命令行可用 `--no-tray` 临时关闭。
+    ///
+    /// 改动**重启生效**：运行中切换后需要重新启动进程，KDE 风格的 watcher 才会
+    /// 把新增/移除的 item 同步到状态栏。
+    #[serde(default = "default_tray")]
+    pub tray: bool,
+
     /// 各音源的连接与身份配置，以及当前选中的音源。
     ///
     /// 切换音源时，`api_base` / `cookie` / `dfid` 会从选中的音源同步过来。
@@ -144,6 +154,12 @@ pub struct Config {
 
 fn default_qr_aspect() -> f32 {
     2.0
+}
+
+fn default_tray() -> bool {
+    // 桌面集成是「有更好」，默认开启比默认关闭更符合 kugou-tui 的定位（终端里的
+    // 音乐客户端，状态栏上挂个图标是核心使用场景）。配置项里改成 false 即可关。
+    true
 }
 
 /// 首页那块大封面怎么铺满它的区域。
@@ -214,6 +230,7 @@ impl Default for Config {
             qr_aspect: default_qr_aspect(),
             lite_mode: false,
             cover_fill: CoverFill::default(),
+            tray: default_tray(),
             sources: SourceSet::default(),
         }
     }
@@ -360,6 +377,9 @@ impl Config {
         }
         if cli.basic_color {
             self.basic_color = true;
+        }
+        if cli.no_tray {
+            self.tray = false;
         }
         self.normalize();
     }

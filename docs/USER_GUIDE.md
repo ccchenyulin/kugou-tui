@@ -224,7 +224,7 @@ api_base = "http://127.0.0.1:3001"
 
 ---
 
-## 桌面集成（MPRIS）
+## 桌面集成（MPRIS 与系统托盘）
 
 程序启动时会向 D-Bus session bus 注册 `org.mpris.MediaPlayer2.kugou-tui`。
 注册成功后，桌面环境**自动**识别，无需任何配置：
@@ -242,6 +242,40 @@ playerctl -p kugou-tui position 90   # 拖进度条（走 SetPosition）
 
 **注意**：桌面环境同时存在多个播放器时（比如浏览器在放视频），会各自打分选
 一个显示。若没看到 kugou-tui，先把其它播放器暂停即可。
+
+### 系统托盘
+
+除了 MPRIS，启动时会再注册一个 `org.kde.StatusNotifierItem` 托盘项。状态栏
+（Quickshell / waybar / KDE 等）会显示一个音符图标：
+
+- **右键** → 弹出菜单：播放 / 暂停、上一首、下一首、最小化 / 显示窗口（仅 niri）
+- **鼠标悬停** → 显示当前曲目
+- 播放中状态为 `Active`、暂停时为 `Passive`，部分宿主的显示会跟着变
+
+菜单走 `com.canonical.dbusmenu`（`Menu` 属性指向 `/StatusNotifierItem/menu`）。
+**能不能弹出来取决于状态栏自己实现没实现**——Quickshell 的 end4 配置只在
+「有菜单」时才响应右键，caelestia 配置则只接了左键、右键压根没实现。后一种情况
+用 MPRIS 那套控制（状态栏媒体控件、`playerctl`），功能是一样的。
+
+#### 最小化（niri）
+
+「最小化 / 显示窗口」把 TUI 从平铺布局里收起来但**音乐照常播**，再点一次放回去。
+收起来之后键盘就够不着了，这时托盘菜单和 MPRIS 是唯一的控制入口。
+
+终端程序没法自己最小化窗口（Wayland 的 xdg-shell 没有这个请求），所以走 niri 的
+`toggle-window-minimized`。程序靠**终端标题**找回自己的窗口：启动时会把标题设成
+`kugou-tui`（niri 给的窗口 `pid` 是终端模拟器的，匹配不上）。因此：
+
+- 只在检测到 `NIRI_SOCKET` 时才提供这一项；不是 niri 的话菜单里**没有**它
+- 如果你用别的方式改掉了终端标题（比如某些 shell 的标题模板），这项会失效
+  ——日志里会记一句「窗口列表里没有标题含 kugou-tui 的窗口」
+
+图标内嵌在程序里（源 `assets/tray.svg`），不依赖系统图标主题。下面三种情况
+会自动跳过，各只记一行日志、播放不受影响：没有图形会话（纯 tty、SSH 未转发）、
+没有 session bus、状态栏没有提供 `org.kde.StatusNotifierWatcher`。
+
+不想要托盘就加 `--no-tray`，或在配置文件里设 `tray = false`——**重启生效**，
+KDE 风格的 watcher 只在进程启动 / 退出时同步托盘项。
 
 没有 D-Bus 的环境（纯 tty、容器）会自动跳过注册，播放功能不受影响。
 

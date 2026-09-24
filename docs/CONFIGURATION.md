@@ -16,6 +16,7 @@
 | `--page-size <N>` | — | 搜索结果与歌单广场的每页条目数，5–200 |
 | `--proxy <URL>` | `KUGOU_PROXY` | 访问 API 服务时用的 HTTP 代理 |
 | `--basic-color` | — | 使用 16 色固定色板，适配老终端 |
+| `--no-tray` | — | 不注册系统托盘图标（也可用配置文件里的 `tray = false` 长期关闭） |
 | `--print-config` | — | 打印最终生效的配置、缓存与日志路径后退出 |
 
 ```bash
@@ -47,6 +48,7 @@ download_dir = "~/Music"            # 单曲下载保存到这里，留空也行
 qr_aspect = 2.0                     # 终端字符「高:宽」比，见下方说明
 lite_mode = false                   # 简易模式，见下方说明
 cover_fill = "crop"                 # 首页大封面怎么铺满，见下方说明
+tray = true                         # 系统托盘，见下方说明
 ```
 
 `cover_fill` 决定**首页那块大封面**怎么填满它的区域。封面区是「多少列 × 多少行」，
@@ -87,6 +89,18 @@ cover_fill = "crop"                 # 首页大封面怎么铺满，见下方说
 实测常驻内存（VmRSS，release 构建）：空闲 14.2 MiB、播放中 16.9 MiB，开启后能再降
 一截（降的主要是封面那几十到几百 KB 的解码位图）。在低配机器或电池供电时有用。
 设置页可直接开关。分场景的完整数字见 [DESIGN.md](DESIGN.md#低资源占用)。
+
+`tray` 控制**系统托盘**，默认开启：注册成 `org.kde.StatusNotifierItem` 之后，
+Quickshell / waybar / KDE 之类的状态栏会显示一个图标，**右键弹出菜单**
+（播放 / 暂停、上一首、下一首），鼠标悬停显示当前曲目。下面三种情况会自动跳过
+（各只记一行日志，不影响播放）：
+
+- 没有图形会话（既无 `WAYLAND_DISPLAY` 也无 `DISPLAY`，比如纯 tty、SSH 未转发）
+- 没有 session bus
+- 状态栏没有提供 `org.kde.StatusNotifierWatcher`
+
+改成 `false` 或启动时加 `--no-tray` 即可完全关闭。**改动重启后生效**：KDE 风格的
+watcher 只在进程启动 / 退出时同步托盘项，运行中没法可靠地增删。
 
 音量、播放模式、歌词偏移会在退出时自动写回。
 

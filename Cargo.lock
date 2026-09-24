@@ -1553,6 +1553,7 @@ dependencies = [
  "crossbeam-channel",
  "dirs",
  "image",
+ "libc",
  "qrcode",
  "ratatui",
  "ratatui-image",

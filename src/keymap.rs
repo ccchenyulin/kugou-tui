@@ -32,6 +32,8 @@ pub enum Action {
     ForceQuit,
     /// 打开帮助面板。
     Help,
+    /// 切换窗口的最小化状态（仅 niri）。目前由托盘菜单触发，默认不占键位。
+    ToggleWindow,
 
     // ---- 列表导航 ----
     MoveUp,
@@ -218,6 +220,7 @@ pub fn action_from_name(name: &str) -> Option<Action> {
         "quit" => Action::Quit,
         "force_quit" => Action::ForceQuit,
         "help" => Action::Help,
+        "toggle_window" => Action::ToggleWindow,
         "move_up" => Action::MoveUp,
         "move_down" => Action::MoveDown,
         "move_top" => Action::MoveTop,

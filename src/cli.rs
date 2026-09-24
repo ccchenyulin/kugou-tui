@@ -61,6 +61,10 @@ pub struct Cli {
     #[arg(long)]
     pub basic_color: bool,
 
+    /// 启动时不注册系统托盘图标。配置文件里的 `tray` 也可关。
+    #[arg(long)]
+    pub no_tray: bool,
+
     /// 打印最终生效的配置、缓存目录与日志路径后退出。
     #[arg(long)]
     pub print_config: bool,

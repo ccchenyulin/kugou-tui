@@ -60,6 +60,45 @@ pub fn write(level: &str, message: &str) {
     let _ = writeln!(file, "{} [{}] {}", timestamp_now(), level, message);
 }
 
+/// 把进程的 stderr 接到日志文件上。
+///
+/// # 为什么必须做
+///
+/// 音频后端（libjack / libasound）会**直接往 fd 2 写报错**，例如
+/// `jack server is not running or cannot be started`、
+/// `JackShmReadWritePtr::~JackShmReadWritePtr - Init not done for -1, skipping unlock`。
+/// 进了 TUI 之后终端在 alternate screen 上，这些字符会直接打在 ratatui 画好的
+/// 界面里；而 ratatui 的增量重绘只写「内容变了的单元格」——屏幕上的第三方字符
+/// 不在任何 buffer 里，于是**永远不会被覆盖**，残留成一片乱码。窗口越窄、
+/// 报错行折行越多，看着越糟。
+///
+/// 接到日志而不是 `/dev/null`：这些报错正是排查「没声音」时的关键线索。
+/// 必须在 `ratatui::init()` 之前调用。
+pub fn redirect_stderr_to_log() {
+    // 日志没初始化成功（SINK 没设上）时无从重定向，保持原样。
+    let Some(sink) = SINK.get() else {
+        return;
+    };
+    let Ok(file) = sink.lock() else {
+        return;
+    };
+
+    use std::os::fd::AsRawFd;
+    // SAFETY：`dup2` 只改本进程的 fd 表，失败返回 -1 不破坏其它状态。
+    // 锁守卫随后释放，但 fd 2 已经是独立副本，仍然有效。
+    let result = unsafe { libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO) };
+    if result < 0 {
+        // 这里**不能**用 eprintln!——那正是要拦下来的东西。
+        write(
+            LEVEL_WARN,
+            &format!(
+                "重定向 stderr 到日志失败：{}",
+                std::io::Error::last_os_error()
+            ),
+        );
+    }
+}
+
 /// 形如 `2026-09-20 03:44:15Z` 的 UTC 时间戳。
 fn timestamp_now() -> String {
     let seconds = std::time::SystemTime::now()

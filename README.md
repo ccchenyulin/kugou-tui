@@ -85,7 +85,7 @@
 | 外观 | 6 套主题（冷蓝 / 石墨 / 日落 / 森林 / 霓虹 / 暗紫），各有真彩与 16 色两版 |
 | 设置页 | `,` 打开：主题、音质、播放模式、刷新间隔、歌词偏移、每页条数、缓存上限、16 色、歌词面板、侧边导航、下载目录、封面铺满方式；改完立即落盘 |
 | 单曲下载 | `W` 把当前播放的歌曲下载到设置里选的目录（默认 `~/Music`） |
-| **桌面集成** | **MPRIS**：注册为 `org.mpris.MediaPlayer2.kugou-tui`，状态栏/媒体控件/`playerctl` 可直接控制并显示封面 |
+| **桌面集成** | **MPRIS**：注册为 `org.mpris.MediaPlayer2.kugou-tui`，状态栏/媒体控件/`playerctl` 可直接控制并显示封面；**系统托盘**：注册为 `org.kde.StatusNotifierItem` 并带右键菜单（播放/暂停、上一首、下一首、最小化/显示窗口——后者仅 niri），Quickshell / waybar / KDE 等状态栏会显示图标，悬停显示当前曲目 |
 
 支持的音频格式由 rodio 决定：**MP3、FLAC、M4A/MP4、OGG(Vorbis)、WAV**。
 可选的播放音质见[配置文件](docs/CONFIGURATION.md)的 `quality`。
@@ -114,7 +114,8 @@
 | 音频输出 | 任意 rodio 支持的后端（Linux 上为 ALSA/PulseAudio） |
 | 终端 | 支持 UTF-8；**真彩（24 位）** 才能看到完整的主题配色与逐字渐变，老终端可加 `--basic-color` 退回 16 色 |
 | 操作系统 | **Linux**（在 CachyOS 上实测）。macOS 未验证但理论上可行；**Windows 不行**——`zbus` 在 Windows 上要求 `async-io` 特性，而这里按 `default-features = false` 只开了 `tokio` |
-| D-Bus（可选） | 有 session bus 时自动启用 MPRIS 桌面集成；没有（纯 tty）则跳过，**不影响播放** |
+| D-Bus（可选） | 有 session bus 时自动启用 MPRIS 与系统托盘；没有（纯 tty）则跳过，**不影响播放** |
+| 系统托盘（可选） | 需要状态栏提供 `org.kde.StatusNotifierWatcher`（Quickshell / waybar / KDE 都有）。没有就静默跳过；不需要时可用 `--no-tray` 关闭 |
 
 ---
 

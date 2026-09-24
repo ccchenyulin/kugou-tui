@@ -116,6 +116,9 @@ pub struct App {
 
     /// MPRIS 句柄。没有 D-Bus 时为 `None`（不影响播放，只是桌面集成不可用）。
     mpris: Option<crate::mpris::MprisHandle>,
+
+    /// 托盘句柄。`config.tray == false` 或环境探测失败时为 `None`。
+    tray: Option<crate::tray::TrayHandle>,
 }
 
 /// 动画帧间隔（约 30fps）。终端里再往上（60fps）看不出差别，但重绘成本是线性的，
@@ -180,6 +183,14 @@ impl App {
         // 先取一份克隆给 MPRIS：bus 随后会被 move 进 App，之后就借不到了
         let mpris = crate::mpris::spawn(bus.clone());
 
+        // 托盘与 MPRIS 共享同一个 bus（用于派发点击动作），但只读 config 一次——
+        // 关掉时干脆不 spawn，省掉那条 DBus 连接。
+        let tray_handle = if config.tray {
+            crate::tray::spawn(bus.clone())
+        } else {
+            None
+        };
+
         let state = AppState::new(config);
 
         let mut app = Self {
@@ -194,6 +205,7 @@ impl App {
             last_frame_at: Instant::now(),
             last_session_save: Instant::now(),
             mpris,
+            tray: tray_handle,
         };
 
         app.state.picker = Some(detect_image_picker());
@@ -219,7 +231,14 @@ impl App {
 
     /// 启动主循环，返回后终端已恢复。
     pub fn run(&mut self) -> anyhow::Result<()> {
+        // stderr 已经在 main 里接到日志上了（见 logger::redirect_stderr_to_log 的
+        // 调用点）——那里比这里早，能连音频初始化阶段的报错一起收走。
         let mut terminal = ratatui::init();
+
+        // 设终端标题：窗口列表里认得出来，`window.rs` 也靠它找回自己的窗口
+        // （niri 给的 pid 是终端模拟器的，匹配不上）。必须在 init 之后——
+        // 部分终端会在切到 alternate screen 时把标题重置回去。
+        crate::window::set_terminal_title();
 
         // 开启鼠标捕获：点击列表、滚轮翻页、点击进度条都要它。失败不影响键盘使用，
         // 有些终端/远程会话不支持，忽略即可。

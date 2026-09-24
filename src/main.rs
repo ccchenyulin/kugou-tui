@@ -54,8 +54,10 @@ mod keymap;
 mod logger;
 mod mpris;
 mod source;
+mod tray;
 mod ui;
 mod util;
+mod window;
 
 use anyhow::Context;
 use clap::Parser;
@@ -93,6 +95,18 @@ fn main() -> anyhow::Result<()> {
     if let Err(error) = logger::init(&log_path) {
         eprintln!("警告：无法创建日志文件 {}：{error}", log_path.display());
     }
+
+    // 尽早把 stderr 接到日志文件上。
+    //
+    // **必须赶在 `App::new` 之前**：音频设备是在那里初始化的（`AudioHandle::spawn`
+    // 起的线程），而 libjack / libasound 会直接往 fd 2 写报错。TUI 期间这些字符会
+    // 打在 ratatui 画好的界面上，且**永远不会被增量重绘覆盖**（详见函数文档）。
+    //
+    // 时机不是小事：放在 `App::run()` 里试过，release 构建下音频线程跑得快，
+    // 报错在到达那里之前就已经打出去了；debug 构建下反而"看起来生效"——
+    // 纯粹是时序巧合。放在这里才是确定的。
+    logger::redirect_stderr_to_log();
+
     tlog!(
         logger::LEVEL_INFO,
         "kugou-tui {} 启动，API={}，日志={}",
@@ -179,4 +193,5 @@ fn print_effective_config(config: &Config) {
         "16 色模式 : {}",
         if config.basic_color { "是" } else { "否" }
     );
+    println!("系统托盘 : {}", if config.tray { "启用" } else { "关闭" });
 }

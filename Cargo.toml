@@ -89,6 +89,11 @@ crossbeam-channel = "0.5"
 qrcode = { version = "0.14.1", default-features = false }
 zbus = { version = "5.13.2", default-features = false, features = ["tokio"] }
 
+# 只为了 `dup2`：把 stderr 接到日志文件上，免得音频后端（libjack / libasound）
+# 的报错打在 TUI 画面上。它本来就在依赖树里（alsa → cpal → rodio），
+# 显式声明不增加任何编译量。
+libc = "0.2"
+
 # --- 终端图片（封面）---
 # 关掉默认的 image-defaults：那会打开 image 的全部格式解码器并拖进 rayon，
 # 和本项目「只开 jpeg / png」的取舍冲突。crossterm 是探测终端能力所必需的。
