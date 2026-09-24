@@ -4,7 +4,7 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [未发布]
+## [0.3.3] - 2026-09-24
 
 ### 新增
 
@@ -40,6 +40,23 @@
   **窗口越窄越明显**：报错行会被终端折行成多行，而最大化时一行就够、几乎看不出来。
   现在进入 TUI 之前把 stderr 接到日志文件（`logger::redirect_stderr_to_log`，
   用 `dup2`）：画面干净了，报错仍留在日志里——排查「没声音」时它正是关键线索。
+- **概念版音源下，从云端歌单播放只能听到试听**：`Song::source` 解析时填的是默认值
+  `Kugou`，而 `stamp_songs()` 只覆盖了 5 个 `*_tracks_all` 方法——歌单**首屏**为了
+  「先出界面」直接调 `ApiClient::user_playlist_tracks`，绕过了盖章，于是这批歌被当成
+  标准版的歌，取链请求打到标准版端口；两平台 token 不通用，标准版只能给 60 秒试听。
+  现在 `SourceKind` 多一个公开的 `stamp()`，首屏结果补盖一次。
+  （来自 [@ccchenyulin](https://github.com/ccchenyulin) 的修复）
+- **自定义字母键会抢走输入框的按键**：`[keymap]` 的自定义键位表在模式判断**之前**
+  拦截，于是把 `seek_forward` 绑到 `l` 之后，搜索框里就打不出 `l` 了。现在输入态下
+  无修饰的字符键优先交给输入框（`ctrl+` / `alt+` 组合仍走自定义表）。顺带两处：
+  新建歌单弹窗改用 `TextInput`（自带光标 / Delete / Home / End）并显示真实光标；
+  帮助面板与界面里的「按 R 重试」这类提示会按 `[keymap]` 改写后再显示。
+  （来自 [@ccchenyulin](https://github.com/ccchenyulin) 的修复）
+
+### 文档
+
+- README 首屏的界面示意图从 ASCII 手绘换成**真实终端截图**（`assets/screenshot.jpg`，
+  950×1021，JPEG 压到 175 KB）。
 
 ## [0.3.2] - 2026-09-24
 
