@@ -6,7 +6,7 @@
 ![Rust](https://img.shields.io/badge/rust-1.86%2B-orange.svg)
 ![Platform](https://img.shields.io/badge/platform-linux-lightgrey.svg)
 
-![kugou-tui 界面：歌单广场、正在播放、歌词与播放队列](assets/screenshot.jpg)
+![kugou-tui 界面：歌单广场、正在播放、歌词与播放队列](assets/screenshot-0.3.3.jpg)
 
 界面全部由程序渲染（终端文本 + 半块字符画），截图取自真实使用场景。
 

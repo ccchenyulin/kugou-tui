@@ -55,7 +55,7 @@
 
 ### 文档
 
-- README 首屏的界面示意图从 ASCII 手绘换成**真实终端截图**（`assets/screenshot.jpg`，
+- README 首屏的界面示意图从 ASCII 手绘换成**真实终端截图**（`assets/screenshot-0.3.3.jpg`，
   950×1021，JPEG 压到 175 KB）。
 
 ## [0.3.2] - 2026-09-24
