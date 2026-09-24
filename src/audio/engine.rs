@@ -112,8 +112,8 @@ pub enum AudioEvent {
 pub enum AudioSource {
     /// 缓存里已经下完的文件。可以随便 seek。
     File(PathBuf),
-    /// 正在下载的缓冲。读指针跑在下载前面时会阻塞等数据。
-    Stream(crate::audio::streaming::StreamingBuffer),
+    /// 正在下载的流。数据落在缓存文件上，读指针跑在下载前面时会阻塞等数据。
+    Stream(Box<crate::audio::download::AudioStream>),
 }
 
 /// 主线程 → 音频线程的命令。
@@ -461,10 +461,10 @@ impl Runtime {
         // 装载期间先屏蔽「结束」上报，避免旧的 empty 状态误触发切歌
         self.finished_reported = true;
 
-        // rodio::Decoder 要的是 `Read + Seek`，文件和流式缓冲都满足，
+        // rodio::Decoder 要的是 `Read + Seek`，文件和流式下载都满足，
         // 差别只在「读不到时是 EOF 还是阻塞等下载」。
         //
-        // 但 `Decoder<File>` 和 `Decoder<StreamingBuffer>` 是两个不同类型，没法放进
+        // 但 `Decoder<File>` 和 `Decoder<StreamDownload<..>>` 是两个不同类型，没法放进
         // 同一个变量——统一装箱成 `Box<dyn Source>`（rodio 为 Box<dyn Source> 实现了
         // Source，可以照样 append 给播放器）。
         let decoder: Box<dyn Source<Item = f32> + Send> = match source {
@@ -490,7 +490,7 @@ impl Runtime {
                     }
                 }
             }
-            AudioSource::Stream(buffer) => match rodio::Decoder::new(buffer) {
+            AudioSource::Stream(stream) => match rodio::Decoder::new(*stream) {
                 Ok(decoder) => Box::new(decoder),
                 Err(error) => {
                     self.report_failure(format!(

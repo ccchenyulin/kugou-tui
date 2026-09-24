@@ -5,6 +5,13 @@ edition = "2024"
 # 1.86 是 ratatui-image 11.x 的下限：它要 ratatui 0.30，而支持 ratatui 0.30 的
 # ratatui-image 最低是 10.0.0，MSRV 就是 1.86。不能退回 8.x——8.x 只认
 # ratatui 0.29，会和这里的 0.30 编出两份 ratatui（且不兼容，渲染不进同一个 Frame）。
+#
+# ⚠️ 实际下限已被抬到 1.91：`stream-download` 0.24 自身要求 rustc 1.91（它要
+# reqwest 0.13，而把 reqwest 升到 0.13 的那一版正好也把 MSRV 提到了 1.91）。
+# 这里仍写 1.86 是有意的：`rust-version` 只影响 clippy 里按 MSRV 门控的建议，
+# 写成 1.91 会让 clippy 针对 1.88+ 的 `collapsible_if`（let-chains）在**全项目**
+# 报出 20 多条与本次改动无关的告警。真用 1.86 编会因依赖而失败，所以 README
+# 里的工具链要求要按 1.91 看。
 rust-version = "1.86"
 description = "轻量级酷狗音乐命令行 TUI 播放器，基于 KuGouMusicApi"
 license = "MIT"
@@ -99,6 +106,17 @@ libc = "0.2"
 # 和本项目「只开 jpeg / png」的取舍冲突。crossterm 是探测终端能力所必需的。
 ratatui-image = { version = "11.1.0", default-features = false, features = [
     "crossterm",
+] }
+
+# --- 边下边播的流式缓冲 ---
+# 只开 reqwest（复用本项目已有的 HTTP 栈）与 temp-storage（兜底的临时文件后端）；
+# 默认特性里的 process/registry 会把 yt-dlp/ffmpeg 子进程与注册表拖进来，用不上。
+# 自定义的 StorageProvider（见 audio/streaming.rs）直接把数据写进缓存文件，
+# 所以内存里只有解码器按需读的那一小段，而不是整首。
+stream-download = { version = "0.24", default-features = false, features = [
+    "async-read",
+    "reqwest",
+    "temp-storage",
 ] }
 
 [profile.release]

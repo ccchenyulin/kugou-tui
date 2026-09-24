@@ -19,8 +19,8 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 use ratatui::crossterm::event::{KeyEvent, MouseEvent};
 
 use crate::api::model::{Artist, Lyric, Playlist, RankBoard, Song};
+use crate::audio::download::AudioStream;
 use crate::audio::engine::AudioEvent;
-use crate::audio::streaming::StreamingBuffer;
 use crate::error::AppError;
 
 /// 歌单歌曲请求的发起方。
@@ -146,11 +146,20 @@ pub enum Loaded {
         received: u64,
         total: Option<u64>,
     },
-    /// 音频已落盘，可以交给音频线程播放。
+    /// 音频已落盘。
+    ///
+    /// `needs_load` 区分两条路（**不要**用 `start_at_ms > 0` 去猜：
+    /// 续播时位置完全可能是 0）：
+    ///
+    /// * `false`——**边下边播完成**。解码器读的就是这个文件，已经在放了。
+    ///   再 `load` 一次会把正在放的声音掐断、从 0 重开（「首播一秒后从头
+    ///   重来」），所以只记账、不碰播放。
+    /// * `true`——**续播先下完**。之前没播（要先下完全曲），现在该开播了。
     StreamCached {
         song: Box<Song>,
         path: PathBuf,
         start_at_ms: u64,
+        needs_load: bool,
     },
     /// 自动探测到的设备指纹，需要回写配置。
     DeviceFingerprint(String),
@@ -211,10 +220,14 @@ pub enum Loaded {
     AvatarReady {
         image: image::DynamicImage,
     },
-    /// 流式缓冲已经攒够开头，可以开播了（边下边播）。
-    StreamPrerolled {
+    /// 流式下载已经建好，可以交给音频线程开播（边下边播）。
+    ///
+    /// 装的是 `StreamDownload`：数据落在缓存文件上，后台边下边写。
+    /// 解码器读到还没下到的位置会阻塞等数据，所以这个事件**不需要**等到
+    /// 攒够多少字节——建好就能播。
+    StreamOpened {
         song: Box<Song>,
-        buffer: StreamingBuffer,
+        stream: Box<AudioStream>,
         start_at_ms: u64,
     },
     /// 云端写操作（加歌/删歌）的提示信息。

@@ -27,7 +27,7 @@ use crate::config::{Config, SUPPORTED_QUALITIES};
 use crate::error::AppError;
 use crate::source::SourceKind;
 
-use crate::audio::download::{Downloader, PREROLL_BYTES};
+use crate::audio::download::Downloader;
 use crate::audio::engine::{AudioEvent, PlaybackState, SEEK_STEP_MS, VOLUME_STEP};
 use crate::audio::spectrum::BAND_COUNT;
 use crate::event::{Event, Loaded, LoadingTarget, PlaylistSource, VipClaimOutcome};
@@ -3526,19 +3526,26 @@ impl App {
                 self.start_download(*song, url, start_at_ms, is_trial);
             }
 
-            Loaded::StreamPrerolled {
+            Loaded::StreamOpened {
                 song,
-                buffer,
+                stream,
                 start_at_ms,
             } => {
                 if !self.is_current(&song) {
                     return;
                 }
-                // 攒够开头就开播——不用等整首下完（边下边播）
+                // 流建好就开播——不用等整首下完（边下边播）。读到还没下到的
+                // 位置会在 `read()` 里阻塞等数据。
                 self.state.download_progress = None;
                 self.state.busy = None;
+                tlog!(
+                    crate::logger::LEVEL_DEBUG,
+                    "边下边播开播：{}（start_at_ms={}）",
+                    song.name,
+                    start_at_ms
+                );
                 self.audio
-                    .load(AudioSource::Stream(buffer), start_at_ms, song.duration_ms);
+                    .load(AudioSource::Stream(stream), start_at_ms, song.duration_ms);
             }
 
             Loaded::DownloadProgress { received, total } => {
@@ -3549,6 +3556,7 @@ impl App {
                 song,
                 path,
                 start_at_ms,
+                needs_load,
             } => {
                 if !self.is_current(&song) {
                     // 用户已切歌，删掉刚下载的孤儿文件，避免缓存被无用数据占满
@@ -3564,8 +3572,30 @@ impl App {
 
                 self.state.download_progress = None;
                 self.state.busy = None;
-                self.audio
-                    .load(AudioSource::File(path), start_at_ms, song.duration_ms);
+
+                // 只在「续播先下完」那条路开播。边下边播完成时解码器读的
+                // 就是同一个文件、已经在放了，再 `load` 一次会把声音掐断
+                // 从 0 重开——「首播一秒后从头重来」就是这个。
+                //
+                // 判据用事件自带的 `needs_load`，**不看 `start_at_ms`**：
+                // 续播的位置完全可能是 0（上次就停在开头），那样会被误判成
+                // 「边下边播完成」而不开播。
+                if needs_load {
+                    tlog!(
+                        crate::logger::LEVEL_DEBUG,
+                        "续播下载完成，开播：{}（start_at_ms={}）",
+                        song.name,
+                        start_at_ms
+                    );
+                    self.audio
+                        .load(AudioSource::File(path), start_at_ms, song.duration_ms);
+                } else {
+                    tlog!(
+                        crate::logger::LEVEL_DEBUG,
+                        "边下边播下载完成，仅记账不重播：{}",
+                        song.name
+                    );
+                }
 
                 // 当前这首已经在放了——趁这会儿把**下一首**悄悄下下来。
                 //
@@ -3877,55 +3907,52 @@ impl App {
                         song: Box::new(song),
                         path: target,
                         start_at_ms,
+                        // 这条路之前没播（先下完全曲），现在该开播了。
+                        needs_load: true,
                     }),
                     Err(error) => bus.fail(format!("下载《{label}》失败"), error),
                 }
                 return;
             }
 
-            // 边下边播：先起流式下载（立即返回缓冲），攒够开头就开播，
-            // 剩下的在后台继续下并落盘到缓存。
+            // 边下边播：数据一边从网络读出、一边写进 `target`，解码器读的就是
+            // 这个文件。内存里只有 `BufReader` 的一小段，与文件大小无关。
             //
-            // 之前是 `fetch_to` 下完整个文件才 `load`——一首 Hi-Res 几十 MB，
-            // 等待时间全押在下载上。现在只等开头那 128 KB。
+            // 下载完毕后的 `on_done` **只做落盘记账**：早先的版本在这里又
+            // `load` 了一次刚下好的文件，把已经播着的流掐掉重开，表现为
+            // 「首播一秒后从头重来」。现在不换播放源，那个 bug 就不会发生。
             let bus_for_done = bus.clone();
             let song_for_done = song.clone();
             let target_for_done = target.clone();
             let start_for_done = start_at_ms;
             let label_for_done = label.clone();
 
-            let buffer = downloader.start_streaming(&url, target, move |result| match result {
-                Ok(()) => bus_for_done.emit(Loaded::StreamCached {
-                    song: Box::new(song_for_done),
-                    path: target_for_done,
-                    start_at_ms: start_for_done,
-                }),
-                Err(message) => bus_for_done.fail(
-                    format!("下载《{label_for_done}》失败"),
-                    AppError::Audio(message),
-                ),
-            });
-
-            // 等攒够开头再开播。轮询而不是阻塞等——这是 async 任务，
-            // 阻塞会把 runtime 的线程占住。
-            let preroll = buffer.clone();
-            loop {
-                let got = preroll.buffered_bytes();
-                // 流式拿不到总长度，只能报已收到的字节——进度条照常工作
-                progress(got, None);
-                if got >= PREROLL_BYTES || preroll.is_complete() {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-
-            // 一点都没下到（比如直链立刻失败）就别发了，等下载完成那条报错
-            if preroll.buffered_bytes() > 0 {
-                bus.emit(Loaded::StreamPrerolled {
+            match downloader
+                .start_streaming(&url, target, move |result| match result {
+                    Ok(()) => bus_for_done.emit(Loaded::StreamCached {
+                        song: Box::new(song_for_done),
+                        path: target_for_done,
+                        start_at_ms: start_for_done,
+                        // 边下边播：解码器读的就是这个文件，已经在放了。
+                        // 再 load 一次就会掐断重开。
+                        needs_load: false,
+                    }),
+                    Err(message) => bus_for_done.fail(
+                        format!("下载《{label_for_done}》失败"),
+                        AppError::Audio(message),
+                    ),
+                })
+                .await
+            {
+                // 建立流不等于拿到数据：`StreamDownload` 已经接好管道，
+                // 但字节是后台边下边给。直接交给播放器，读指针跑在前面时
+                // `read()` 会阻塞等数据。
+                Ok(stream) => bus.emit(Loaded::StreamOpened {
                     song: Box::new(song),
-                    buffer,
+                    stream: Box::new(stream),
                     start_at_ms,
-                });
+                }),
+                Err(message) => bus.fail(format!("下载《{label}》失败"), AppError::Audio(message)),
             }
         });
     }

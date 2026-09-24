@@ -3,12 +3,13 @@
 //! # 两条路径：边下边播，以及「续播时先下完」
 //!
 //! **默认走流式**（[`Downloader::start_streaming`]）：取到直链后先攒够
-//! [`PREROLL_BYTES`]（128 KB，约 8 秒音频）就交给解码器开播，剩下的在后台
+//! [`PREFETCH_BYTES`]（256 KB，约 16 秒音频）就交给解码器开播，剩下的在后台
 //! 继续下、同时落盘到缓存。所以首播的等待是「攒开头」，不是「下完整首」。
 //!
-//! rodio 的解码器要求 `Read + Seek`，所以流式缓冲得自己实现一个会增长、
-//! 且能 `Seek` 的 `Read`（见 [`crate::audio::streaming`]）。它的代价是
-//! **读指针跑到还没下到的位置会阻塞等数据**——表现是声音停一下再继续。
+//! rodio 的解码器要求 `Read + Seek`，这由 `stream-download` 提供：数据落进
+//! 缓存文件，解码器读的也是那个文件（见 [`super::streaming`]）。所以内存里
+//! 只有 `BufReader` 的一小段，**与文件大小无关**——早先那个「整首堆在
+//! `Vec<u8>` 里」的 `StreamingBuffer` 已经删掉了。
 //!
 //! 但有一个例外：**要跳到中间去（续播上次的位置）时不能走流式**。
 //! 缓冲里只有开头那点数据，seek 到几百秒的位置会一直等下载、超时失败，
@@ -26,12 +27,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use stream_download::http::HttpStream;
+use stream_download::{Settings, StreamDownload, StreamPhase};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt, SeekFrom};
 
-use super::streaming::StreamingBuffer;
+use super::streaming::CacheFileProvider;
 use crate::error::{AppError, Result};
 use crate::logger::tlog;
-use std::io::Write;
 
 /// 走分块并发的门槛。小文件并发反而慢（每次分块都要建一次连接），不值得。
 const PARALLEL_MIN_BYTES: u64 = 512 * 1024;
@@ -39,6 +41,13 @@ const PARALLEL_MIN_BYTES: u64 = 512 * 1024;
 const PARALLEL_MAX_CHUNKS: u64 = 4;
 /// 单块大小的下限，避免把一首歌切成几十个碎片。
 const MIN_CHUNK_BYTES: u64 = 256 * 1024;
+
+/// 边下边播的读句柄。数据落在缓存文件上，内存里只有 `BufReader` 的一小段。
+///
+/// 解码器要的是 `Read + Seek`，`StreamDownload` 两者都实现了，所以可以直接交给
+/// rodio（`AudioSource::Stream` 装的就是它）。缓存文件在后台边下边写，读指针
+/// 跑在前面时会阻塞等数据。
+pub type AudioStream = StreamDownload<CacheFileProvider>;
 
 /// 一段 Range 请求要下载的范围（闭区间，`end` 是最后一个字节的下标）。
 #[derive(Debug, Clone, Copy)]
@@ -418,85 +427,62 @@ fn temp_path_for(target: &Path) -> PathBuf {
 /// 开播前至少要攒够的字节数。
 ///
 /// 太小（几 KB）：解码器刚探完格式就没数据，第一秒就卡住。
-/// 太大：等待时间又退回"下完才播"。按常见码率（128kbps ≈ 16 KB/s）取
-/// 128 KB ≈ 8 秒音频，够解码器稳定跑起来，等待又不明显。
-pub const PREROLL_BYTES: u64 = 128 * 1024;
+/// 太大：等待时间又退回「下完才播」。按常见码率（128kbps ≈ 16 KB/s）取
+/// 256 KB ≈ 16 秒音频，够解码器稳定跑起来，等待又不明显。
+///
+/// 交给 `stream-download` 的 `prefetch_bytes`（它的默认值也是 256 KB，
+/// 这里显式写出以便日后调整）。上一个版本用的是 128 KB，换成这个库之后
+/// 改为 256 KB：多等一点、少一次开播卡顿。
+const PREFETCH_BYTES: u64 = 256 * 1024;
 
 impl Downloader {
-    /// 开始流式下载，**立即返回**缓冲。
+    /// 开始流式下载，立即返回一个 `StreamDownload` 读句柄。
     ///
-    /// 后台任务一边灌 buffer 一边写 `cache_path`：这次播完缓存就在了，
-    /// 下次直接走本地文件，不用再下。
+    /// 数据一边从网络读出、一边写进 `cache_path`；返回的读句柄交给解码器
+    /// 播放。这次播完缓存就在了，下次直接命中本地文件，不用再下。
     ///
-    /// 返回的 buffer 可直接交给 `AudioEngine::load`——读指针跑到还没下载到的
-    /// 位置时会在 `read()` 里阻塞等数据，表现是声音停一下，而不是提前结束。
-    pub fn start_streaming(
+    /// 返回的 `StreamDownload` 实现了 `Read + Seek`，可直接交给
+    /// [`crate::audio::engine::AudioEngine::load`]。读指针跑在写指针前面时，
+    /// `read()` 会阻塞等数据——表现是声音停一下，而不是提前结束。
+    ///
+    /// `on_done` 在下载完毕时回调。注意：**它只做记账（写缓存索引之类），
+    /// 不要在这里重新 `load`** ——早先的代码就是在这一点上把已经开播的流
+    /// 又 `load` 了一遍，导致「首播一秒后从头重来」。
+    pub async fn start_streaming(
         &self,
         url: &str,
         cache_path: PathBuf,
         on_done: impl FnOnce(std::result::Result<(), String>) + Send + 'static,
-    ) -> StreamingBuffer {
-        let buffer = StreamingBuffer::new(None);
-        let writer = buffer.clone();
-        let http = self.http.clone();
-        let url = url.to_string();
+    ) -> std::result::Result<StreamDownload<CacheFileProvider>, String> {
+        // 用 `reqwest::Url`（reqwest 重导出了 `url::Url`），不额外引入 `url` 直接依赖。
+        let parsed =
+            reqwest::Url::parse(url).map_err(|error| format!("直链不是合法 URL：{error}"))?;
+        let stream = HttpStream::new(self.http.clone(), parsed)
+            .await
+            .map_err(|error| format!("建立音频流失败：{error}"))?;
 
-        tokio::spawn(async move {
-            match stream_into(&http, &url, &writer, &cache_path).await {
-                Ok(()) => {
-                    writer.finish(None);
-                    on_done(Ok(()));
+        let provider = CacheFileProvider::new(cache_path.clone());
+
+        let on_done_cell = std::sync::Mutex::new(Some(on_done));
+        let settings = Settings::default()
+            .prefetch_bytes(PREFETCH_BYTES)
+            .on_progress(move |_reader, state, _| {
+                if state.phase != StreamPhase::Complete {
+                    return;
                 }
-                Err(error) => {
-                    tlog!(crate::logger::LEVEL_WARN, "流式下载 {url} 失败：{error}");
-                    let message = error.to_string();
-                    writer.finish(Some(message.clone()));
-                    on_done(Err(message));
-                }
-            }
-        });
+                let Some(on_done) = on_done_cell.lock().ok().and_then(|mut slot| slot.take())
+                else {
+                    return;
+                };
+                on_done(Ok(()));
+            });
 
-        buffer
+        let download = StreamDownload::from_stream(stream, provider, settings)
+            .await
+            .map_err(|error| format!("启动音频流失败：{error}"))?;
+
+        Ok(download)
     }
-}
-
-async fn stream_into(
-    http: &reqwest::Client,
-    url: &str,
-    buffer: &StreamingBuffer,
-    cache_path: &Path,
-) -> Result<()> {
-    let mut response = http
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()
-        .map_err(|error| AppError::HttpStatus {
-            path: url.to_string(),
-            status: error.status().map(|status| status.as_u16()).unwrap_or(0),
-        })?;
-
-    // 边收边写：缓存文件同步落盘，即使没播完下次也能接着用
-    let mut file = std::fs::File::create(cache_path).map_err(|error| AppError::IoAt {
-        path: cache_path.display().to_string(),
-        source: error,
-    })?;
-
-    // 用 reqwest 自带的 chunk()，不引 futures_util——为一个循环加依赖不值当
-    while let Some(chunk) = response.chunk().await? {
-        buffer.push(&chunk);
-        file.write_all(&chunk).map_err(|error| AppError::IoAt {
-            path: cache_path.display().to_string(),
-            source: error,
-        })?;
-    }
-
-    file.flush().map_err(|error| AppError::IoAt {
-        path: cache_path.display().to_string(),
-        source: error,
-    })?;
-
-    Ok(())
 }
 
 #[cfg(test)]
