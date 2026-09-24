@@ -716,6 +716,38 @@ impl App {
                     config.cover_fill = next;
                 }
             }
+            // 换一张声卡。设备是在音频线程里重建的，当前这首会停一下，
+            // 等新设备就绪（DeviceOpened）再按原位置续播，所以这里单独提示并返回。
+            s::Setting::AudioDevice => {
+                let options = s::device_options(&self.state.audio_devices);
+                let Some(next) = s::cycle_device(&options, config.audio_device.as_deref(), delta)
+                else {
+                    return;
+                };
+                let target = next
+                    .clone()
+                    .unwrap_or_else(|| s::DEFAULT_DEVICE_LABEL.to_string());
+                config.audio_device = next.clone();
+                // 只在真的有声音在放时才续播：暂停状态下换设备不该自作主张开始播
+                self.pending_device_resume = match self.state.playback {
+                    PlaybackState::Playing => self
+                        .state
+                        .current
+                        .clone()
+                        .map(|song| (song, self.state.position_ms)),
+                    _ => None,
+                };
+                self.audio.use_device(next);
+                self.state.info(crate::ui::views::settings::change_notice(
+                    setting.label(),
+                    &target,
+                ));
+                if let Err(error) = self.state.config.save() {
+                    self.state
+                        .error(format!("保存设置失败：{}", error.user_hint()));
+                }
+                return;
+            }
         }
 
         let label = setting.label();
@@ -4040,6 +4072,19 @@ impl App {
                     .unwrap_or_default();
                 self.state.success(format!("正在播放：{title}"));
             }
+            AudioEvent::DeviceOpened { name } => {
+                // 第一次是启动时上报，只记下来不打扰；之后的切换才提示
+                let is_startup = self.state.output_device.is_empty();
+                self.state.output_device = name.clone();
+
+                if let Some((song, position)) = self.pending_device_resume.take() {
+                    self.start_playback(song, position);
+                    return;
+                }
+                if !is_startup {
+                    self.state.info(format!("输出设备 → {name}"));
+                }
+            }
             AudioEvent::TrackFinished => {
                 self.state.position_ms = 0;
 
@@ -4057,9 +4102,16 @@ impl App {
                 // 自然播完：顺序模式到底就停，单曲循环原地重播
                 self.next_track(false);
             }
+            // 换设备失败：旧设备照旧在播，只提示，不动播放状态
+            AudioEvent::DeviceSwitchFailed(message) => {
+                self.pending_device_resume = None;
+                self.state.warn(message);
+            }
             AudioEvent::Failed(message) => {
                 self.state.busy = None;
                 self.state.download_progress = None;
+                // 换设备失败时旧设备还活着，刚才那首也还在播，别再排队续播了
+                self.pending_device_resume = None;
                 self.state.playback = PlaybackState::Stopped;
                 self.state.error(message);
             }

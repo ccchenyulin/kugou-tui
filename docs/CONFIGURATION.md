@@ -34,6 +34,7 @@ api_base = "http://127.0.0.1:3000"
 cookie = "token=xxx; userid=xxx"   # 登录态，可手动填
 dfid = "..."                        # 设备指纹，首次启动自动获取
 volume = 0.7                        # 0.0–1.0
+audio_device = "..."                # 输出设备名，留空 = 跟随系统默认
 playback_mode = "sequential"        # sequential | repeat_all | repeat_one | shuffle
 cache_dir = "/home/you/.cache/kugou-tui"
 cache_limit_mib = 512               # 0 = 不限制
@@ -64,8 +65,45 @@ tray = true                         # 系统托盘，见下方说明
 默认 `crop`：专辑封面基本居中构图，裁掉一点边框通常看不出来，而「框里空着一块」
 是一眼就能看见的。觉得裁得太多就改成 `fit`。
 
-运行时按 `,` 打开设置页，最后一项「封面铺满」可以直接切换，改完立即生效并落盘
+运行时按 `,` 打开设置页，「封面铺满」可以直接切换，改完立即生效并落盘
 ——想比较三种效果不用重启。
+
+### 输出设备
+
+`audio_device` 决定声音送到哪张卡，默认是**跟随系统默认**（该项留空即可）。
+
+设置页最后一项「输出设备」显示的是**实际打开的那张卡**，并可以在「系统默认」和
+枚举到的设备之间切换。它存在的理由是 Linux 上的一种典型故障：
+
+```text
+进度条在走、状态是「播放中」，但一点声音都没有
+  └─ 声音被送到了另一张卡（比如没人接音箱的板载口）
+  └─ 而且是直连硬件（绕过了 PipeWire），pactl list sink-inputs 里连这个程序都看不到
+```
+
+根因通常不在程序里：ALSA 的 `default` 被 `/etc/asound.conf` 或
+`~/.asoundrc` 写死成了某一张卡（`pcm.!default { type hw card 2 }`）。**卡号会变**
+——插拔 USB 声卡、换启动顺序都会让「card 2」指向别的东西，写死数字迟早出事。
+修法是让 `default` 回到 PipeWire（`type pipewire`），或者直接删掉那个文件。
+
+排查三板斧：
+
+```bash
+ls -l /proc/<pid>/fd | grep snd      # 看到 /dev/snd/pcmCxD0p = 直连硬件（绕过 PipeWire）
+pactl list sink-inputs               # 播放时应该能看到自己的流，看不到就说明绕过了
+aplay -D default /dev/zero -f cd     # 打不开（busy / 无此设备）就是 ALSA 配置有问题
+```
+
+不想动系统配置时，也可以在设置页里直接指定设备——但它同样是绕过 PipeWire 直连
+硬件的，那张卡被别的程序占着就会打开失败。
+
+候选列表是**筛过的**：ALSA 会把自己定义的所有 PCM 都报成设备（本机实测 52 项，
+大部分是 `lavrate` / `samplerate` / `jack` / `oss` 这类插件），这里只保留「能给出
+默认输出配置」且不是 `null`（Discard all samples）的，再按名字去重。选中一个打不开
+的设备不会把播放弄哑——打不开就继续用原来那张，只在状态栏提示一句。
+
+「系统默认」显示的是 `default` 那张卡的自述名，例如
+`Default ALSA Output (currently PipeWire Media Server)`——它能直接告诉你声音交给了谁。
 
 `qr_aspect` 用来矫正登录二维码的形状：终端字符的高通常是宽的 2 倍，此时用
 半块字符（一个字符承载两行模块）画出来正好是正方形。**如果你觉得二维码被

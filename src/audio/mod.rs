@@ -31,4 +31,4 @@ pub mod streaming;
 
 pub use cache::AudioCache;
 pub use download::Downloader;
-pub use engine::AudioHandle;
+pub use engine::{AudioHandle, list_output_devices};

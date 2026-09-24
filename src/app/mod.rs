@@ -114,6 +114,13 @@ pub struct App {
     /// 的定期保存兜底——只在退出时存的话，非正常退出就丢进度了。
     last_session_save: Instant,
 
+    /// 切换输出设备后要续播的曲目与位置。
+    ///
+    /// 换设备是在音频线程里重建设备，正在播的那首会停。这里记下「刚才在放什么、
+    /// 放到哪儿」，等 [`crate::audio::engine::AudioEvent::DeviceOpened`] 到达时
+    /// 按原位置重新装载——用户侧看不出中断。
+    pending_device_resume: Option<(crate::api::model::Song, u64)>,
+
     /// MPRIS 句柄。没有 D-Bus 时为 `None`（不影响播放，只是桌面集成不可用）。
     mpris: Option<crate::mpris::MprisHandle>,
 
@@ -176,7 +183,7 @@ impl App {
         // 装了多少条只在日志里记，不打扰界面。
         let _custom_keys = crate::keymap::install_custom(&config.keymap);
 
-        let audio = AudioHandle::spawn(bus.clone(), config.volume);
+        let audio = AudioHandle::spawn(bus.clone(), config.volume, config.audio_device.clone());
         let cache = AudioCache::new(config.cache_dir.clone(), config.cache_limit_mib);
         let downloader = Downloader::new(config.proxy.as_deref()).context("初始化下载器失败")?;
 
@@ -204,11 +211,15 @@ impl App {
             runtime,
             last_frame_at: Instant::now(),
             last_session_save: Instant::now(),
+            pending_device_resume: None,
             mpris,
             tray: tray_handle,
         };
 
         app.state.picker = Some(detect_image_picker());
+        // 设备列表给设置页用。放在这里而不是 AppState::new 里：枚举设备会加载
+        // 音频后端，那是音频线程的地盘，主线程只取一次名字就走。
+        app.state.audio_devices = crate::audio::list_output_devices();
 
         app.restore_session();
         app.announce_readiness();

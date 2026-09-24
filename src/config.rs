@@ -60,6 +60,16 @@ pub struct Config {
     /// 音量，范围 `0.0 ~ 1.0`。
     pub volume: f32,
 
+    /// 音频输出设备名（cpal 枚举到的名字）。`None` 表示跟随系统默认。
+    ///
+    /// 为什么需要显式指定：Linux 上 cpal 打开的是 ALSA 的 `default`，而 `default`
+    /// 可能被 `/etc/asound.conf` 写死成某一张声卡。实测就踩过：写死成板载卡，
+    /// 而用户在听 USB 声卡 —— 表现是「进度在走、完全没声音」，而且因为是直连
+    /// 硬件（绕过了 PipeWire），`pactl list sink-inputs` 里连这个程序都看不到。
+    /// 能在界面上改设备，这类问题就不用去翻系统配置了。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_device: Option<String>,
+
     /// 播放模式。
     pub playback_mode: PlaybackMode,
 
@@ -215,6 +225,7 @@ impl Default for Config {
             cookie: None,
             dfid: None,
             volume: DEFAULT_VOLUME,
+            audio_device: None,
             playback_mode: PlaybackMode::Sequential,
             cache_dir: default_cache_dir(),
             cache_limit_mib: DEFAULT_CACHE_LIMIT_MIB,

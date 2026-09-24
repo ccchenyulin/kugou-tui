@@ -43,10 +43,12 @@ pub enum Setting {
     DownloadDir,
     /// 首页大封面怎么铺满它的区域。
     CoverFill,
+    /// 声音从哪张卡出来。
+    AudioDevice,
 }
 
 impl Setting {
-    pub const ALL: [Setting; 13] = [
+    pub const ALL: [Setting; 14] = [
         Self::Theme,
         Self::Quality,
         Self::PlaybackMode,
@@ -60,6 +62,7 @@ impl Setting {
         Self::LiteMode,
         Self::DownloadDir,
         Self::CoverFill,
+        Self::AudioDevice,
     ];
 
     /// 左侧的名字。
@@ -78,6 +81,7 @@ impl Setting {
             Self::LiteMode => "简易模式",
             Self::DownloadDir => "下载目录",
             Self::CoverFill => "封面铺满",
+            Self::AudioDevice => "输出设备",
         }
     }
 
@@ -97,8 +101,54 @@ impl Setting {
             Self::LiteMode => "关封面与频谱，省内存和 CPU",
             Self::DownloadDir => "下载单曲保存到这里（默认 ~/Music）",
             Self::CoverFill => "铺满 / 不变形 / 不裁剪，只能取两个",
+            Self::AudioDevice => "声音送到哪张卡，没声音时先看这里",
         }
     }
+}
+
+/// 「系统默认」在候选列表里的显示名。
+pub const DEFAULT_DEVICE_LABEL: &str = crate::audio::engine::DEFAULT_DEVICE_LABEL;
+
+/// 设备名最长显示多少个字符。设备名可以很长（带一整串 USB 描述符），
+/// 不截断会把右边的说明文字挤没。
+const MAX_DEVICE_LABEL_CHARS: usize = 18;
+
+/// 输出设备候选：首项是「系统默认」，其后是枚举到的设备名。
+pub fn device_options(devices: &[String]) -> Vec<String> {
+    let mut options = Vec::with_capacity(devices.len() + 1);
+    options.push(DEFAULT_DEVICE_LABEL.to_string());
+    options.extend(devices.iter().cloned());
+    options
+}
+
+/// 在输出设备候选里按 `delta` 前进。
+///
+/// 外层 `None` 表示当前值不在候选里（设备被拔了、或配置文件手改过）——保持原样，
+/// 不擅自跳到第一项；内层 `None` 表示选中的是「系统默认」。
+pub fn cycle_device(
+    options: &[String],
+    current: Option<&str>,
+    delta: isize,
+) -> Option<Option<String>> {
+    if options.is_empty() {
+        return None;
+    }
+    let label = current.unwrap_or(DEFAULT_DEVICE_LABEL);
+    let index = options.iter().position(|option| option == label)?;
+    let len = options.len() as isize;
+    let next = (index as isize + delta).rem_euclid(len) as usize;
+    let picked = options.get(next)?.clone();
+    Some((picked != DEFAULT_DEVICE_LABEL).then_some(picked))
+}
+
+/// 长设备名截短，末尾加省略号。按字符数而不是字节数，中文设备名不会被切坏。
+pub fn trim_device_label(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() <= MAX_DEVICE_LABEL_CHARS {
+        return name.to_string();
+    }
+    let head: String = chars[..MAX_DEVICE_LABEL_CHARS - 1].iter().collect();
+    format!("{head}…")
 }
 
 /// 刷新间隔候选（毫秒）：从省电到流畅。
@@ -176,6 +226,15 @@ pub fn value_text(setting: Setting, state: &AppState) -> String {
         Setting::LiteMode => toggle_text(state.config.lite_mode),
         Setting::DownloadDir => expand_download_dir(state.config.download_dir.as_deref()),
         Setting::CoverFill => state.config.cover_fill.label().to_string(),
+        // 显示**实际打开**的那张卡，而不是配置里选的：选了但没打开（设备被拔、
+        // 名字变了）时，用户看到的是真相，不是自己以为的选择。
+        Setting::AudioDevice => {
+            if state.output_device.is_empty() {
+                "未打开".to_string()
+            } else {
+                trim_device_label(&state.output_device)
+            }
+        }
     }
 }
 
@@ -271,6 +330,63 @@ mod tests {
         // 配置文件被手改过、值不在候选里时，保持原样而不是跳到第一项
         assert_eq!(cycle(&[1u8, 2, 3], 9, 1), None);
         assert_eq!(cycle::<u8>(&[], 1, 1), None);
+    }
+
+    /// 输出设备候选：首项必须是「系统默认」，其余按枚举顺序跟在后面。
+    #[test]
+    fn device_options_put_system_default_first() {
+        let devices = vec!["hw:0".to_string(), "hw:1".to_string()];
+        assert_eq!(
+            device_options(&devices),
+            vec![
+                "系统默认".to_string(),
+                "hw:0".to_string(),
+                "hw:1".to_string()
+            ]
+        );
+        assert_eq!(device_options(&[]), vec!["系统默认".to_string()]);
+    }
+
+    /// 轮转顺序：系统默认 → 第一张卡 → 第二张卡 → 回到系统默认。
+    /// 「系统默认」用内层 `None` 表示，和「配置里没填」是同一个状态。
+    #[test]
+    fn cycle_device_wraps_and_maps_default_to_none() {
+        let options = device_options(&["hw:0".to_string(), "hw:1".to_string()]);
+
+        assert_eq!(
+            cycle_device(&options, None, 1),
+            Some(Some("hw:0".to_string()))
+        );
+        assert_eq!(
+            cycle_device(&options, Some("hw:0"), 1),
+            Some(Some("hw:1".to_string()))
+        );
+        assert_eq!(cycle_device(&options, Some("hw:1"), 1), Some(None));
+        assert_eq!(
+            cycle_device(&options, None, -1),
+            Some(Some("hw:1".to_string())),
+            "反向也要绕"
+        );
+    }
+
+    /// 设备被拔掉 / 配置文件手改过时，当前值不在候选里 → 保持原样，
+    /// 不擅自跳到「系统默认」。
+    #[test]
+    fn cycle_device_keeps_values_outside_the_options() {
+        let options = device_options(&["hw:0".to_string()]);
+        assert_eq!(cycle_device(&options, Some("已经拔掉的那张卡"), 1), None);
+        assert_eq!(cycle_device(&[], None, 1), None);
+    }
+
+    #[test]
+    fn trim_device_label_shortens_long_names_only() {
+        assert_eq!(trim_device_label("default"), "default");
+        assert_eq!(trim_device_label("板载声卡"), "板载声卡");
+
+        let long = "a".repeat(40);
+        let trimmed = trim_device_label(&long);
+        assert_eq!(trimmed.chars().count(), MAX_DEVICE_LABEL_CHARS);
+        assert!(trimmed.ends_with('…'), "截短要有省略号");
     }
 
     #[test]

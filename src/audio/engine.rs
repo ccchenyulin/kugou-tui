@@ -101,8 +101,16 @@ impl PlaybackState {
 pub enum AudioEvent {
     /// 音源已装载，`duration_ms` 是解码器给出的真实时长（可能为 0）。
     Ready { duration_ms: u64 },
+    /// 输出设备已打开（含切换到另一张卡）。
+    ///
+    /// `name` 是设备名，界面上直接显示它。这是诊断「播放中却没声音」的关键
+    /// 信息：设备名对不上自己听的那张卡，一眼就能看出来，不用去翻系统配置。
+    DeviceOpened { name: String },
     /// 当前曲目自然播放结束，主循环据此切下一首。
     TrackFinished,
+    /// 换输出设备没换成。**旧设备还活着、还在播**，所以它不是 [`Self::Failed`]：
+    /// 只提示一句，不把播放状态改成「已停止」。
+    DeviceSwitchFailed(String),
     /// 打开设备或解码失败。
     Failed(String),
 }
@@ -133,6 +141,8 @@ enum AudioCmd {
     SeekTo(u64),
     SeekBy(i64),
     SetVolume(f32),
+    /// 换一张声卡输出。`None` 表示回到系统默认。
+    UseDevice(Option<String>),
     Shutdown,
 }
 
@@ -216,7 +226,7 @@ impl AudioHandle {
     ///
     /// 设备打开失败不会让进程退出：错误通过 [`AudioEvent::Failed`] 上报，
     /// 界面照常可用（用户可以继续浏览、搜索、管理歌单）。
-    pub fn spawn(bus: EventBus, initial_volume: f32) -> Self {
+    pub fn spawn(bus: EventBus, initial_volume: f32, device: Option<String>) -> Self {
         let (command_tx, command_rx) = unbounded();
         let shared = Arc::new(Shared::new(initial_volume));
         let thread_shared = Arc::clone(&shared);
@@ -228,7 +238,7 @@ impl AudioHandle {
 
         let thread = thread::Builder::new()
             .name("kugou-audio".to_string())
-            .spawn(move || run(command_rx, bus, thread_shared, thread_levels))
+            .spawn(move || run(command_rx, bus, thread_shared, thread_levels, device))
             .map_err(|error| {
                 tlog!(crate::logger::LEVEL_ERROR, "启动音频线程失败：{error}");
                 error
@@ -304,6 +314,15 @@ impl AudioHandle {
         self.send(AudioCmd::SetVolume(clamped));
     }
 
+    /// 换一个输出设备，`None` 表示回到系统默认。
+    ///
+    /// 切换是在音频线程里重建设备，因此当前这首会停（解码器已经被消费掉了，
+    /// 无法原地续播）。主线程收到 [`AudioEvent::DeviceOpened`] 后会把刚才那首
+    /// 按原位置重新装载，用户侧看不出中断。
+    pub fn use_device(&self, device: Option<String>) {
+        self.send(AudioCmd::UseDevice(device));
+    }
+
     pub fn state(&self) -> PlaybackState {
         self.shared.state()
     }
@@ -348,14 +367,212 @@ impl Drop for AudioHandle {
 // 音频线程
 // ============================================================================
 
-fn run(rx: Receiver<AudioCmd>, bus: EventBus, shared: Arc<Shared>, levels: AudioLevels) {
-    // 设备必须在音频线程里创建：cpal 的 Stream 不是 Send
-    let mut stream = match rodio::DeviceSinkBuilder::open_default_sink() {
-        Ok(stream) => stream,
+/// 「系统默认设备」的显示名。
+pub const DEFAULT_DEVICE_LABEL: &str = "系统默认";
+
+/// 已打开的输出设备：设备本身 + 挂在它 mixer 上的播放器。
+///
+/// 字段顺序就是析构顺序：**播放器必须排在设备前面**。它挂在设备的 mixer 上，
+/// 先关设备会让播放器留在已经释放的 mixer 上。
+struct Output {
+    player: rodio::Player,
+    /// 设备本体。**没有任何代码读它**——它存在的唯一意义是活到播放结束：一旦
+    /// 析构，声音立刻断。Rust 的 dead_code 看不出「靠生命周期起作用」，所以
+    /// 用下划线前缀避开警告。别把它当没用的字段删掉。
+    _stream: rodio::MixerDeviceSink,
+    /// 设备名。上报给界面显示——「播着却没声音」时，用户看一眼就知道声音去了哪。
+    name: String,
+}
+
+impl Output {
+    /// 打开输出设备。`requested` 为 `None` 时用系统默认。
+    fn open(requested: Option<&str>) -> Result<Self, String> {
+        // 设备必须在音频线程里创建：cpal 的 Stream 不是 Send
+        if let Some(name) = requested {
+            match find_device(name) {
+                Ok(device) => {
+                    let label = device_name(&device).unwrap_or_else(|| name.to_string());
+                    match Self::from_device(device, label) {
+                        Ok(output) => return Ok(output),
+                        Err(error) => tlog!(
+                            crate::logger::LEVEL_WARN,
+                            "配置的输出设备「{name}」打不开：{error}，改用系统默认设备"
+                        ),
+                    }
+                }
+                // 指定了却找不到（声卡被拔、ALSA 卡号变了）时不让播放死掉：
+                // 退回系统默认。界面显示的是**实际打开**的那张卡。
+                Err(error) => {
+                    tlog!(crate::logger::LEVEL_WARN, "{error}，改用系统默认设备");
+                }
+            }
+        }
+        Self::open_default()
+    }
+
+    /// 系统默认设备。
+    ///
+    /// 直接交给 rodio 的 `open_default_sink`：它先试 cpal 认的默认设备（ALSA 的
+    /// `default`），失败才按设备列表回退、并跳过 `null`。**不自己遍历设备列表**——
+    /// 那会先碰上一堆打不开的 ALSA 插件（lavrate / jack / oss …），实测能把后端
+    /// 搅到后面全部打不开（ALSA 在失败的 `snd_pcm_open` 后不保证清理干净）。
+    fn open_default() -> Result<Self, String> {
+        let mut stream = rodio::DeviceSinkBuilder::open_default_sink().map_err(open_failed)?;
+
+        // rodio 默认会在 DeviceSink 析构时往 stdout 打一行 "Dropping DeviceSink..."，
+        // 那行字会直接糊在 TUI 界面上，必须关掉。
+        stream.log_on_drop(false);
+
+        let name = default_label();
+        let player = rodio::Player::connect_new(stream.mixer());
+        Ok(Self {
+            player,
+            _stream: stream,
+            name,
+        })
+    }
+
+    fn from_device(device: rodio::cpal::Device, name: String) -> Result<Self, String> {
+        let builder = rodio::DeviceSinkBuilder::from_device(device).map_err(open_failed)?;
+        // `open_sink_or_fallback`：按设备支持的格式逐个试，比 `open_stream` 宽容
+        // （实测有设备用默认格式打不开、换一种格式就行）。
+        let mut stream = builder.open_sink_or_fallback().map_err(open_failed)?;
+
+        // rodio 默认会在 DeviceSink 析构时往 stdout 打一行 "Dropping DeviceSink..."，
+        // 那行字会直接糊在 TUI 界面上，必须关掉。
+        stream.log_on_drop(false);
+
+        let player = rodio::Player::connect_new(stream.mixer());
+        Ok(Self {
+            player,
+            _stream: stream,
+            name,
+        })
+    }
+}
+
+fn open_failed(error: rodio::DeviceSinkError) -> String {
+    format!("无法打开音频输出设备：{error}。请确认系统音频服务正常（Linux 下检查 PipeWire/ALSA）。")
+}
+
+/// 可用的输出设备：能打开、能出声、名字不重复。
+///
+/// ALSA 会把自己定义的**所有 PCM** 都报成设备——实测这台机器上有 52 项，其中
+/// 大多数是插件（`lavrate` / `samplerate` / `jack` / `oss` / `speexrate`…），
+/// 还有被 PipeWire 占着、直连必失败的硬件条目。把它们摆进设置页，用户选中一个
+/// 打不开的就会把播放弄哑。两道过滤：
+///
+/// * **能给出默认输出配置**——这是「真的能播」的判据，插件和已被独占的设备都过不了；
+/// * **排除 `null`**（"Discard all samples"）。它能打开、能「正常播放」，只是把所有
+///   采样丢掉，从外面看毫无异常——正是「播放中却没声音」的另一种成因。它偏偏还能
+///   给出配置，所以必须单独判掉。
+///
+/// 最后按名字去重：同一张卡会以 `hw:` / `plughw:` / `front:` / `surround*:` 等
+/// 十几种形态出现，全列出来只会让人没法选。
+fn output_devices() -> Vec<rodio::cpal::Device> {
+    use rodio::cpal::traits::{DeviceTrait, HostTrait};
+
+    let devices = match rodio::cpal::default_host().output_devices() {
+        Ok(devices) => devices,
         Err(error) => {
-            let message = format!(
-                "无法打开音频输出设备：{error}。请确认系统音频服务正常（Linux 下检查 PipeWire/ALSA）。"
-            );
+            tlog!(crate::logger::LEVEL_WARN, "枚举音频输出设备失败：{error}");
+            return Vec::new();
+        }
+    };
+
+    let mut seen = std::collections::HashSet::new();
+    devices
+        .filter(|device| !is_null_device(device))
+        .filter(|device| device.default_output_config().is_ok())
+        .filter(|device| seen.insert(device_name(device).unwrap_or_default()))
+        .collect()
+}
+
+/// 是不是那个「丢弃所有采样」的空设备。
+///
+/// 判据是 ALSA 的 PCM 名（cpal 的 `driver()` 就是它），不是显示名——
+/// 显示名会跟着本地化/配置变。
+fn is_null_device(device: &rodio::cpal::Device) -> bool {
+    driver_of(device).is_some_and(|driver| driver == "null")
+}
+
+fn driver_of(device: &rodio::cpal::Device) -> Option<String> {
+    use rodio::cpal::traits::DeviceTrait;
+
+    device
+        .description()
+        .ok()
+        .and_then(|description| description.driver().map(str::to_string))
+}
+
+/// 系统默认设备的显示名。
+///
+/// 取枚举里 ALSA PCM 名为 `default` 的那一项：它的名字形如
+/// 「Default ALSA Output (currently PipeWire Media Server)」，一眼能看出声音
+/// 实际交给了谁。**不要**用 `default_output_device().description()`——cpal 对
+/// 它的名字是硬编码的 "Default Audio Device"，看不出路由到了哪里。
+fn default_label() -> String {
+    output_devices()
+        .iter()
+        .find(|device| driver_of(device).is_some_and(|driver| driver == "default"))
+        .and_then(device_name)
+        .unwrap_or_else(|| DEFAULT_DEVICE_LABEL.to_string())
+}
+
+/// 按名字找输出设备。找不到时把可用设备列出来，省得用户去猜名字。
+fn find_device(name: &str) -> Result<rodio::cpal::Device, String> {
+    output_devices()
+        .into_iter()
+        .find(|device| device_name(device).is_some_and(|candidate| candidate == name))
+        .ok_or_else(|| {
+            format!(
+                "找不到音频输出设备「{name}」，当前可用：{}",
+                list_output_devices().join("、")
+            )
+        })
+}
+
+/// 一个设备叫什么。`description()` 里的名字才是给人看的（cpal 0.17 起
+/// `DeviceTrait::name` 已废弃），取不到就当它没名字。
+fn device_name(device: &rodio::cpal::Device) -> Option<String> {
+    use rodio::cpal::traits::DeviceTrait;
+
+    device
+        .description()
+        .ok()
+        .map(|description| description.name().to_string())
+}
+
+/// 系统里可用的输出设备名。主线程枚举一次，供设置页选择。
+///
+/// 只取名字不取设备：`cpal::Device` 未必能安全跨线程搬运，而设置页要的只是
+/// 一串可显示、可回传的名字。
+pub fn list_output_devices() -> Vec<String> {
+    output_devices().iter().filter_map(device_name).collect()
+}
+
+fn run(
+    rx: Receiver<AudioCmd>,
+    bus: EventBus,
+    shared: Arc<Shared>,
+    levels: AudioLevels,
+    device: Option<String>,
+) {
+    let mut runtime = match Output::open(device.as_deref()) {
+        Ok(output) => {
+            bus.send(Event::Audio(AudioEvent::DeviceOpened {
+                name: output.name.clone(),
+            }));
+            Runtime {
+                output: Some(output),
+                shared,
+                levels,
+                bus,
+                loaded: false,
+                finished_reported: true,
+            }
+        }
+        Err(message) => {
             tlog!(crate::logger::LEVEL_ERROR, "{message}");
             shared.set_state(PlaybackState::Stopped);
             bus.send(Event::Audio(AudioEvent::Failed(message)));
@@ -365,25 +582,16 @@ fn run(rx: Receiver<AudioCmd>, bus: EventBus, shared: Arc<Shared>, levels: Audio
         }
     };
 
-    // rodio 默认会在 DeviceSink 析构时往 stdout 打一行 "Dropping DeviceSink..."，
-    // 那行字会直接糊在 TUI 界面上，必须关掉。
-    stream.log_on_drop(false);
+    let volume = runtime.shared.volume();
+    if let Some(output) = runtime.output.as_mut() {
+        output.player.set_volume(volume);
+    }
 
-    let player = rodio::Player::connect_new(stream.mixer());
-    player.set_volume(shared.volume());
-
-    let mut runtime = Runtime {
-        player,
-        shared,
-        levels,
-        bus,
-        loaded: false,
-        finished_reported: true,
-    };
     runtime.run_loop(rx);
 
-    // `stream` 在这里才 drop —— 必须活到播放结束，否则声音会立刻中断
-    drop(stream);
+    // `output`（含设备）在这里才 drop —— 必须活到播放结束，否则声音会立刻中断。
+    // 字段顺序保证播放器先于设备析构。
+    drop(runtime);
 }
 
 /// 设备不可用时，把命令读干净直到收到 Shutdown，避免通道无界增长。
@@ -396,7 +604,8 @@ fn drain_until_shutdown(rx: Receiver<AudioCmd>) {
 }
 
 struct Runtime {
-    player: rodio::Player,
+    /// 当前输出设备。`None` 表示设备不可用（启动失败，或切换到的那张卡打不开）。
+    output: Option<Output>,
     shared: Arc<Shared>,
     /// 电平采集。包在解码器外面，采样透传的同时记下峰值。
     levels: AudioLevels,
@@ -420,7 +629,9 @@ impl Runtime {
             self.sync();
         }
 
-        self.player.stop();
+        if let Some(output) = self.output.as_mut() {
+            output.player.stop();
+        }
         self.shared.set_state(PlaybackState::Stopped);
     }
 
@@ -431,13 +642,10 @@ impl Runtime {
                 start_at_ms,
                 expected_duration_ms,
             } => self.load(source, start_at_ms, expected_duration_ms),
-            AudioCmd::Toggle => {
-                if self.player.is_paused() {
-                    self.resume();
-                } else {
-                    self.pause();
-                }
-            }
+            AudioCmd::Toggle => match self.output.as_ref() {
+                Some(output) if output.player.is_paused() => self.resume(),
+                _ => self.pause(),
+            },
             AudioCmd::Stop => self.stop(),
             AudioCmd::SeekTo(position_ms) => self.seek_to(position_ms),
             AudioCmd::SeekBy(delta_ms) => {
@@ -446,60 +654,59 @@ impl Runtime {
                 self.seek_to(target);
             }
             AudioCmd::SetVolume(volume) => {
-                self.player.set_volume(volume);
+                if let Some(output) = self.output.as_mut() {
+                    output.player.set_volume(volume);
+                }
                 self.shared.set_volume(volume);
             }
+            AudioCmd::UseDevice(device) => self.use_device(device),
             // 在 run_loop 里已处理
             AudioCmd::Shutdown => {}
         }
     }
 
+    /// 换一张声卡输出。
+    ///
+    /// 旧设备连同挂在它上面的播放器一起丢弃（字段顺序保证播放器先析构），
+    /// 然后重新打开。当前这首会停：解码器已经被消费掉了，没法原地续播，
+    /// 由主线程收到 [`AudioEvent::DeviceOpened`] 后按原位置重新装载。
+    fn use_device(&mut self, device: Option<String>) {
+        // 新设备**先打开再顶替**：打不开就原样留着旧的，别把正在放的声音弄没了。
+        // （先丢旧设备会连播放器一起没，一旦新设备也打不开，播放就彻底不可用了。）
+        match Output::open(device.as_deref()) {
+            Ok(output) => {
+                let name = output.name.clone();
+                self.bus
+                    .send(Event::Audio(AudioEvent::DeviceOpened { name }));
+                self.loaded = false;
+                self.finished_reported = true;
+                self.levels.clear();
+                self.output = Some(output);
+            }
+            Err(message) => {
+                tlog!(crate::logger::LEVEL_ERROR, "{message}");
+                self.bus
+                    .send(Event::Audio(AudioEvent::DeviceSwitchFailed(message)));
+            }
+        }
+    }
+
     fn load(&mut self, source: AudioSource, start_at_ms: u64, expected_duration_ms: u64) {
-        self.player.stop();
-        self.player.clear();
+        // 解码器先建好：它跟设备无关，且失败时不用去动设备借用
+        let decoder = match build_decoder(source) {
+            Ok(decoder) => decoder,
+            Err(message) => return self.report_failure(message),
+        };
+
+        let Some(output) = self.output.as_mut() else {
+            return;
+        };
+
+        output.player.stop();
+        output.player.clear();
         self.loaded = false;
         // 装载期间先屏蔽「结束」上报，避免旧的 empty 状态误触发切歌
         self.finished_reported = true;
-
-        // rodio::Decoder 要的是 `Read + Seek`，文件和流式缓冲都满足，
-        // 差别只在「读不到时是 EOF 还是阻塞等下载」。
-        //
-        // 但 `Decoder<File>` 和 `Decoder<StreamingBuffer>` 是两个不同类型，没法放进
-        // 同一个变量——统一装箱成 `Box<dyn Source>`（rodio 为 Box<dyn Source> 实现了
-        // Source，可以照样 append 给播放器）。
-        let decoder: Box<dyn Source<Item = f32> + Send> = match source {
-            AudioSource::File(path) => {
-                let file = match std::fs::File::open(&path) {
-                    Ok(file) => file,
-                    Err(error) => {
-                        self.report_failure(format!(
-                            "打开音频文件 {} 失败：{error}",
-                            path.display()
-                        ));
-                        return;
-                    }
-                };
-                match rodio::Decoder::try_from(file) {
-                    Ok(decoder) => Box::new(decoder),
-                    Err(error) => {
-                        self.report_failure(format!(
-                            "解码 {} 失败：{error}。该文件可能不是有效音频，或格式不受支持。",
-                            path.display()
-                        ));
-                        return;
-                    }
-                }
-            }
-            AudioSource::Stream(buffer) => match rodio::Decoder::new(buffer) {
-                Ok(decoder) => Box::new(decoder),
-                Err(error) => {
-                    self.report_failure(format!(
-                        "解码流失败：{error}。数据可能不是有效音频，或格式不受支持。"
-                    ));
-                    return;
-                }
-            },
-        };
 
         // 解码器报出的时长最准；拿不到就用列表里的时长兜底，保证进度条可用
         let duration_ms = decoder
@@ -516,12 +723,13 @@ impl Runtime {
             .store(start_at_ms, Ordering::Relaxed);
 
         // 包一层电平采集：采样原样透传给播放器，顺带把峰值记进环形缓冲
-        self.player
+        output
+            .player
             .append(LevelMeter::new(decoder, self.levels.clone()));
-        self.player.play();
+        output.player.play();
 
         if start_at_ms > 0 {
-            if let Err(error) = self.player.try_seek(Duration::from_millis(start_at_ms)) {
+            if let Err(error) = output.player.try_seek(Duration::from_millis(start_at_ms)) {
                 tlog!(
                     crate::logger::LEVEL_WARN,
                     "跳转到 {start_at_ms}ms 失败：{error}"
@@ -540,7 +748,9 @@ impl Runtime {
         if !self.loaded {
             return;
         }
-        self.player.pause();
+        if let Some(output) = self.output.as_mut() {
+            output.player.pause();
+        }
         self.shared.set_state(PlaybackState::Paused);
     }
 
@@ -548,15 +758,19 @@ impl Runtime {
         if !self.loaded {
             return;
         }
-        self.player.play();
+        if let Some(output) = self.output.as_mut() {
+            output.player.play();
+        }
         self.shared.set_state(PlaybackState::Playing);
         // 恢复播放后允许再次上报结束
         self.finished_reported = false;
     }
 
     fn stop(&mut self) {
-        self.player.stop();
-        self.player.clear();
+        if let Some(output) = self.output.as_mut() {
+            output.player.stop();
+            output.player.clear();
+        }
         // 清掉残留的柱子，否则会定格在最后一帧，看着像卡住了
         self.levels.clear();
         self.loaded = false;
@@ -570,6 +784,9 @@ impl Runtime {
         if !self.loaded {
             return;
         }
+        let Some(output) = self.output.as_mut() else {
+            return;
+        };
 
         let duration_ms = self.shared.duration_ms();
         let target = if duration_ms > 0 {
@@ -578,7 +795,7 @@ impl Runtime {
             position_ms
         };
 
-        match self.player.try_seek(Duration::from_millis(target)) {
+        match output.player.try_seek(Duration::from_millis(target)) {
             Ok(()) => {
                 self.shared.position_ms.store(target, Ordering::Relaxed);
                 // 跳转后重新允许上报结束
@@ -593,13 +810,17 @@ impl Runtime {
         if !self.loaded {
             return;
         }
+        let Some(output) = self.output.as_mut() else {
+            return;
+        };
 
-        self.shared
-            .position_ms
-            .store(self.player.get_pos().as_millis() as u64, Ordering::Relaxed);
+        self.shared.position_ms.store(
+            output.player.get_pos().as_millis() as u64,
+            Ordering::Relaxed,
+        );
 
-        let paused = self.player.is_paused();
-        let drained = self.player.empty();
+        let paused = output.player.is_paused();
+        let drained = output.player.empty();
 
         if drained && !paused {
             if !self.finished_reported {
@@ -631,6 +852,35 @@ impl Runtime {
         self.finished_reported = true;
         self.shared.set_state(PlaybackState::Stopped);
         self.bus.send(Event::Audio(AudioEvent::Failed(message)));
+    }
+}
+
+/// 建解码器。与输出设备无关，单独抽出来是为了让 `load` 的错误分支不必持着
+/// 设备借用（否则 `report_failure(&mut self)` 会和它冲突）。
+///
+/// rodio::Decoder 要的是 `Read + Seek`，文件和流式缓冲都满足，差别只在「读不到
+/// 时是 EOF 还是阻塞等下载」。但 `Decoder<File>` 和 `Decoder<StreamingBuffer>`
+/// 是两个不同类型，没法放进同一个变量——统一装箱成 `Box<dyn Source>`（rodio 为
+/// `Box<dyn Source>` 实现了 Source，可以照样 append 给播放器）。
+fn build_decoder(source: AudioSource) -> Result<Box<dyn Source<Item = f32> + Send>, String> {
+    match source {
+        AudioSource::File(path) => {
+            let file = std::fs::File::open(&path)
+                .map_err(|error| format!("打开音频文件 {} 失败：{error}", path.display()))?;
+            rodio::Decoder::try_from(file)
+                .map(|decoder| Box::new(decoder) as Box<dyn Source<Item = f32> + Send>)
+                .map_err(|error| {
+                    format!(
+                        "解码 {} 失败：{error}。该文件可能不是有效音频，或格式不受支持。",
+                        path.display()
+                    )
+                })
+        }
+        AudioSource::Stream(buffer) => rodio::Decoder::new(buffer)
+            .map(|decoder| Box::new(decoder) as Box<dyn Source<Item = f32> + Send>)
+            .map_err(|error| {
+                format!("解码流失败：{error}。数据可能不是有效音频，或格式不受支持。")
+            }),
     }
 }
 
