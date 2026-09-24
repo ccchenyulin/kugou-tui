@@ -906,23 +906,52 @@ impl App {
         if let Some(prompt) = self.state.prompt.as_ref() {
             let action_kind = prompt.action;
             match action {
+                // 字符与编辑动作直接转给输入框。
+                //
+                // 这些键已经在 `resolve()` 里按 `KeyMode::TextInput` 解析（见
+                // `AppState::is_editing` 把 prompt 也算作输入态），所以自定义
+                // 键位不会再把字母换成动作；`resolve_text_input` 顺带给出了
+                // Delete / Home / End / 光标移动，不用在这里重复实现。
                 Action::Char(character) => {
-                    // 上面已确认 prompt 存在，但这里不用 expect：契约一旦变化
-                    // 就是整个程序 panic，不划算。取不到就当作没按这个键。
                     if let Some(prompt) = self.state.prompt.as_mut() {
-                        prompt.buffer.push(character);
+                        prompt.buffer.insert(character);
                     }
                 }
                 Action::Backspace => {
                     if let Some(prompt) = self.state.prompt.as_mut() {
-                        prompt.buffer.pop();
+                        prompt.buffer.backspace();
+                    }
+                }
+                Action::Delete => {
+                    if let Some(prompt) = self.state.prompt.as_mut() {
+                        prompt.buffer.delete();
+                    }
+                }
+                Action::CursorLeft => {
+                    if let Some(prompt) = self.state.prompt.as_mut() {
+                        prompt.buffer.move_left();
+                    }
+                }
+                Action::CursorRight => {
+                    if let Some(prompt) = self.state.prompt.as_mut() {
+                        prompt.buffer.move_right();
+                    }
+                }
+                Action::CursorHome => {
+                    if let Some(prompt) = self.state.prompt.as_mut() {
+                        prompt.buffer.move_home();
+                    }
+                }
+                Action::CursorEnd => {
+                    if let Some(prompt) = self.state.prompt.as_mut() {
+                        prompt.buffer.move_end();
                     }
                 }
                 Action::Submit => {
                     let Some(prompt) = self.state.prompt.take() else {
                         return;
                     };
-                    let name = prompt.buffer.trim().to_string();
+                    let name = prompt.buffer.text().trim().to_string();
                     match action_kind {
                         PromptAction::CreateCloudPlaylist => self.create_cloud_playlist(name),
                     }

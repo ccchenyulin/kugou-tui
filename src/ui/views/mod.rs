@@ -32,7 +32,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Clear, Paragraph, Row, Table, Wrap};
 
 use crate::app::state::{AppState, ConfirmAction, Focus, LoginState, PromptState, Tab};
-use crate::keymap::CHEATSHEET;
+use crate::keymap::{CHEATSHEET, display_keys_with_custom};
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{display_width, human_bytes, panel, placeholder, truncate_to_width};
 
@@ -345,18 +345,39 @@ pub fn render_prompt(frame: &mut Frame, prompt: &PromptState, theme: &Theme) {
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
+    if inner.height == 0 || inner.width < 4 {
+        return;
+    }
+
     let line = Line::from(vec![
         Span::styled("> ", theme.title()),
-        Span::styled(prompt.buffer.clone(), theme.body()),
+        Span::styled(
+            truncate_to_width(
+                prompt.buffer.text(),
+                inner.width.saturating_sub(2) as usize,
+            ),
+            theme.body(),
+        ),
     ]);
     frame.render_widget(
         Paragraph::new(vec![
             line,
             Line::from(""),
-            Line::from(Span::styled("Enter 创建 · Esc 取消", theme.dim())),
+            Line::from(Span::styled(
+                "Enter 创建 · Esc 取消 · ←/→ 移光标",
+                theme.dim(),
+            )),
         ]),
         inner,
     );
+
+    // 弹窗是模态的，只要它在就一定处于输入态：把真实终端光标放到插入点，
+    // 否则用户看不到自己删到哪、光标在哪（←/→ 支持了却看不见位置）。
+    let before_cursor = &prompt.buffer.text()[..prompt.buffer.cursor_byte_index()];
+    let offset = display_width(before_cursor);
+    let max_offset = inner.width.saturating_sub(3) as usize;
+    let x = inner.x + 2 + offset.min(max_offset) as u16;
+    frame.set_cursor_position((x, inner.y));
 }
 
 /// 扫码登录弹窗。
@@ -616,19 +637,28 @@ pub fn render_help(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &
     // * 「按键」写死 14，而最长的键名（`Tab / S-Tab`）只有 11 列，白占 3 列。
     //
     // 从数据算的话，加一条更长的说明或键名都不用回来改这里。
+    // 按用户的自定义键位改写一次「按键」列，后续列宽计算与单元格渲染都用它。
+    //
+    // 只算一次（而不是在闭包里逐行调）：列宽和单元格必须基于**同一份**字符串，
+    // 否则自定义键名比默认的长（如 `p` → `ctrl+p`）时列会被撑断。
+    let displayed: Vec<(String, &str, &str)> = CHEATSHEET
+        .iter()
+        .map(|(key, description, group)| (display_keys_with_custom(key), *description, *group))
+        .collect();
+
     // 注意是拿**整张表**算宽度，不是可见的那一段：按可见段算的话，一滚动列宽
     // 就会跟着变，表格左右横跳。
-    let key_col = CHEATSHEET
+    let key_col = displayed
         .iter()
         .map(|(key, _, _)| display_width(key))
         .max()
         .unwrap_or(8);
-    let description_col = CHEATSHEET
+    let description_col = displayed
         .iter()
         .map(|(_, description, _)| display_width(description))
         .max()
         .unwrap_or(20);
-    let group_col = CHEATSHEET
+    let group_col = displayed
         .iter()
         .map(|(_, _, group)| display_width(group))
         .max()
@@ -642,11 +672,11 @@ pub fn render_help(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &
     let show_group =
         inner.width as usize >= key_col + description_col + group_col + COLUMN_SPACING;
 
-    let rows = CHEATSHEET[visible.clone()]
+    let rows = displayed[visible.clone()]
         .iter()
         .map(|(key, description, group)| {
             let mut cells = vec![
-                Cell::from((*key).to_string()),
+                Cell::from(key.clone()),
                 Cell::from((*description).to_string()),
             ];
             if show_group {

@@ -1315,7 +1315,9 @@ impl ConfirmAction {
 #[derive(Debug, Clone)]
 pub struct PromptState {
     pub title: String,
-    pub buffer: String,
+    /// 输入框。用 [`TextInput`] 而不是裸 `String`：光标移动、Delete、Home/End
+    /// 都已在里面实现，弹窗只需把 `Action` 转发过来，不必另写一套。
+    pub buffer: TextInput,
     pub action: PromptAction,
 }
 
@@ -1330,7 +1332,7 @@ impl PromptState {
     pub fn new(title: impl Into<String>, action: PromptAction) -> Self {
         Self {
             title: title.into(),
-            buffer: String::new(),
+            buffer: TextInput::default(),
             action,
         }
     }
@@ -1559,8 +1561,15 @@ impl AppState {
     }
 
     /// 当前是否处于「输入框吃字符」的状态。
+    ///
+    /// 两个输入点都要算进来：搜索框（`search.editing`）和新建歌单的
+    /// 文本弹窗（`prompt`）。之前只算了前者，而 prompt 走的是 `KeyMode::Normal`
+    /// ——于是它在 `resolve` 里拿不到 `Action::Char`，字母全被快捷键表吃走，
+    /// 连 `←`/`→` 也变成了快进快退（prompt 分支不处理就被 `_ => {}` 吞掉，
+    /// 光标根本移不动）。把 prompt 归入输入态之后，两者共用同一套
+    /// `resolve_text_input` 键表（字符、退格、Delete、Home/End、光标、Enter/Esc）。
     pub fn is_editing(&self) -> bool {
-        self.search.editing
+        self.search.editing || self.prompt.is_some()
     }
 
     /// 播放进度，`0.0 ~ 1.0`。时长为 0 时返回 0，避免除零。
@@ -1978,6 +1987,38 @@ mod tests {
         input.insert('\n');
         input.insert('\t');
         assert!(input.is_empty());
+    }
+
+    /// 新建歌单弹窗必须走输入框，而不只是一个裸 `String`。
+    ///
+    /// 理由：弹窗打开时 `resolve` 按 `KeyMode::TextInput` 解析，会产出
+    /// `CursorLeft` / `Delete` / `CursorHome` 这类编辑动作。buffer 若是 `String`，
+    /// 这些动作无处可接〔只能 `_ => {}` 吞掉〕——用户能打字却移不了光标。
+    #[test]
+    fn prompt_keeps_an_editable_buffer() {
+        let mut prompt = PromptState::new("新建歌单", PromptAction::CreateCloudPlaylist);
+
+        for c in "abc".chars() {
+            prompt.buffer.insert(c);
+        }
+        assert_eq!(prompt.buffer.text(), "abc");
+
+        // 光标回移一格再插入：验证插入点真的跟着光标走
+        prompt.buffer.move_left();
+        prompt.buffer.insert('X');
+        assert_eq!(prompt.buffer.text(), "abXc", "插入应发生在光标处");
+
+        // Delete 删光标右边那个字符
+        prompt.buffer.delete();
+        assert_eq!(prompt.buffer.text(), "abX");
+
+        // 退格删光标左边那个字符
+        prompt.buffer.backspace();
+        assert_eq!(prompt.buffer.text(), "ab");
+
+        prompt.buffer.move_home();
+        prompt.buffer.insert('Z');
+        assert_eq!(prompt.buffer.text(), "Zab");
     }
 
     #[test]

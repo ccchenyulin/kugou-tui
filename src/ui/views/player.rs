@@ -17,6 +17,7 @@ use crate::app::queue::PlayQueue;
 use crate::app::state::{AppState, HitTarget};
 use crate::audio::engine::PlaybackState;
 use crate::config::CoverFill;
+use crate::keymap::key_hint_for;
 use crate::ui::theme::{Theme, mix};
 use crate::ui::views::{empty_placeholder, failed_placeholder, loading_placeholder};
 use crate::ui::widgets::{
@@ -371,7 +372,10 @@ pub fn render_queue(
 
     if queue.is_empty() {
         frame.render_widget(
-            empty_placeholder("队列为空 · 在列表里按 a 加入", theme),
+            empty_placeholder(
+                &format!("队列为空 · 在列表里按 {} 加入", key_hint_for("a")),
+                theme,
+            ),
             inner,
         );
         return;
@@ -663,7 +667,10 @@ fn render_account(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &T
         // 早先只区分了前两种，于是接口挂掉时首页会**永远**停在「加载中…」——
         // 用户分不清是失败还是慢，也没有任何可以照做的动作。
         let (text, style) = if !state.logged_in {
-            ("未登录（按 L 扫码）".to_string(), theme.dim())
+            (
+                format!("未登录（按 {} 扫码）", key_hint_for("L")),
+                theme.dim(),
+            )
         } else if let Some(reason) = state.user_info_load.error() {
             (
                 format!("资料载入失败：{reason}"),
@@ -770,7 +777,10 @@ fn render_account(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &T
         } else if claimed_today(state) {
             ("今日 VIP 已领取".to_string(), theme.dim())
         } else {
-            ("领取今日 VIP · 按 V".to_string(), theme.key_hint())
+            (
+                format!("领取今日 VIP · 按 {}", key_hint_for("V")),
+                theme.key_hint(),
+            )
         };
 
         let row = text_area.y + lines.len() as u16;
@@ -835,7 +845,13 @@ pub fn render_home(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &
 
     if state.current.is_none() {
         frame.render_widget(
-            empty_placeholder("还没有播放任何歌曲 · 去搜索页按 / 找一首", theme),
+            empty_placeholder(
+                &format!(
+                    "还没有播放任何歌曲 · 去搜索页按 {} 找一首",
+                    key_hint_for("/")
+                ),
+                theme,
+            ),
             inner,
         );
         return;

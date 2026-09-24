@@ -26,6 +26,7 @@ use ratatui::text::{Line, Span};
 
 use crate::app::state::AppState;
 use crate::audio::engine::PlaybackState;
+use crate::keymap::key_hint_for;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::panel;
 
@@ -230,10 +231,16 @@ fn bar_style(row: usize, height: usize, theme: &Theme) -> Style {
 /// **从头播**；暂停是「停在半路」，按 Space 是**接着播**。混成一句的话，用户
 /// 按下 Space 的下一秒就知道界面在骗人。
 fn render_idle(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+    // 空格键可能在 `[keymap]` 里被改过，所以提示里的键名实时取。
+    let play_pause = key_hint_for("Space");
     let text = match state.playback {
-        PlaybackState::Paused => "已暂停 —— 按 Space 接着播",
-        PlaybackState::Stopped if state.current.is_some() => "已停止 —— 按 Space 从头播",
-        PlaybackState::Stopped => "未在播放 —— 到「歌单」或「排行榜」里按 Enter 播一首",
+        PlaybackState::Paused => &format!("已暂停 —— 按 {play_pause} 接着播"),
+        PlaybackState::Stopped if state.current.is_some() => {
+            &format!("已停止 —— 按 {play_pause} 从头播")
+        }
+        PlaybackState::Stopped => {
+            "未在播放 —— 到「歌单」或「排行榜」里按 Enter 播一首"
+        }
         // 走到这里说明是 Playing 但还没采到频谱（刚起播的那一瞬）。
         // 说「已暂停」或「已停止」都是谎话，那就照实说在采数据
         PlaybackState::Loading | PlaybackState::Playing => "正在播放 —— 频谱数据还没到",

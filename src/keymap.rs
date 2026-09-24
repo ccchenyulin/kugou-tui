@@ -334,6 +334,141 @@ fn parse_key(text: &str) -> Option<(KeyCode, KeyModifiers)> {
     Some((code, modifiers))
 }
 
+/// 帮助面板里的写法 → [`parse_key`] 认的写法。
+///
+/// 面板是给人看的：`←` 比 `left` 直观、`S-Tab` 比 `backtab` 眼熟、`1..9` 一看
+/// 就懂。但这些都不是 `parse_key` 的语法，要拿它们查 `parse_key` 必须先翻译。
+///
+/// 返回 `None` 表示「这个 token 不是一个具体的键」（如 `1..9` 的范围写法），
+/// 调用方应跳过它而不是当成错误。
+pub fn display_token_to_key_name(token: &str) -> Option<String> {
+    // 别名要先判：`←` 也是一个「单字符」，不特殊处理就会被下面那条单字符
+    // 捷径截走，变成 `Char('←')`——而 `resolve_normal` 绑的是 `KeyCode::Left`。
+    if let Some(name) = match token {
+        "←" => Some("left"),
+        "→" => Some("right"),
+        "↑" => Some("up"),
+        "↓" => Some("down"),
+        "S-Tab" => Some("backtab"),
+        _ => None,
+    } {
+        return Some(name.to_string());
+    }
+    // `1..9` 是个范围，不是单个键，没法喂给 parse_key
+    if token.contains("..") {
+        return None;
+    }
+    // 单个字符必须**保留大小写**：`q` 与 `Q` 是两个不同的动作
+    if token.chars().count() == 1 {
+        return Some(token.to_string());
+    }
+    Some(token.to_lowercase())
+}
+
+/// 把面板上那串显示键按用户的自定义键位改写。
+///
+/// 例：面板写 `n / p`，用户把 `prev` 改成了 `N` → 返回 `n / N`；
+/// 没被改过的 token 原样保留。
+///
+/// 为什么需要它：`CHEATSHEET` 是静态表（默认键位），而用户很可能在 `[keymap]`
+/// 里换过键。不改写的话，帮助面板会一本正经地告诉用户去按一个已经不生效的键
+/// ——比不写更糟，因为用户会以为程序坏了。
+///
+/// 每个 token 独立处理：同一个键在两行被用（如 `R`→`r` 的同时 `r`→`m`）
+/// 不会互相干扰，因为这里是「按键找新动作」的单项替换，不做全局重映射。
+pub fn display_keys_with_custom(tokens: &str) -> String {
+    display_keys_with(tokens, CUSTOM.get())
+}
+
+/// [`display_keys_with_custom`] 的内部实现：把键表当参数传，便于单测。
+///
+/// 生产侧的 `CUSTOM` 是 `OnceLock`（启动装一次、之后只读），测试里装不进去；
+/// 把「查表」这一步抽成参数，核心替换逻辑就能直接测，不必为了测试把
+/// 生产代码换成 `RwLock`。`None` 表示没自定义键位。
+fn display_keys_with(
+    tokens: &str,
+    table: Option<&HashMap<(KeyCode, KeyModifiers), Action>>,
+) -> String {
+    let custom_key_for = |action: Action| -> Option<String> {
+        let table = table?;
+        table
+            .iter()
+            .find(|(_, bound)| **bound == action)
+            .map(|((code, modifiers), _)| render_key_name(*code, *modifiers))
+    };
+
+    tokens
+        .split(" / ")
+        .map(|token| {
+            let token = token.trim();
+            if token.is_empty() {
+                return String::new();
+            }
+            // 知道这个 token 在当前键表下是什么动作；不知道就原样显示
+            let Some(action) = resolve_displayed_token(token) else {
+                return token.to_string();
+            };
+            // 用户把这个动作改到别的键上了就显示新键，否则保持原样
+            custom_key_for(action).unwrap_or_else(|| token.to_string())
+        })
+        .collect::<Vec<_>>()
+        .join(" / ")
+}
+
+/// 取某个动作在**当前键位**下该显示成什么键，用于 UI 里的行内提示。
+///
+/// 例：`key_hint_for("R")` → 用户把刷新改到 `r` 了就返回 `"r"`，否则返回 `"R"`。
+///
+/// 为什么提示文字也要走这里：界面里的「按 X 重试」是硬编码的，而用户
+/// 完全可能在 `[keymap]` 里换过键——提示就变成了「叫用户按一个没用的键」，
+/// 比不提示更让人迷惑。传默认键进来，拿回去的是当前生效的那个。
+pub fn key_hint_for(default_key: &str) -> String {
+    display_keys_with_custom(default_key)
+}
+
+/// 面板 token 在默认键表下对应的动作（供反查用）。
+fn resolve_displayed_token(token: &str) -> Option<Action> {
+    let name = display_token_to_key_name(token)?;
+    let (code, modifiers) = parse_key(&name)?;
+    let action = resolve(KeyEvent::new(code, modifiers), KeyMode::Normal);
+    (action != Action::None).then_some(action)
+}
+
+/// 按键 → 面板上显示的名字。与 [`display_token_to_key_name`] 是反方向。
+fn render_key_name(code: KeyCode, modifiers: KeyModifiers) -> String {
+    let base = match code {
+        KeyCode::Left => "←".to_string(),
+        KeyCode::Right => "→".to_string(),
+        KeyCode::Up => "↑".to_string(),
+        KeyCode::Down => "↓".to_string(),
+        KeyCode::BackTab => "S-Tab".to_string(),
+        KeyCode::Tab => "Tab".to_string(),
+        KeyCode::Enter => "Enter".to_string(),
+        KeyCode::Esc => "Esc".to_string(),
+        KeyCode::Backspace => "Backspace".to_string(),
+        KeyCode::Delete => "Delete".to_string(),
+        KeyCode::Insert => "Insert".to_string(),
+        KeyCode::Home => "Home".to_string(),
+        KeyCode::End => "End".to_string(),
+        KeyCode::PageUp => "PgUp".to_string(),
+        KeyCode::PageDown => "PgDn".to_string(),
+        KeyCode::Char(' ') => "Space".to_string(),
+        KeyCode::Char(c) => c.to_string(),
+        KeyCode::F(number) => format!("F{number}"),
+        other => format!("{other:?}"),
+    };
+
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        format!("ctrl+{base}")
+    } else if modifiers.contains(KeyModifiers::ALT) {
+        format!("alt+{base}")
+    } else if modifiers.contains(KeyModifiers::SHIFT) && base.chars().count() > 1 {
+        format!("shift+{base}")
+    } else {
+        base
+    }
+}
+
 /// 查自定义键位。未安装或没命中返回 `None`。
 fn custom_action(key: KeyEvent) -> Option<Action> {
     let table = CUSTOM.get()?;
@@ -350,6 +485,25 @@ pub fn resolve(key: KeyEvent, mode: KeyMode) -> Action {
     // 它是唯一的强制退出通道，被绑走会让用户在异常时出不来。
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return Action::ForceQuit;
+    }
+
+    // 输入态下的「裸字符键」必须让给输入框。
+    //
+    // 为什么这条要排在自定义键位**前面**：自定义表是全局的，不分模式——
+    // 用户按 `seek_forward = "l"` 之后，在搜索框里打 `l` 会触发快进而不是
+    // 输入字母，`m`/`h`/`N` 等同理。默认键表本来是对的（`resolve_text_input`
+    // 里 `Char(c) if !CONTROL => Action::Char(c)` 吃掉所有字符），但自定义表
+    // 先一步拦走了它们，于是“自定义字母键在输入框里全不能打”。
+    //
+    // 只放行**无修饰键**的字符：`ctrl+n` / `alt+1` 这类仍然走自定义表，
+    // 让输入框里的组合键快捷方式继续可用。
+    if mode == KeyMode::TextInput
+        && matches!(key.code, KeyCode::Char(_))
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return resolve_text_input(key);
     }
 
     // 自定义键位优先于默认键表
@@ -604,6 +758,60 @@ mod tests {
         assert_eq!(resolve(forced, KeyMode::TextInput), Action::ForceQuit);
     }
 
+    /// 输入态下，裸字符键必须是「输入字符」，不能被快捷键表抢走。
+    ///
+    /// 曾经踩到的坑：自定义键位表（`[keymap]`）在模式判断**之前**拦截，
+    /// 于是用户把 `seek_forward = "l"`、`prev = "N"` 之后，在搜索框里打
+    /// `l` / `N` 变成了快进和上一首——字母根本打不进去。默认键表本来就没事
+    /// （`resolve_text_input` 用 `Char(c)` 接住所有字符），是自定义表先一步
+    /// 把它们吃掉的。这条测试用默认键表隔着把“输入态优先”这个顺序钉住：
+    /// `l` 在浏览态是歌词，在输入态必须是字符 `l`。
+    #[test]
+    fn text_input_mode_gives_plain_characters_to_the_editor() {
+        for c in ['h', 'l', 'm', 'n', 'N', 'r', 't', 'u', 'w', 'y', 'q', 'j', 'k', '?', '/'] {
+            let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+            assert_eq!(
+                resolve(key, KeyMode::TextInput),
+                Action::Char(c),
+                "输入态下 {c:?} 应当原样插入文本"
+            );
+        }
+    }
+
+    /// 输入态仍要放行带修饰键的绑定：`ctrl+n` 这类不抢字符，照旧生效。
+    #[test]
+    fn text_input_mode_still_allows_modified_keys() {
+        let ctrl_l = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL);
+        // 没有自定义表时控制键落入 `resolve_text_input` 的兵底分支；
+        // 关键是不能被当成字符 `l`（那会把组合键也当输入）。
+        assert_ne!(resolve(ctrl_l, KeyMode::TextInput), Action::Char('l'));
+    }
+
+    /// 编辑动作在输入态下必须是编辑语义，而不是播放控制。
+    ///
+    /// 新建歌单弹窗也归入输入态（`AppState::is_editing`），而它的 buffer 挂在
+    /// `TextInput` 上——靠的就是 `←`/`→` 在这里产出 `CursorLeft`/`CursorRight`，
+    /// 否则左方向键会变成快退、光标根本动不了。
+    #[test]
+    fn text_input_mode_maps_arrows_to_cursor_moves() {
+        let pairs = [
+            (KeyCode::Left, Action::CursorLeft),
+            (KeyCode::Right, Action::CursorRight),
+            (KeyCode::Home, Action::CursorHome),
+            (KeyCode::End, Action::CursorEnd),
+            (KeyCode::Delete, Action::Delete),
+            (KeyCode::Backspace, Action::Backspace),
+        ];
+        for (code, expected) in pairs {
+            let key = KeyEvent::new(code, KeyModifiers::NONE);
+            assert_eq!(
+                resolve(key, KeyMode::TextInput),
+                expected,
+                "输入态下 {code:?} 应当是编辑动作"
+            );
+        }
+    }
+
     /// 10 个数字键必须**全部**能产出 `Action::Digit`，包括 `0`。
     ///
     /// 原先的分支写的是 `'1'..='9'`，把 `0` 漏掉了：侧边栏印着「0 可视化」、
@@ -645,39 +853,12 @@ mod tests {
     /// 自动的，得先把那张表改成数据——代价大于收益，先不划算。
     #[test]
     fn every_shortcut_shown_in_help_is_actually_bound() {
-        /// 面板里的写法 → `parse_key` 认的写法。
-        ///
-        /// 面板是给人看的，`←` 比 `left` 直观，`S-Tab` 比 `backtab` 眼熟。
-        fn parse_as_keymap_knows(token: &str) -> Option<String> {
-            // 别名要先判：`←` 也是「一个字符」，会被下面那条单字符捷径截走，
-            // 于是变成 `Char('←')`——而 `resolve_normal` 绑的是 `KeyCode::Left`。
-            if let Some(name) = match token {
-                "←" => Some("left"),
-                "→" => Some("right"),
-                "↑" => Some("up"),
-                "↓" => Some("down"),
-                "S-Tab" => Some("backtab"),
-                _ => None,
-            } {
-                return Some(name.to_string());
-            }
-            // `1..9` 是个范围，不是单个键，没法喂给 parse_key
-            if token.contains("..") {
-                return None;
-            }
-            // 单个字符必须**保留大小写**：`q` 与 `Q` 是两个不同的动作
-            if token.chars().count() == 1 {
-                return Some(token.to_string());
-            }
-            Some(token.to_lowercase())
-        }
-
         let mut unbound = Vec::new();
         for (keys, description, _) in CHEATSHEET {
             // 用 `" / "` 分隔而不是 `"/"`：条目 12 的键就是 `/`（搜索），
             // 按单斜杠切会把它切成两个空串，等于跳过不查。
             for token in keys.split(" / ").map(str::trim).filter(|t| !t.is_empty()) {
-                let Some(name) = parse_as_keymap_knows(token) else {
+                let Some(name) = display_token_to_key_name(token) else {
                     continue;
                 };
                 let Some((code, modifiers)) = parse_key(&name) else {
@@ -694,6 +875,100 @@ mod tests {
             unbound.is_empty(),
             "帮助面板里这些键其实没绑定：{}",
             unbound.join("、")
+        );
+    }
+
+    /// 没装自定义表时，改写函数必须原样返回，不做任何猜测。
+    ///
+    /// 测试环境里 `CUSTOM` 永远是空的（`OnceLock` 只在 `App::new` 里装一次），
+    /// 这正好是「用户没写 `[keymap]`」那条路；有自定义键位的那条路只能在
+    /// 真实运行里验，单测装不进表。
+    #[test]
+    fn display_keys_are_unchanged_without_custom_bindings() {
+        for (keys, _, _) in CHEATSHEET {
+            assert_eq!(
+                display_keys_with_custom(keys),
+                *keys,
+                "没有自定义键位时「{keys}」不该被改写"
+            );
+        }
+    }
+
+    /// 自定义键位生效时，面板要显示用户实际在按的键。
+    ///
+    /// 这里直接构造键表喂给内部实现（生产侧的 `CUSTOM` 是 `OnceLock`，
+    /// 测试装不进去）；用的是真实配置里那几条，对得上就跑得通。
+    #[test]
+    fn display_keys_follow_custom_bindings() {
+        use std::collections::HashMap;
+        let table: HashMap<(KeyCode, KeyModifiers), Action> = [
+            ((KeyCode::Char('m'), KeyModifiers::NONE), Action::CyclePlaybackMode),
+            ((KeyCode::Char('u'), KeyModifiers::NONE), Action::CycleQuality),
+            ((KeyCode::Char('t'), KeyModifiers::NONE), Action::NewCloudPlaylist),
+            ((KeyCode::Char('N'), KeyModifiers::NONE), Action::Prev),
+            ((KeyCode::Char('r'), KeyModifiers::NONE), Action::Reload),
+            ((KeyCode::Char('h'), KeyModifiers::NONE), Action::SeekBackward),
+            ((KeyCode::Char('l'), KeyModifiers::NONE), Action::SeekForward),
+            ((KeyCode::Char('y'), KeyModifiers::NONE), Action::ToggleLyricPanel),
+            ((KeyCode::Char('w'), KeyModifiers::NONE), Action::ToggleMute),
+        ]
+        .into_iter()
+        .collect();
+
+        let cases = [
+            ("R", "r", "刷新改成小写 r"),
+            ("y", "u", "音质改成 u"),
+            ("N", "t", "新建歌单改成 t"),
+            ("m", "w", "静音改成 w"),
+            ("r", "m", "循环模式改成 m"),
+            ("l", "y", "歌词面板改成 y"),
+            ("n / p", "n / N", "只有上一首被改，下一首保持 n"),
+            ("← / →", "h / l", "快退快进改成 h / l"),
+        ];
+        for (panel, expected, why) in cases {
+            assert_eq!(
+                display_keys_with(panel, Some(&table)),
+                expected,
+                "{why}：面板「{panel}」应显示为「{expected}」"
+            );
+        }
+
+        // 没被改过的条目不能被动到
+        assert_eq!(display_keys_with("Space", Some(&table)), "Space");
+        assert_eq!(display_keys_with("/", Some(&table)), "/");
+    }
+
+    /// `key_hint_for` 同样要在无自定义表时退回默认键。
+    #[test]
+    fn key_hint_falls_back_to_the_default_key() {
+        assert_eq!(key_hint_for("R"), "R");
+        assert_eq!(key_hint_for("Space"), "Space");
+        assert_eq!(key_hint_for("/"), "/");
+    }
+
+    /// 面板 token 的翻译规则：别名、范围、保留大小写。
+    #[test]
+    fn display_tokens_translate_to_keymap_spelling() {
+        assert_eq!(display_token_to_key_name("←").as_deref(), Some("left"));
+        assert_eq!(display_token_to_key_name("S-Tab").as_deref(), Some("backtab"));
+        assert_eq!(display_token_to_key_name("Enter").as_deref(), Some("enter"));
+        // 单个字符保留大小写（`q` 与 `Q` 是两个动作）
+        assert_eq!(display_token_to_key_name("Q").as_deref(), Some("Q"));
+        // 范围写法不是具体按键，必须跳过
+        assert_eq!(display_token_to_key_name("1..9"), None);
+    }
+
+    /// 按键 → 显示名的反方向渲染（供反查自定义键位时展示）。
+    #[test]
+    fn key_names_render_back_to_display_form() {
+        assert_eq!(render_key_name(KeyCode::Left, KeyModifiers::NONE), "←");
+        assert_eq!(render_key_name(KeyCode::BackTab, KeyModifiers::NONE), "S-Tab");
+        assert_eq!(render_key_name(KeyCode::Char(' '), KeyModifiers::NONE), "Space");
+        assert_eq!(render_key_name(KeyCode::Char('r'), KeyModifiers::NONE), "r");
+        assert_eq!(render_key_name(KeyCode::F(1), KeyModifiers::NONE), "F1");
+        assert_eq!(
+            render_key_name(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            "ctrl+n"
         );
     }
 }

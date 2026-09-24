@@ -12,6 +12,7 @@ use crate::api::model::{Artist, Playlist, RankBoard};
 use crate::app::state::{EntryList, SearchPane, SongList};
 use crate::app::update::{artist_subtitle, playlist_subtitle, rank_subtitle};
 use crate::audio::engine::PlaybackState;
+use crate::keymap::key_hint_for;
 use crate::ui::theme::Theme;
 use crate::ui::views::{empty_placeholder, failed_placeholder, loading_placeholder};
 use crate::ui::widgets::{
@@ -62,8 +63,18 @@ pub fn render_song_list(
         return;
     }
     // 失败态优先于空态：没取到和「本来就是空的」是两回事
+    //
+    // 提示里的键名走 `key_hint_for`：刷新默认是 `R`，但用户可能在 `[keymap]`
+    // 里改成了别的键（例如 `r`）。写死的话就会叫用户去按一个已经无效的键。
     if let Some(reason) = list.load.error() {
-        frame.render_widget(failed_placeholder(reason, Some("按 R 重试"), theme), inner);
+        frame.render_widget(
+            failed_placeholder(
+                reason,
+                Some(&format!("按 {} 重试", key_hint_for("R"))),
+                theme,
+            ),
+            inner,
+        );
         return;
     }
     if list.songs.is_empty() {
@@ -193,11 +204,21 @@ fn render_entry_list<T: EntryTitle>(
         return;
     }
     if let Some(reason) = list.load.error() {
-        frame.render_widget(failed_placeholder(reason, Some("按 R 重试"), theme), inner);
+        frame.render_widget(
+            failed_placeholder(
+                reason,
+                Some(&format!("按 {} 重试", key_hint_for("R"))),
+                theme,
+            ),
+            inner,
+        );
         return;
     }
     if list.entries.is_empty() {
-        frame.render_widget(empty_placeholder("暂无数据 · R 重新载入", theme), inner);
+        frame.render_widget(
+            empty_placeholder(&format!("暂无数据 · {} 重新载入", key_hint_for("R")), theme),
+            inner,
+        );
         return;
     }
     let width = inner.width.saturating_sub(1) as usize;
