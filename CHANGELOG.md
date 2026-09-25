@@ -4,6 +4,88 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.5] - 2026-09-25
+
+### 修复
+
+- **网易云下打开歌单里的歌曲一直 404**。歌单列表能正常显示，点进去却报
+  `接口 /playlist/track/all/new 返回状态码 404`。
+
+  原因是歌单「首屏」那条路径**绕过了音源分派**：它为了「先给一页让界面立刻有内容」，
+  直接调了 `ApiClient` 上酷狗的分页方法（`user_playlist_tracks` /
+  `playlist_tracks`，参数是 `listid` + `page` + `pagesize`，端点为
+  `/playlist/track/all/new`）——那是酷狗的端点，网易云服务根本没有。而后台补全
+  那一段是走分派的（`active_source.*_tracks_all`），偏偏首屏失败会直接 `return`，
+  **根本走不到补全**，所以症状就是「一直 404」。
+
+  现在分页也走分派（新增 `SourceKind::playlist_tracks_page` 与 `PlaylistRef`，
+  区分酷狗的「自己的歌单 / 公开歌单」两套端点；网易云两者是同一个端点）。
+
+  顺带把两处重复的翻页实现合并成一个 `playlist_tracks_all`，并删掉只为「首屏补盖
+  来源章」而存在的 `SourceKind::stamp`——首屏走分派之后，盖章由分派层统一负责，
+  那个补丁没有存在理由了。
+
+- **网易云歌单页与歌手页里的歌没有歌手、没有专辑、时长显示 `00:00`**。搜索页却
+  一切正常，所以不容易发现。
+
+  网易云用**两套字段名**描述同一首歌：`/search` 给 `artists` / `album` / `duration`，
+  而 `/playlist/track/all`（歌单、榜单）与 `/artists`（歌手热歌）给 `ar` / `al` / `dt`。
+  解析只认了前者。现在两套都认，并加了单元测试钉住两种布局。
+
+- **网易云云端歌单永远报「尚未登录」**。扫码登录后界面显示「登录成功」，歌单页却
+  一直说未登录——两边看到的状态不一致。
+
+  根因在服务端下发的凭据格式上：`NeteaseCloudMusicApi`（api-enhanced）的
+  `server.js` 用 `/;\s+|(?<!\s)\s+$/g` 切分 `Cookie` 头，**只认「分号 + 空格」**
+  这一种分隔；而它在 `/login/qr/check` 成功时返回的 `cookie` 字段是**整段
+  `Set-Cookie`**（含 `Max-Age` / `Expires` / `Path` 属性，多个 cookie 之间用 `;;`
+  连接）。`;;` 处不切分，于是 `Path=/openapi/clientlog;;MUSIC_U=00CC…` 被当成
+  **一个** `k=v`，键是 `Path`，`MUSIC_U` 压根没进 `req.cookies`。
+
+  也就是说：这串凭据从存进配置文件那一刻起就是坏的，界面上的「已登录」是个谎言。
+
+  现在存入前会先规范化（`util::normalize_cookie_header`：丢属性段、丢空段、
+  按 `"; "` 重连、同名取最后一次），**组装请求头时再过一遍**——后者让存量坏配置
+  无需重新扫码即可自愈。
+
+- **网易云的请求会带上酷狗的 `dfid`**。`dfid` 是酷狗专有的设备指纹（它把 dfid 拼进
+  cookie 交给上游做风控校验），网易云没有这个机制。原先无条件拼进去，等于把一个
+  别家的设备标识发给了它，既没用、又让人分不清这串凭据到底属于谁。现在按
+  `SourceKind::uses_device_fingerprint()` 判断，只发给酷狗。
+
+- **网易云的四个写接口走了会重试的通道**（加歌 / 删歌 / 建歌单 / 删歌单），违反
+  「写操作不重试」的约定：删歌第一次其实成功了、只是响应丢了的话，重发会得到
+  「歌不存在」——用户看到一句失败提示，而歌其实已经删掉了。改用 `*_mutating` 变体。
+
+- **网易云登录后界面弹「获取用户资料失败」**。拉资料走的是酷狗端点（不带 uid），
+  网易云返回 `{"code":400,"message":"参数错误"}`。现在按音源分派：网易云走
+  `/user/detail?uid=`（昵称、头像、等级）。会员信息在网易云没有对应端点
+  （`/user/vip/detail` 是 404），通过新增的 `Capability::vip` 跳过，不再白打接口。
+
+### 文档
+
+- **README 拆分为门面版**（295 → 129 行）：只留一句话 slogan、三个核心卖点、
+  最短安装路径、精简功能表、与 cmus / mpd + ncmpcpp 的对比、以及指向 docs/ 的索引。
+  边下边播原理、环境要求、启动脚本与环境变量、第三方许可分析、完整免责条款分别
+  移入 `docs/DESIGN.md`、`docs/INSTALL.md`、`docs/LICENSES.md`、`docs/DISCLAIMER.md`。
+- 新增 `docs/INSTALL.md`：环境要求、安装路径、API 服务部署（一键 + 手动）、
+  启动器脚本与两张环境变量表、不用常驻服务的 fish 启动函数、装完先做什么。
+- 新增 `docs/LICENSES.md`、`docs/DISCLAIMER.md`。
+- `docs/USER_GUIDE.md` 补「功能一览」完整表，并在网易云一节写明 cookie 的格式要求
+  （手动填写时要写 `k=v; k=v`，不要整段粘贴 `Set-Cookie`）。
+- **改正 `docs/DESIGN.md` 里一处关于内存的错误断言**。原文写「边下边播不额外吃内存，
+  写进环形缓冲、不在内存里拼装整首歌」，实际 `StreamingBuffer` 是**只追加不回收**的
+  字节缓冲（要支持 `Seek` 就得留着已读字节）。实测往缓冲里塞 64 MiB、RSS 就涨 64 MiB
+  （1:1），所以放几十 MB 的 Hi-Res 时内存会按曲目体积线性上涨。已在文档中如实说明，
+  README 的内存对比脚注也加了边界提示。
+
+### 其它
+
+- `scripts/license-stats.py` 改用 `cargo metadata` 取 `license` 字段。原先直接读
+  `$CARGO_HOME/registry/src/<name>-<version>/Cargo.toml`，于是「读不到」的数量随本机
+  缓存漂移——同一份 `Cargo.lock`，一次跑出 26 个读不到、一次跑出 102 个，数字没法复核。
+  现在结果只取决于 `Cargo.lock`：468 个依赖中 455 个宽松许可、13 个 `MPL-2.0`、0 个读不到。
+
 ## [0.3.4] - 2026-09-25
 
 ### 新增
