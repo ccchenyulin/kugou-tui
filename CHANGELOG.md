@@ -4,6 +4,28 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.8] - 2026-09-25
+
+### 修复
+
+- **`kugou-tui-install-api` 装了一堆用不到的开发依赖**。它跑的是 `npm install`
+  （全量），而 `kugou-api` 的自动补装用的是 `npm install --omit=dev`——两处不一致。
+
+  服务运行时是 `node app.js`，上游那 10 个 devDependencies 全是开发工具
+  （`nodemon` / `typescript` / `pkg` / `prettier` / `ts-node` / `tsdown` / `@types/*`），
+  一个都用不到。实测同一台机器：装全量 **311** 个包，只装生产依赖 **120** 个。
+  差的那一半纯粹是白等、白占磁盘。现在两处统一用 `--omit=dev`。
+
+### 文档
+
+- `docs/INSTALL.md` 补上**「路径三：预编译二进制」**。之前只有「从源码构建」与
+  「AUR」两条，非 Arch 用户拿到 Release 里的 tarball 之后没有任何说明。
+  现在写清了解压、把二进制与三个脚本链进 `~/.local/bin`（`scripts/kugou-tui` 与
+  二进制同名，链过去要改名）、以及 `kugou-tui-install-api kugou` 这一步。
+
+> 另外，从本版起 Release 的 tarball 里**同时包含三个脚本与全部文档**（之前只有
+> 二进制与 README）。非 Arch 用户解压后就能把接口服务配起来，不必再回仓库 clone。
+
 ## [0.3.7] - 2026-09-25
 
 ### 新增
