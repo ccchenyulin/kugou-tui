@@ -490,15 +490,34 @@ impl Runtime {
                     }
                 }
             }
-            AudioSource::Stream(stream) => match rodio::Decoder::new(*stream) {
-                Ok(decoder) => Box::new(decoder),
-                Err(error) => {
-                    self.report_failure(format!(
-                        "解码流失败：{error}。数据可能不是有效音频，或格式不受支持。"
-                    ));
-                    return;
+            AudioSource::Stream(stream) => {
+                // 必须把流的总长度告诉解码器，否则**往回 seek 会被拒**。
+                //
+                // Symphonia 要先知道容器总长才肯往回跳（它据此定位索引、算时长）；
+                // 不知道就返回 `SeekError::RandomAccessNotSupported`，rodio 包成
+                // 「Symphonia decoder returned an error」，`try_seek` 直接失败。
+                // 表现就是：首播（边下边播）时按 `h` 没反应、歌照常往前走，
+                // 而 `l`（往前）正常——往前不需要知道总长。
+                // 文件源没这个问题，因为 `Decoder::try_from(file)` 自己从元数据
+                // 填了 `byte_len`（rodio 文档：「auto-sets byte_len from metadata」）。
+                //
+                // 长度取自 HTTP 的 Content-Length（`StreamDownload::content_length`）。
+                // 拿不到就不设——那种情况下退回「不能往回 seek」也比瞎设一个错的强
+                // （rodio 明确警告：byte_len 不对会导致时长算错和 seek 出错）。
+                let mut builder = rodio::Decoder::builder();
+                if let Some(len) = stream.content_length() {
+                    builder = builder.with_byte_len(len);
                 }
-            },
+                match builder.with_data(*stream).build() {
+                    Ok(decoder) => Box::new(decoder),
+                    Err(error) => {
+                        self.report_failure(format!(
+                            "解码流失败：{error}。数据可能不是有效音频，或格式不受支持。"
+                        ));
+                        return;
+                    }
+                }
+            }
         };
 
         // 解码器报出的时长最准；拿不到就用列表里的时长兜底，保证进度条可用

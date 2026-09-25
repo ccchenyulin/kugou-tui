@@ -24,6 +24,16 @@
   而且不再随码率增长。顺带把「内存 + 磁盘写两份」也去掉了，落盘的就是缓存条目本身。
 - 预缓冲从 128 KB 调到 256 KB（约 16 秒音频），开播前多等一点、少一次卡顿。
 
+- **首播时快退不生效（按了 `h` 歌照常往前走）**：往回 seek 被 Symphonia 拒
+  （`SeekError::RandomAccessNotSupported`，rodio 包成「Symphonia decoder
+  returned an error」），快进 `l` 与已缓存的歌都正常——**往前不需要知道流的
+  总长，往回需要**。上游的内存缓冲没这个问题；换成落盘读取后，流的长度不再
+  由 `Decoder::try_from(文件)` 从元数据自动取得（流式源走的是 `Decoder::new`，
+  它不设 `byte_len`）。现在建流式解码器时显式 `with_byte_len()`，长度取自
+  HTTP 的 Content-Length（`StreamDownload::content_length`）；拿不到就不设，
+  退回「不能往回 seek」而不是拿一个错的长度去算（rodio 警告 `byte_len` 不对
+  会导致时长与 seek 都出错）。
+
 ## [0.3.3] - 2026-09-24
 
 ### 新增
