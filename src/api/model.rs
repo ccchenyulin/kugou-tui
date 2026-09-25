@@ -46,8 +46,19 @@ pub struct Song {
     pub cover: Option<String>,
     /// 酷狗版权标记：`8` 通常表示可完整播放，`0` 表示需要 VIP 或已下架。
     ///
-    /// 用 `Option` 是因为不少接口根本不返回这个字段（例如排行榜的 `/rank/audio`），
-    /// 把「没给」和「给了 0」混为一谈会让客户端对一堆正常歌曲误报版权受限。
+    /// 用 `Option` 是因为有些接口不返回这个字段，**把「没给」和「给了 0」
+    /// 混为一谈会让客户端对一堆正常歌曲误报版权受限**。
+    ///
+    /// # 排行榜那个 `privilege_download` 为什么不算数
+    ///
+    /// 早先这里写的是「排行榜不返回这个字段」，实测**不准确**：`/rank/audio`
+    /// 的条目里有 `privilege_download`，其 `.privilege` 取 `0` / `8` / `10`
+    /// （TOP500 里恰好 2 首为 `0`，且与 `deprecated.pay_type == 0` 精确对应）。
+    ///
+    /// 但它**没有采用**：键名里的 `download` 说明它管的是「能否下载」，
+    /// 与「能否播放」不是一回事；而取值 `0` 究竟意味着不可播还是仅不可下载，
+    /// 在未登录的探测环境下无法证实（`/song/url` 一律回 `20028 需要验证`）。
+    /// 拿不准就不猜——取链失败时给出的原因比一个可能错的「版权受限」标签更有用。
     pub privilege: Option<i64>,
     /// 歌单条目 id，仅从歌单接口返回，云端删歌时需要。
     pub file_id: Option<i64>,
@@ -677,8 +688,20 @@ fn normalize_duration(raw: u64) -> u64 {
 
 /// 在 `data` 下寻找歌曲数组。
 ///
+/// 两种布局都认：`data` 本身是数组（`/artist/audios`），或 `data` 是个对象、
+/// 歌曲数组挂在某个命名键下（`songs` / `songlist` / …）。
 /// 候选键按「最可能」到「最兜底」排列，最后再扫描 `data` 本身。
 pub fn extract_songs(data: &Value) -> Vec<Song> {
+    // 少数接口（实测 `/artist/audios`）的 `data` **本身就是歌曲数组**，没有再包一层
+    // 命名键——歌单是 `data.songs`、排行榜是 `data.songlist`，只有它是裸数组。
+    // 不先认这一种，那些接口一首歌都取不到（歌手页点进去永远是空的）。
+    if let Some(array) = data.as_array() {
+        let songs: Vec<Song> = array.iter().filter_map(song_from_json).collect();
+        if !songs.is_empty() {
+            return songs;
+        }
+    }
+
     const CANDIDATES: &[&str] = &[
         "songs",
         "list",
@@ -1146,5 +1169,58 @@ mod tests {
         assert_eq!(format_duration_ms(0), "00:00");
         assert_eq!(format_duration_ms(227_000), "03:47");
         assert_eq!(format_duration_ms(3_723_000), "1:02:03");
+    }
+
+    /// `/artist/audios` 的 `data` **本身就是歌曲数组**，没有再包一层命名键
+    /// （歌单是 `data.songs`、排行榜是 `data.songlist`，只有这个接口是裸数组）。
+    ///
+    /// 旧实现只按 `songs` / `list` / … 这些键在 `data` 里找，数组本身永远命中不了，
+    /// 于是 `artist_tracks` 恒返回空——「点进歌手却一首歌都没有」。
+    /// 字段照抄真实响应（`audio_name` / `author_name` / `timelength` / `privilege`）。
+    #[test]
+    fn extract_songs_accepts_a_bare_array() {
+        let data = json!([
+            {
+                "hash": "FF81E148CE0E2E809AC759ADF9A8E109",
+                "audio_name": "红尘误此生",
+                "author_name": "宋晓峰",
+                "timelength": 225000,
+                "privilege": 8,
+                "album_id": "123456",
+                "album_audio_id": 655142342,
+                "album_name": "红尘误此生"
+            },
+            {
+                "hash": "187D31F57E1B299AFA2880635B20F69A",
+                "audio_name": "茶汤",
+                "author_name": "郁可唯",
+                "timelength": 308819,
+                "privilege": 10,
+                "album_id": "654321",
+                "album_audio_id": 50570,
+                "album_name": "茶汤"
+            }
+        ]);
+
+        let songs = extract_songs(&data);
+        assert_eq!(songs.len(), 2, "data 本身是数组时必须能解析出歌曲");
+        assert_eq!(songs[0].name, "红尘误此生");
+        assert_eq!(songs[0].hash, "FF81E148CE0E2E809AC759ADF9A8E109");
+        assert_eq!(songs[0].duration_ms, 225_000);
+        assert_eq!(songs[0].singer_text(), "宋晓峰");
+        assert_eq!(songs[0].album_audio_id, 655_142_342);
+        assert_eq!(songs[1].name, "茶汤");
+    }
+
+    /// 裸数组里的元素若解析不出歌曲，不能因此挡住后面「命名键」的布局。
+    #[test]
+    fn extract_songs_falls_through_a_non_song_array() {
+        let data = json!({
+            "tags": [{"id": 1, "name": "流行"}],
+            "songs": [{"hash": "H", "audio_name": "真歌"}]
+        });
+        let songs = extract_songs(&data);
+        assert_eq!(songs.len(), 1);
+        assert_eq!(songs[0].name, "真歌");
     }
 }

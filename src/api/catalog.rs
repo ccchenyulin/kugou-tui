@@ -31,8 +31,8 @@ use serde_json::Value;
 
 use crate::api::client::ApiClient;
 use crate::api::model::{
-    Artist, Playlist, RankBoard, Song, artist_from_json, extract_songs, pick_i64, pick_string,
-    playlist_from_json, rank_board_from_json,
+    Artist, Playlist, RankBoard, Song, artist_from_json, extract_songs, pick_array, pick_i64,
+    pick_string, playlist_from_json, rank_board_from_json,
 };
 use crate::api::{data_of, extract_list};
 use crate::error::{AppError, Result};
@@ -187,11 +187,7 @@ impl ApiClient {
                 ],
             )
             .await?;
-        Ok(extract_list(
-            &root,
-            &["info", "list", "singer_list", "authors"],
-            artist_from_json,
-        ))
+        Ok(collect_artists(&root))
     }
 
     /// 歌手单曲。`sort`: `hot` 热门 / `new` 最新。
@@ -880,6 +876,40 @@ fn collect_playlists(root: &Value, assume_own: bool) -> Vec<Playlist> {
     )
 }
 
+/// 从 `/artist/lists` 的响应里收集歌手。
+///
+/// 这个接口**按首字母分组**返回：`data.info` 是 28 个 `{title, singer: [...]}`
+/// 的组（热门 + A–Z + `#`），歌手在组内的 `singer` 数组里，实测四类筛选
+/// （全部 / 华语 / 欧美 / 日韩）都是这个形状，合计约 1050 人。
+///
+/// **组包装本身不是歌手**——直接交给 `artist_from_json` 会一组都解析不出来，
+/// 然后掉进 `extract_list` 的兜底扫描，只命中第一组（热门 60 人），
+/// A–Z 全表被静默丢掉，同时每加载一次就刷一条「请核对字段布局」的警告。
+/// 所以先把各组的 `singer` 展平再解析。
+fn collect_artists(root: &Value) -> Vec<Artist> {
+    let data = data_of(root);
+    let mut artists = Vec::new();
+    for group in pick_array(data, &["info", "list", "singer_list"]) {
+        // 空组是常态（实测 U / V 组就是空的），跳过即可，不影响其它组
+        for entry in pick_array(group, &["singer", "singers", "list"]) {
+            if let Some(artist) = artist_from_json(entry) {
+                artists.push(artist);
+            }
+        }
+    }
+    if !artists.is_empty() {
+        return artists;
+    }
+
+    // 扁平布局：条目本身就是歌手。保留原来的候选键扫描（含兜底扫描），
+    // 上游若改回扁平结构或换了容器键名，这里仍然能兜住。
+    extract_list(
+        root,
+        &["info", "list", "singer_list", "authors"],
+        artist_from_json,
+    )
+}
+
 /// 从 `/song/url` 的响应里挖出直链。
 ///
 /// 这个接口的布局尤其不统一，实测见过四种：
@@ -1228,5 +1258,93 @@ mod tests {
         assert!(!VIPER_QUALITIES.contains(&"high"));
         assert!(!VIPER_QUALITIES.contains(&"128"));
         assert!(!VIPER_QUALITIES.contains(&"320"));
+    }
+
+    /// `/artist/lists` **按首字母分组**返回：`data.info` 是 28 个
+    /// `{title, singer: [...]}` 的组（热门 + A–Z + #），歌手在组内的 `singer` 数组里。
+    ///
+    /// 旧实现把组包装直接交给 `artist_from_json`——它认不出 `singer` 这层，
+    /// 于是每一组都解析失败，最后掉进「兜底扫描」只命中**第一组**，
+    /// 其余 27 组（A–Z 全表）被静默丢掉。线上日志里因此刷了 19 条
+    /// 「响应未命中任何候选键……请核对字段布局」的警告。
+    #[test]
+    fn collects_artists_from_grouped_response() {
+        // 结构照抄真实响应：热门组 + 两个字母组
+        let root = json!({
+            "data": {
+                "info": [
+                    {
+                        "title": "热门",
+                        "singer": [
+                            {"singerid": 3520, "singername": "周杰伦", "fanscount": 25694934,
+                             "imgurl": "http://singerimg.kugou.com/uploadpic/softhead/{size}/a.jpg"},
+                            {"singerid": 3060, "singername": "薛之谦", "fanscount": 20017619}
+                        ]
+                    },
+                    {
+                        "title": "A",
+                        "singer": [
+                            {"singerid": 2, "singername": "阿杜", "fanscount": 1665651}
+                        ]
+                    },
+                    {
+                        "title": "B",
+                        "singer": [
+                            {"singerid": 3, "singername": "BEYOND", "fanscount": 100}
+                        ]
+                    }
+                ]
+            },
+            "errcode": 0,
+            "status": 1
+        });
+
+        let artists = collect_artists(&root);
+        let names: Vec<&str> = artists.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["周杰伦", "薛之谦", "阿杜", "BEYOND"],
+            "必须把每一组都收下，而不是只收第一组"
+        );
+        assert_eq!(artists[0].id, 3520);
+        assert_eq!(artists[0].follower_count, Some(25_694_934));
+    }
+
+    /// 分组里可能出现空数组（实测 U / V 组就是空的），不能因此中断。
+    #[test]
+    fn collects_artists_skips_empty_groups() {
+        let root = json!({
+            "data": {
+                "info": [
+                    {"title": "热门", "singer": [{"singerid": 1, "singername": "甲"}]},
+                    {"title": "U", "singer": []},
+                    {"title": "V", "singer": []},
+                    {"title": "W", "singer": [{"singerid": 2, "singername": "乙"}]}
+                ]
+            }
+        });
+        let names: Vec<String> = collect_artists(&root)
+            .into_iter()
+            .map(|a| a.name)
+            .collect();
+        assert_eq!(names, vec!["甲", "乙"]);
+    }
+
+    /// 扁平布局（条目本身就是歌手）仍要能解析——上游可能改回去。
+    #[test]
+    fn collects_artists_from_flat_response() {
+        let root = json!({
+            "data": {
+                "info": [
+                    {"singerid": 3520, "singername": "周杰伦"},
+                    {"singerid": 3060, "singername": "薛之谦"}
+                ]
+            }
+        });
+        let names: Vec<String> = collect_artists(&root)
+            .into_iter()
+            .map(|a| a.name)
+            .collect();
+        assert_eq!(names, vec!["周杰伦", "薛之谦"]);
     }
 }
