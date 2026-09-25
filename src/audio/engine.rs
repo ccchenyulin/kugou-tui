@@ -858,8 +858,8 @@ impl Runtime {
 /// 建解码器。与输出设备无关，单独抽出来是为了让 `load` 的错误分支不必持着
 /// 设备借用（否则 `report_failure(&mut self)` 会和它冲突）。
 ///
-/// rodio::Decoder 要的是 `Read + Seek`，文件和流式缓冲都满足，差别只在「读不到
-/// 时是 EOF 还是阻塞等下载」。但 `Decoder<File>` 和 `Decoder<StreamingBuffer>`
+/// rodio::Decoder 要的是 `Read + Seek`，文件和流式下载都满足，差别只在「读不到
+/// 时是 EOF 还是阻塞等下载」。但 `Decoder<File>` 和 `Decoder<StreamDownload<..>>`
 /// 是两个不同类型，没法放进同一个变量——统一装箱成 `Box<dyn Source>`（rodio 为
 /// `Box<dyn Source>` 实现了 Source，可以照样 append 给播放器）。
 fn build_decoder(source: AudioSource) -> Result<Box<dyn Source<Item = f32> + Send>, String> {
