@@ -40,14 +40,29 @@ release 产物约 **7.0 MiB**（7,317,024 字节；`opt-level="z"` + fat LTO + s
 paru -S kugou-tui          # 或 yay -S kugou-tui
 ```
 
-包会带上主程序、启动器脚本与文档；第三方 API 服务的源码装到 `/usr/share`，
-依赖在首次运行时装进用户目录（不污染 `/usr`，也不需要常驻服务）。
+包会把**整套东西**装上，装完直接 `kugou-tui` 就能听：
+
+- 主程序、`kugou-api`、`kugou-tui-install-api`、`kugou-tui-launch` 四个可执行文件；
+- **第三方接口服务连同它的生产依赖**，放在 `/usr/share/kugou-tui/api/kugou/`
+  ——所以不需要再跑一次 `kugou-tui-install-api` 等 npm install。
+
+> 之所以能把服务打进包里，是因为它**不往自己目录写任何文件**（源码里没有
+> `writeFile` / `mkdirSync`），从只读目录跑完全正常——这条是实测过的。
+> 服务只读、依赖随包，`/usr` 不会被 npm 污染，也不需要常驻进程。
+>
+> 网易云那份服务不在包里（它只在用网易云音源时才需要），仍然走
+> `kugou-tui-install-api netease` 拉取。
 
 > `cargo install kugou-tui` 同理——需要先发布到 crates.io，目前未发布。
+> 另外它只能装上主程序，没有那套脚本与服务。
 
 ---
 
 ## 部署第三方 API 服务
+
+**装过 AUR 包的话这一整节都不用做**：包已经把酷狗那份服务连同生产依赖放在
+`/usr/share/kugou-tui/api/kugou/`，启动器会优先用它。下面这套流程是给
+「从源码跑」和「要装网易云那份服务」的人准备的。
 
 **本项目不含任何接口实现**，数据全部来自第三方的
 [KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi)——它是**独立仓库**，
@@ -145,7 +160,8 @@ KUGOU_STANDARD_PORT=3100 KUGOU_LITE_PORT=3101 kugou-api restart
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `KUGOU_API_DIR` | `$HOME/KuGouMusicApi` | 服务所在目录 |
+| `KUGOU_API_DIR` | `/usr/share/kugou-tui/api/kugou`（软件包提供时）或 `$HOME/KuGouMusicApi` | 服务所在目录 |
+| `KUGOU_API_SYSTEM_ROOT` | `/usr/share/kugou-tui/api` | 软件包放服务的位置。改它是给非 `/usr` 前缀的打包用的，普通用户不用管 |
 | `KUGOU_API_LOG_DIR` | `$XDG_CACHE_HOME/kugou-tui` | 日志与 PID 文件目录 |
 | `KUGOU_API_HOST` | `127.0.0.1` | 监听地址 |
 | `KUGOU_STANDARD_PORT` | `3000` | 标准版端口 |
