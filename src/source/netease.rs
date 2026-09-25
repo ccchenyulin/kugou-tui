@@ -1,19 +1,33 @@
-//! 网易云音乐音源（NeteaseCloudMusicApi）。
+//! 网易云音乐音源（NeteaseCloudMusicApi / api-enhanced）。
 //!
 //! 部署方式与 KuGouMusicApi 一致：`git clone` + `npm install` + `node app.js`，
 //! 默认 `http://127.0.0.1:3002`。
 //!
-//! # 与酷狗的差异
+//! # 与酷狗最大的差异：登录态归谁保管
 //!
-//! 只实现了「搜索 / 播放直链 / 歌词 / 封面」四项核心能力。歌单广场、榜单、歌手
-//! 目录与云端歌单同步不提供——第三方服务没有对应的登录态，硬凑出来的结果只会
-//! 误导用户。UI 通过 [`crate::source::Capability`] 感知这一点，不会去调它们。
+//! 酷狗的 token 由**客户端**保存，每次请求带上即可。网易云是**服务端**保管
+//! cookie——`/login/qr/check` 成功时把它放在响应体的 `cookie` 字段里，客户端必须
+//! 接住、存好、之后每次请求带回去。服务端进程一换（重启、换端口），身份就只剩
+//! 客户端手里这一份了。
+//!
+//! ⚠️ 那个字段是**整段 `Set-Cookie` 响应头**（含 `Max-Age` / `Expires` / `Path`
+//! 属性，多个 cookie 之间用 `;;` 连接），而服务端读回时只认「分号 + 空格」这一种
+//! 分隔（`server.js` 里那条 `/;\s+|(?<!\s)\s+$/g`）。原样回传会让 `MUSIC_U` 被
+//! 并进前一个属性段里，服务端就认不出登录态——界面显示「登录成功」，云端歌单却
+//! 永远报「尚未登录」。所以存入前必须过一遍
+//! [`crate::util::normalize_cookie_header`]。
+//!
+//! # 已实现的能力
+//!
+//! 搜索、播放直链、歌词（含译文）、封面、扫码登录、歌单广场、歌手、排行榜，
+//! 以及云端歌单的读（列表 + 曲目）与写（加歌 / 删歌 / 新建 / 删除）。
+//!
+//! 不提供会员信息：服务端没有对应端点，见 [`crate::source::Capability::vip`]。
 //!
 //! # 验证状态
 //!
-//! **本模块未经真实服务验证**（当前环境只部署了 KuGouMusicApi）。字段布局依据
-//! NeteaseCloudMusicApi 的公开文档编写，解析全部走防御式取值，缺字段不会 panic。
-//! 首次使用时请对照日志核对。
+//! 端点与响应形状已对着真实服务核对（`api-enhanced` 4.30.1）。解析仍全部走
+//! 防御式取值：缺字段只丢那一条，不会 panic。
 
 use serde_json::Value;
 
@@ -295,9 +309,8 @@ pub async fn login_qr_check(client: &ApiClient, key: &str) -> Result<crate::api:
     let data = data_of(&root);
     let code = pick_i64(data, &["code"]).unwrap_or(800);
 
-    // ⚠️ 网易云的登录态由**服务端**持有（NeteaseCloudMusicApi 自己管理 cookie），
-    // 授权成功时响应里没有 token / userid 可给客户端。因此这里 token 留 None，
-    // 业务层据此把「已登录」标记为该音源的状态，而不是去写 config.cookie。
+    // 授权成功时响应里没有 token / userid 可给客户端——身份是服务端下发的
+    // 那串 cookie，所以这里 token 留 None，由上层改走 `apply_server_cookie` 那条路。
     let status = match code {
         800 => QrStatus::Expired,
         801 => QrStatus::Waiting,
@@ -307,9 +320,12 @@ pub async fn login_qr_check(client: &ApiClient, key: &str) -> Result<crate::api:
         _ => QrStatus::Expired,
     };
 
-    // 登录态由服务端持有：凭证在响应的 `cookie` 里（含 MUSIC_U）。
-    // 必须接住并交给上层存起来，否则本次「登录成功」只是个谎言。
-    let cookie = pick_string(&root, &["cookie"]).or_else(|| pick_string(data, &["cookie"]));
+    // 身份在响应的 `cookie` 字段里（含 MUSIC_U）。必须接住并交给上层存起来，
+    // 否则本次「登录成功」只是个谎言；而且**得先规范化**——服务端给的是一整段
+    // `Set-Cookie`，原样回传它自己认不出来（见本模块头部说明）。
+    let cookie = pick_string(&root, &["cookie"])
+        .or_else(|| pick_string(data, &["cookie"]))
+        .and_then(|raw| crate::util::normalize_cookie_header(&raw));
 
     Ok(QrCheck {
         status,
@@ -375,6 +391,41 @@ async fn current_uid(client: &ApiClient) -> Result<Option<String>> {
         });
 
     Ok(uid.map(|id| id.to_string()))
+}
+
+/// 取当前登录用户的资料。
+///
+/// 必须先有 uid：`/user/detail` 不带 uid 只会得到 `{"code":400,"message":"参数错误"}`，
+/// 而客户端手上没有 uid（见 [`current_uid`]），所以这里先问一次 `/login/status`。
+///
+/// `duration_min` 留空：这个接口给的 `listenSongs` 是**听过的歌曲数**，不是时长。
+/// 把「376 首」当成「376 分钟」显示出去，比不显示更糟。
+pub async fn user_detail(client: &ApiClient) -> Result<crate::api::cloud::UserInfo> {
+    let Some(uid) = current_uid(client).await? else {
+        return Err(crate::error::AppError::Other(
+            "网易云尚未登录，请先按 L 选择「网易云」扫码".to_string(),
+        ));
+    };
+
+    let root = client
+        .get_json_uncached("/user/detail", &[("uid", uid)])
+        .await?;
+    check_api_code("/user/detail", &root)?;
+
+    // 实测形状：顶层给 `level` / `listenSongs`，昵称与头像在 `profile` 里
+    let data = data_of(&root);
+    let profile = data.get("profile");
+
+    Ok(crate::api::cloud::UserInfo {
+        nickname: profile
+            .and_then(|profile| pick_string(profile, &["nickname"]))
+            .unwrap_or_default(),
+        pic: profile
+            .and_then(|profile| pick_string(profile, &["avatarUrl", "picUrl"]))
+            .filter(|url| !url.trim().is_empty()),
+        grade: pick_u32(data, &["level"]),
+        duration_min: None,
+    })
 }
 
 /// 取当前用户的云端歌单。
@@ -465,19 +516,28 @@ pub async fn user_playlist_tracks_all(client: &ApiClient, list_id: i64) -> Resul
 //
 // 另外这里用的是**歌曲 id**（存在 `Song::hash` 里），不是酷狗歌单条目的
 // `fileid`：网易云的歌单里一首歌就是按歌曲 id 定位的。
+//
+// 四个写接口都走 `get_json_uncached_mutating`（**不重试**）。重试的前提是「同一
+// 请求重发不会改变结果」，写操作不满足：删歌第一次其实成功了、只是响应丢了的话，
+// 重发会得到「歌不存在」——用户看到一句失败提示，而歌其实已经删掉了。
+// 这与酷狗侧的约定一致，理由详见 `api/client.rs` 的 `get_json_mutating`。
 // ==================================================================
 
 /// 检查 NeteaseCloudMusicApi 的业务状态码。
 ///
-/// 它用 `code` 表示成败（`200` 成功），失败时给 `message`。**必须检查**：
-/// 这类写接口在参数不对时也会返回 HTTP 200，只看 HTTP 状态会误判成成功。
-fn check_write_result(path: &str, root: &Value) -> Result<()> {
+/// 它用 `code` 表示成败（`200` 成功），失败时给描述。**必须检查**：它在参数不对时
+/// 也返回 HTTP 200，只看 HTTP 状态会误判成成功——写接口上就是「界面提示已收藏、
+/// 歌单里却没有」；读接口上则是把失败当成空数据，界面上看起来像「你确实没有歌单」。
+///
+/// 与酷狗那个同名概念（[`crate::api::ApiClient::check_write_result`]）不是一回事：
+/// 酷狗用 `error_code`，网易云用 `code`，两边的码值也各自独立。
+fn check_api_code(path: &str, root: &Value) -> Result<()> {
     let code = root.get("code").and_then(Value::as_i64).unwrap_or(200);
     if code == 200 {
         return Ok(());
     }
-    // 先取 \`msg\`：NeteaseCloudMusicApi 失败时 \`message\` 常是没用的「系统错误」，
-    // 具体原因在 \`msg\` 里（例如「需要登录」）。取错字段用户就只能对着废话猜。
+    // 先取 `msg`：NeteaseCloudMusicApi 失败时 `message` 常是没用的「系统错误」，
+    // 具体原因在 `msg` 里（例如「需要登录」）。取错字段用户就只能对着废话猜。
     let message = pick_string(root, &["msg", "message"])
         .unwrap_or_else(|| "服务端未提供错误描述".to_string());
     Err(crate::error::AppError::Api {
@@ -506,12 +566,12 @@ pub async fn add_tracks_to_playlist(
             .collect::<Vec<_>>()
             .join(",");
         let root = client
-            .get_json_uncached(
+            .get_json_uncached_mutating(
                 "/playlist/track/add",
                 &[("pid", list_id.to_string()), ("ids", ids)],
             )
             .await?;
-        check_write_result("/playlist/track/add", &root)?;
+        check_api_code("/playlist/track/add", &root)?;
         written += chunk.len();
     }
     Ok(written)
@@ -534,30 +594,30 @@ pub async fn remove_tracks_from_playlist(
         .collect::<Vec<_>>()
         .join(",");
     let root = client
-        .get_json_uncached(
+        .get_json_uncached_mutating(
             "/playlist/track/delete",
             &[("id", list_id.to_string()), ("ids", ids)],
         )
         .await?;
-    check_write_result("/playlist/track/delete", &root)?;
+    check_api_code("/playlist/track/delete", &root)?;
     Ok(songs.len())
 }
 
 /// 新建歌单，返回新歌单的 id（服务端没给时返回 `None`）。
 pub async fn create_playlist(client: &ApiClient, name: &str) -> Result<Option<i64>> {
     let root = client
-        .get_json_uncached("/playlist/create", &[("name", name.to_string())])
+        .get_json_uncached_mutating("/playlist/create", &[("name", name.to_string())])
         .await?;
-    check_write_result("/playlist/create", &root)?;
+    check_api_code("/playlist/create", &root)?;
     Ok(pick_i64(&root, &["id"]).or_else(|| pick_i64(data_of(&root), &["id"])))
 }
 
 /// 删除（或取消收藏）歌单。
 pub async fn delete_playlist(client: &ApiClient, list_id: i64) -> Result<()> {
     let root = client
-        .get_json_uncached("/playlist/delete", &[("id", list_id.to_string())])
+        .get_json_uncached_mutating("/playlist/delete", &[("id", list_id.to_string())])
         .await?;
-    check_write_result("/playlist/delete", &root)?;
+    check_api_code("/playlist/delete", &root)?;
     Ok(())
 }
 
@@ -722,7 +782,7 @@ mod tests {
     fn write_result_rejects_non_200_code() {
         let root = json!({"code": 301, "message": "系统错误", "msg": "需要登录"});
         let error =
-            check_write_result("/playlist/track/add", &root).expect_err("301 必须被当成失败");
+            check_api_code("/playlist/track/add", &root).expect_err("301 必须被当成失败");
         // 具体原因在 msg 里，别给用户那句没用的「系统错误」
         assert!(
             error.user_hint().contains("需要登录"),
@@ -734,13 +794,13 @@ mod tests {
     #[test]
     fn write_result_accepts_200() {
         let root = json!({"code": 200, "id": 123});
-        check_write_result("/playlist/create", &root).expect("200 表示成功");
+        check_api_code("/playlist/create", &root).expect("200 表示成功");
     }
 
     /// 响应里没有 code 字段时按成功处理（部分接口只给数据）。
     #[test]
     fn write_result_tolerates_missing_code() {
         let root = json!({"playlist": {"id": 1}});
-        check_write_result("/playlist/create", &root).expect("缺 code 视为成功");
+        check_api_code("/playlist/create", &root).expect("缺 code 视为成功");
     }
 }

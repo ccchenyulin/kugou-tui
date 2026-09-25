@@ -1847,7 +1847,7 @@ impl App {
         let profile = self.state.config.sources.profile(kind);
         crate::api::ApiClient::new(
             &profile.api_base,
-            profile.cookie_header(),
+            profile.cookie_header(kind),
             self.state.config.proxy.as_deref(),
         )
     }
@@ -2871,10 +2871,13 @@ impl App {
 
         let api = self.api.clone();
         let bus = self.bus.clone();
+        // 走音源分派：网易云的资料在 `/user/detail?uid=` 里，而且得先问出 uid；
+        // 酷狗的是同一个端点但不带参数。写死哪一个都会让另一边报错。
+        let source = self.state.config.active_source_kind();
 
         self.state.user_info_load.begin();
         self.runtime.spawn(async move {
-            match api.user_detail().await {
+            match source.user_detail(&api).await {
                 Ok(info) => bus.emit(Loaded::UserInfo(Box::new(info))),
                 // 早先这里只写日志，于是接口挂掉时首页永远显示「加载中…」——
                 // 用户分不清是失败还是慢。失败也得走事件，面板才有出口。
@@ -2912,7 +2915,11 @@ impl App {
     }
 
     pub fn fetch_vip_status(&mut self) {
-        if !self.state.logged_in {
+        // 会员接口只有酷狗有。网易云没有对应端点（`/user/vip/detail` 是 404），
+        // 去请求只会白打一次接口，所以先问能力再决定。
+        if !self.state.logged_in
+            || !self.state.config.active_source_kind().capability().vip
+        {
             self.state.vip_info = None;
             return;
         }
