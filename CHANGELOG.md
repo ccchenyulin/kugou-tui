@@ -4,6 +4,20 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.6] - 2026-09-25
+
+### 修复
+
+- **启动器脚本装到系统目录后找不到客户端二进制**。`scripts/kugou-tui` 与
+  `scripts/kugou-api` 都按「脚本所在目录 `/../target/release/kugou-tui`」定位二进制
+  ——软链到 `~/.local/bin` 没问题（`readlink -f` 会解析回仓库），但脚本被**拷贝到**
+  `/usr/bin` 时那条路径会变成 `/usr/target/...`，必然不存在。这是发行版打包一定会踩的
+  坑（准备 AUR 包时发现：装完 `kugou-tui` 直接报「找不到可执行文件」）。
+
+  现在两处都加了 `PATH` 回退：仓库里的构建产物优先，找不到就用 `PATH` 上的
+  `kugou-tui`。`KUGOU_TUI_BIN` / `KUGOU_API_BIN` 仍然可以显式指定；都没找到时的报错
+  信息也说清了「从源码跑要先编译」与「装过包该设哪个变量」。
+
 ## [0.3.5] - 2026-09-25
 
 ### 修复
