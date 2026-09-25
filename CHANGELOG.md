@@ -4,6 +4,31 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.9] - 2026-09-25
+
+### 文档
+
+- `CONTRIBUTING.md` 新增**「发版」**一节，把今天连发几版踩到的坑写成步骤：
+  工具脚本要在打 tag **之前**提交、AUR 的 `pkgver`/`sha256sums` 跟着改且
+  `.SRCINFO` 必须重新生成、上游提交号钉在**两处**、**发完要下载回来核对**
+  （0.3.7 的 tarball 漏脚本就是因为只看本地目录）。
+- 修 `CONTRIBUTING.md` 两处过时内容：「release 约 5.4 MiB、常驻约 13 MiB」→ 实测
+  7.0 MiB / 14–17 MiB；指向 README「实测修正过的认知」表的引用——那张表其实在
+  `docs/DESIGN.md` 的「接口适配」，这个引用在拆分 README **之前**就是坏的。
+- 「解析上游响应要宽容」补一条：**同一个上游可能有多套字段布局**，别只认调试时
+  看到的那一套（网易云的 `artists`/`album`/`duration` 与 `ar`/`al`/`dt`），
+  每种都要有单元测试钉住。
+- 修 `docs/LICENSES.md` 里一条**安装后会断的链接**：文档装在
+  `/usr/share/doc/kugou-tui/docs/`，而许可按 Arch 惯例在 `/usr/share/licenses/`
+  下，`../LICENSE` 必然失效。改成写明路径，两种场合都读得懂。
+
+### 其它
+
+- **首次发布到 crates.io**（`cargo install kugou-tui` 从此可用）。
+  注意它**只装主程序**：没有那三个脚本、也没有接口服务，装完仍需按
+  [docs/INSTALL.md](docs/INSTALL.md) 把服务配起来。要「装完即用」请用 AUR 包
+  或 Release 里的 tarball。
+
 ## [0.3.8] - 2026-09-25
 
 ### 修复
