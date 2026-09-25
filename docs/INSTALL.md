@@ -150,7 +150,7 @@ KUGOU_STANDARD_PORT=3100 KUGOU_LITE_PORT=3101 kugou-api restart
 | `KUGOU_API_HOST` | `127.0.0.1` | 监听地址 |
 | `KUGOU_STANDARD_PORT` | `3000` | 标准版端口 |
 | `KUGOU_LITE_PORT` | `3001` | 概念版端口 |
-| `KUGOU_API_BIN` | `<仓库>/target/release/kugou-tui` | 客户端二进制路径 |
+| `KUGOU_API_BIN` | `<仓库>/target/release/kugou-tui`，不存在则用 `PATH` 上的 `kugou-tui` | 客户端二进制路径 |
 | `KUGOU_API_SKIP_BUILD` | 空 | 设为 `1` 跳过编译预检 |
 | `KUGOU_API_CONFIG` | `$XDG_CONFIG_HOME/kugou-tui/api.env` | 配置文件路径 |
 
@@ -161,7 +161,7 @@ KUGOU_STANDARD_PORT=3100 KUGOU_LITE_PORT=3101 kugou-api restart
 | `KUGOU_API_BASE` | **不设置** | 设了才给程序传 `--api-base`，并拿它探活。不设时让程序**读配置里选中的音源**——否则每次都被强行拉回标准版 `:3000`，用概念版的人得按 `v` 切两次才回得去 |
 | `KUGOU_API_DIR` | `$HOME/KuGouMusicApi` | 服务所在目录，用于自动拉起 |
 | `KUGOU_API_LOG` | `$XDG_CACHE_HOME/kugou-tui/api.log` | 服务日志路径 |
-| `KUGOU_TUI_BIN` | 自动探测 | 手动指定二进制路径。**装到 `~/.local/bin` 之外时要用它**：脚本默认按 `脚本所在目录/../target/release/kugou-tui` 找二进制 |
+| `KUGOU_TUI_BIN` | 自动探测 | 手动指定二进制路径。默认依次找：`脚本所在目录/../target/release/kugou-tui`（软链到 `~/.local/bin` 时走这条）→ `PATH` 上的 `kugou-tui`（包管理器装到 `/usr/bin` 时走这条） |
 | `API_PORT` | `3000` | 自动拉起服务时用的端口 |
 
 ### 不用常驻服务的启动方式（fish）

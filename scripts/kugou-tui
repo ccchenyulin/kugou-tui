@@ -34,18 +34,25 @@ case "$ACTIVE_SOURCE" in
     ;;
 esac
 
-# 定位二进制：优先环境变量，其次脚本所在仓库的 target/release。
+# 定位二进制：优先环境变量，其次脚本所在仓库的 target/release，最后 PATH。
+#
 # 用 readlink -f 解析软链接，这样把脚本软链到 ~/.local/bin 也能找对地方。
+# 但脚本被**装到**（而不是软链到）`/usr/bin` 时，`../target/release` 会指向
+# `/usr/target/...`，必然不存在——发行版打包走的就是这条路，所以要有 PATH 这一层。
 if [ -n "${KUGOU_TUI_BIN:-}" ]; then
   BIN="$KUGOU_TUI_BIN"
 else
   self_path=$(readlink -f -- "${BASH_SOURCE[0]}")
   BIN="$(dirname -- "$self_path")/../target/release/kugou-tui"
+  if [ ! -x "$BIN" ]; then
+    BIN="$(command -v kugou-tui 2>/dev/null || printf '%s' "$BIN")"
+  fi
 fi
 
 if [ ! -x "$BIN" ]; then
   printf '\033[31m找不到可执行文件：%s\033[0m\n' "$BIN" >&2
-  printf '先编译：cd "%s" && cargo build --release\n' "$(dirname -- "$BIN")/.." >&2
+  printf '从源码跑的话先编译：cargo build --release\n' >&2
+  printf '已经装过包的话，用 KUGOU_TUI_BIN 指向 kugou-tui 的实际路径。\n' >&2
   exit 1
 fi
 
