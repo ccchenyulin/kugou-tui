@@ -22,13 +22,6 @@
   `/usr/share/doc/kugou-tui/docs/`，而许可按 Arch 惯例在 `/usr/share/licenses/`
   下，`../LICENSE` 必然失效。改成写明路径，两种场合都读得懂。
 
-### 其它
-
-- **首次发布到 crates.io**（`cargo install kugou-tui` 从此可用）。
-  注意它**只装主程序**：没有那三个脚本、也没有接口服务，装完仍需按
-  [docs/INSTALL.md](docs/INSTALL.md) 把服务配起来。要「装完即用」请用 AUR 包
-  或 Release 里的 tarball。
-
 ## [0.3.8] - 2026-09-25
 
 ### 修复

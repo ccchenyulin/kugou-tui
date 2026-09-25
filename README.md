@@ -32,7 +32,8 @@
 
 ### 安装
 
-目前从源码构建（AUR 包与 crates.io 发布**计划中，尚未上架**）：
+从源码构建（AUR 包**计划中，尚未上架**；不想装 Rust 工具链的话，用
+[Release 里的预编译包](https://github.com/sijin-xb/kugou-tui/releases)，它带着脚本与文档，解压即用）：
 
 ```bash
 git clone https://github.com/sijin-xb/kugou-tui.git

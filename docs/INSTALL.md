@@ -53,8 +53,8 @@ paru -S kugou-tui          # 或 yay -S kugou-tui
 > 网易云那份服务不在包里（它只在用网易云音源时才需要），仍然走
 > `kugou-tui-install-api netease` 拉取。
 
-> `cargo install kugou-tui` 同理——需要先发布到 crates.io，目前未发布。
-> 另外它只能装上主程序，没有那套脚本与服务。
+> `cargo install kugou-tui` 这条路**暂时不走**——crate 尚未发布到 crates.io。
+> 而且它只能装上主程序，没有那套脚本与服务；想省掉编译的话请用下面的「路径三」。
 
 ### 路径三：预编译二进制（GitHub Release）
 
