@@ -171,10 +171,22 @@ step "打发行包"
 ./scripts/make-release-tarball | tail -3
 tarball="dist/$pkgname-$version-x86_64-unknown-linux-gnu.tar.gz"
 [ -f "$tarball" ] || die "没找到发行包 $tarball"
-# 发行包必须自足：非 Arch 用户拿不到 AUR 包，只能靠它把接口服务配起来
+# 发行包必须自足：非 Arch 用户拿不到 AUR 包，只能靠它把接口服务配起来。
+#
+# ⚠️ 先把清单落到文件再逐项核对，**不要写成 `tar -tzf … | grep -q`**。
+# `grep -q` 命中即退出，而 tar 是边解析边往 stdout 写的，它会因 SIGPIPE 而死
+# （退出码 141）；`set -o pipefail` 于是把整条管道判为失败——检查会**假报
+# 「发行包里缺 X」**，而包其实是好的。实测撞过：`${PIPESTATUS[*]}` 是 `141 0`。
+# （`sed … | head -n 1` 那种不受影响：sed 的输出只有一行、一次性写出，不会半路被杀。）
+listing=$(mktemp -t kugou-tui-listing-XXXXXX)
+tar -tzf "$tarball" > "$listing"
 for want in "scripts/kugou-api" "scripts/kugou-api-install" "scripts/kugou-tui" "docs/INSTALL.md"; do
-  tar -tzf "$tarball" | grep -q "$want" || die "发行包里缺 $want —— 它必须自足"
+  if ! grep -q -- "$want" "$listing"; then
+    rm -f "$listing"
+    die "发行包里缺 $want —— 它必须自足"
+  fi
 done
+rm -f "$listing"
 ok "发行包自足（含三个脚本与文档）"
 
 # ==================================================================
@@ -297,7 +309,9 @@ retry curl -fsSL -o "$verify_dir/$asset" \
 downloaded_sha=$(sha256sum "$verify_dir/$asset" | cut -d' ' -f1)
 [ "$downloaded_sha" = "$release_sha" ] ||
   die "下载回来的资产 sha256 与本地不一致：本地 $release_sha，远端 $downloaded_sha"
-tar -tzf "$verify_dir/$asset" | grep -q "scripts/kugou-api-install" ||
+# 同样不能写成 `tar … | grep -q`，理由见上面「打发行包」那段的注释
+tar -tzf "$verify_dir/$asset" > "$verify_dir/listing.txt"
+grep -q "scripts/kugou-api-install" "$verify_dir/listing.txt" ||
   die "下载回来的发行包里没有 scripts/kugou-api-install"
 ok "资产一致，且含脚本"
 rm -rf "$verify_dir"
