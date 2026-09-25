@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""统计 `Cargo.lock` 里各依赖的许可分布，用来复核 README 里那张表。
+"""统计依赖的许可分布，用来复核 `docs/LICENSES.md` 里那张表。
 
 用法（在仓库根目录）：
 
@@ -7,56 +7,61 @@
 
 # 口径
 
-* 数的是 `Cargo.lock` 里的**全部**包，不区分目标平台。
-* `license` 字段从各依赖解包后的 `Cargo.toml` 读，所以**本机没下载过的包读不到**
-  ——主要是 Windows / Android / macOS 专属包（`winapi*`、`windows*`、`jni`、
-  `ndk-sys`、`objc2-*`）。脚本会把它们单独列出来，而不是当成「宽松许可」混进去。
+* 数的是**全部**依赖，不区分目标平台（`Cargo.lock` 里有什么就数什么）。
+* `license` 字段取自 `cargo metadata`。**不依赖本机是否解包过某个 crate**——
+  早先这里直接读 `$CARGO_HOME/registry/src/<name>-<version>/Cargo.toml`，于是
+  「读不到」的数量会随本机缓存漂移：同一份 `Cargo.lock`，一次跑出 26 个读不到、
+  一次跑出 102 个，数字根本没法复核。换成 `cargo metadata` 后，结果只取决于
+  `Cargo.lock`。
 * 只做**分类统计**，不判断许可兼容性。真要严格审查请用 `cargo-deny` / `cargo about`。
 
-依赖变动后重跑一次，把输出里的数字同步到 README 即可。
+依赖变动后重跑一次，把输出里的数字同步到 `docs/LICENSES.md`。
 """
 
 from __future__ import annotations
 
-import glob
-import os
+import json
 import pathlib
 import re
+import subprocess
 import sys
-import tomllib
 from collections import Counter
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
-LOCK_PATH = REPO_ROOT / "Cargo.lock"
 
-# cargo 把解包后的依赖放在 $CARGO_HOME/registry/src/<registry>/<name>-<version>/
-REGISTRY_SRC = os.path.expanduser(
-    os.environ.get("CARGO_HOME", "~/.cargo") + "/registry/src/*"
-)
-
-# 仓库自己不算第三方依赖
-SELF_NAME = "kugou-tui"
-
-# 判定「弱著佐权」的许可标识
+# 判定「弱著佐权」的许可标识。只有**纯** MPL-2.0 才算；
+# `MIT OR MPL-2.0` 这类可选双许可按宽松算（整体按 MIT 用即可）。
 COPYLEFT = "MPL-2.0"
 
 
-def find_manifest(name: str, version: str) -> pathlib.Path | None:
-    for root in glob.glob(REGISTRY_SRC):
-        candidate = pathlib.Path(root) / f"{name}-{version}" / "Cargo.toml"
-        if candidate.exists():
-            return candidate
-    return None
+def load_packages() -> list[dict]:
+    """用 `cargo metadata` 取全部依赖。
+
+    `--locked` 是为了**不改动 `Cargo.lock`**：这个脚本只读不写，
+    万一 lock 与 `Cargo.toml` 不一致，宁可报错也不要它顺手改掉。
+    """
+    result = subprocess.run(
+        ["cargo", "metadata", "--format-version", "1", "--locked"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(
+            "cargo metadata 失败，先确认在仓库根目录且 cargo 可用：\n"
+            f"{result.stderr.strip()}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    metadata = json.loads(result.stdout)
+    members = set(metadata.get("workspace_members", []))
+    # 本仓库自己不算第三方依赖
+    return [pkg for pkg in metadata["packages"] if pkg["id"] not in members]
 
 
 def main() -> int:
-    if not LOCK_PATH.exists():
-        print(f"找不到 {LOCK_PATH}，请在仓库根目录运行", file=sys.stderr)
-        return 1
-
-    with open(LOCK_PATH, "rb") as handle:
-        lock = tomllib.load(handle)
-    packages = lock.get("package", [])
+    packages = load_packages()
 
     permissive = 0
     copyleft: list[str] = []
@@ -65,24 +70,16 @@ def main() -> int:
     license_texts: Counter[str] = Counter()
 
     for pkg in packages:
-        name, version = pkg["name"], pkg["version"]
-        if name == SELF_NAME:
-            continue
-
-        manifest = find_manifest(name, version)
-        license_text = ""
-        if manifest is not None:
-            with open(manifest, "rb") as handle:
-                license_text = tomllib.load(handle).get("package", {}).get("license", "") or ""
+        name = pkg["name"]
+        license_text = (pkg.get("license") or "").strip()
 
         if not license_text:
-            unreadable.append(f"{name}-{version}")
+            unreadable.append(f"{name}-{pkg['version']}")
             continue
 
         license_texts[license_text] += 1
 
-        # 纯 MPL-2.0 才算弱著佐权；`MIT OR MPL-2.0` 这类可选双许可按宽松算
-        if license_text.strip() == COPYLEFT:
+        if license_text == COPYLEFT:
             copyleft.append(name)
         else:
             permissive += 1
@@ -91,17 +88,14 @@ def main() -> int:
             gpl_mentions.append(f"{name} ({license_text})")
 
     total = permissive + len(copyleft) + len(unreadable)
-    print(f"Cargo.lock 共 {len(packages)} 个包（含 {SELF_NAME} 自己）")
-    print(f"第三方依赖 {total} 个：")
+    print(f"依赖共 {total} 个（不含本仓库自己）")
     print(f"  宽松许可（含可选双许可）    {permissive}")
     print(f"  弱著佐权 {COPYLEFT}          {len(copyleft)}  -> {sorted(copyleft)}")
-    print(f"  本机读不到 license          {len(unreadable)}")
-    print()
-    print("读不到的（平台专属，Linux 上不会下载）：")
+    print(f"清单里没有 license 字段     {len(unreadable)}")
     for item in unreadable:
         print(f"  {item}")
     print()
-    print("含 GPL / LGPL 字样（都是可选双许可，不构成著佐权义务）：")
+    print("含 GPL / LGPL 字样（若为可选双许可，则不构成著佐权义务）：")
     for item in gpl_mentions:
         print(f"  {item}")
     print()

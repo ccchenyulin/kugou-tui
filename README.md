@@ -1,254 +1,120 @@
 # kugou-tui
 
-酷狗音乐的命令行 TUI 播放器：Rust 编写，单个二进制，常驻内存约 15 MiB。
+**在终端里听酷狗：逐字歌词、真频谱，常驻 15 MiB。**
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Rust](https://img.shields.io/badge/rust-1.86%2B-orange.svg)
 ![Platform](https://img.shields.io/badge/platform-linux-lightgrey.svg)
 
-![kugou-tui 界面：歌单广场、正在播放、歌词与播放队列](assets/screenshot-0.3.3.jpg)
+### 为什么做这个
 
-界面全部由程序渲染（终端文本 + 半块字符画），截图取自真实使用场景。
+我大部分时间在终端里。想听首歌，得切窗口、开客户端、看广告、被推荐一堆不想听的东西——
+而我当时只想放一首刚想到的歌。cmus 和 mpd 很好，但它们放的是**我硬盘上的文件**；
+我的歌在云端，在酷狗的曲库里。
 
-> 侧边栏在矮终端里装不下全部状态块（30 行时只能显示「连接」），最后一行会写明
-> 还有哪些没显示（形如 `… 另有 播放 / 缓存`）。**能放几行放几行**，
-> 不会静默裁掉。高度够时不出现这一行。
+所以写了这个：一个终端里的酷狗播放器。没有窗口，没有广告，没有推荐流。
+敲 `2` 搜歌，`Enter` 播放，`L` 扫码登录把云端歌单接进来。
+它只做「找到歌 → 放出来 → 把歌词和频谱画好看」这一件事。
 
----
+![kugou-tui：歌单广场、正在播放、逐字歌词与播放队列](assets/screenshot-0.3.3.jpg)
 
-## 项目简介
+*主界面：左侧导航，中间逐字歌词，右侧播放队列与封面。画面全部由程序渲染（终端文本 + 半块字符画），截图取自真实使用场景。*
 
-`kugou-tui` 是一个终端里的酷狗音乐播放器。它**不是**音乐下载器，也不提供任何音乐内容——
-它只做一件事：把 [KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi)（第三方逆向封装的
-酷狗接口服务）返回的数据，用一套键盘优先的终端界面呈现出来，并调用系统的音频设备播放。
+### 三个核心卖点
 
-需要说明的两点：
+1. **逐字歌词**。解析酷狗 KRC 的**每字时间戳**，按每个字自己的进度在底色与强调色之间
+   插值——边界字是渐变过渡，仿 Apple Music 的推进效果；非当前行按距离线性变暗。
+   不是「整行一起亮」那种 LRC。
+2. **真频谱**。对音频线程采集的真实采样做 FFT，按对数分频到 40Hz–16kHz，
+   贝斯亮左、镲片亮右。有真实音频输入，不是装饰性动画。
+3. **酷狗曲库 + 云端歌单**。搜歌即播，不用先有本地文件；歌单广场、歌手、排行榜、
+   个人云端歌单都在；登录二维码直接画在终端里（`L`），不需要手机以外的任何工具。
 
-- **依赖本地 API 服务**。本程序不含任何接口实现，必须先在**本机**运行 KuGouMusicApi
-  （默认 `http://127.0.0.1:3000`）。它只与本机的这个服务通信。
-- **边下边播**。取到直链后先攒够开头（128 KB，约 8 秒音频）就开播，剩下的在后台
-  继续下，同时落盘缓存。所以首次播放的等待是「攒开头」而不是「下完整首」；同一首
-  第二次播放直接命中缓存，零等待。解码由 [rodio](https://github.com/RustAudio/rodio)
-  完成，读指针跑到还没下到的位置时会阻塞等数据——表现是声音停一下，而不是提前结束。
+### 安装
 
-## 特性
+目前从源码构建（AUR 包与 crates.io 发布**计划中，尚未上架**）：
+
+```bash
+git clone https://github.com/sijin-xb/kugou-tui.git
+cd kugou-tui && cargo build --release
+```
+
+装完第一次运行：
+
+```bash
+./scripts/kugou-api-install kugou   # 拉取并配置酷狗接口服务（约 1 分钟，只需一次）
+./scripts/kugou-tui                 # 开播
+```
+
+> **本程序不含任何接口实现**，数据全部来自本机的第三方服务
+> [KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi)。上面那条
+> `kugou-api-install` 就是把「clone → 装依赖 → 配端口」做完，之后启动器会在每次开播前
+> 按需把服务拉起来。想手动来一遍、要装启动器到 `~/.local/bin`、或要部署网易云音源，
+> 见 **[docs/INSTALL.md](docs/INSTALL.md)**。
+
+### 功能总览
 
 | 分类 | 能力 |
 |---|---|
 | 浏览 | 歌单广场、歌手列表（可按地区筛选）、排行榜、个人云端歌单 |
-| 检索 | 单曲搜索（登录后可搜）；结果按服务端相关性排序，`M` 加载更多 |
-| 播放 | 播放 / 暂停 / 上一首 / 下一首 / 进度跳转（±5 秒）/ 音量（±5%）/ 静音 |
-| 播放模式 | 顺序、列表循环、单曲循环、随机 |
-| 歌词 | 逐字歌词（KRC）、译文 / 音译（多语言轨）、卡拉 OK 式居中滚动、时间偏移微调（±100 ms） |
-| 逐字高亮 | 解析 KRC 的每字时间戳，按**每个字自己的进度**在底色与强调色之间插值——边界字是渐变过渡，仿 Apple Music 的推进；非当前行按距离线性变暗 |
-| 可视化 | **真频谱**：对音频线程采集的采样做 FFT 后按对数分频（40Hz–16kHz），贝斯亮左、镲片亮右；非随机动画 |
-| 播放队列 | 追加单曲（`a`）、插播下一首（`i`）、整列表加入（`A`）、移除单曲（`x`）、清空（`X`） |
-| 云端歌单 | 收藏单曲（`s`）、整个队列同步（`S`）、从歌单移除（`d`）、删除歌单（`D`）、新建歌单（`N`） |
-| 登录 | **应用内扫码**（`L`），二维码直接画在终端里，无需额外工具 |
-| 概念版 VIP | **每日自动领取**（启动时 / 登录后 / 切到概念版时各试一次，一天只领一次），`V` 手动重试；`我的资料`里显示领取状态，鼠标点那一行也行 |
-| 输入 | 键盘 + 鼠标（点击选中、双击激活、滚轮、点进度条跳转） |
-| 缓存 | 音频落盘缓存 + LRU 上限回收；`C` 一键清空 |
-| **网络** | **瞬时故障自动重试**：连接被拒 / 连接被重置 / 响应体截断 / 408 / 429 / 5xx 会重试（共 3 次尝试，间隔 300ms → 900ms）；超时、业务错误码、其它 4xx 不重试。写操作（收藏 / 删歌单 / 领 VIP）一律不重试 |
-| 外观 | 6 套主题（冷蓝 / 石墨 / 日落 / 森林 / 霓虹 / 暗紫），各有真彩与 16 色两版 |
-| 设置页 | `,` 打开：主题、音质、播放模式、刷新间隔、歌词偏移、每页条数、缓存上限、16 色、歌词面板、侧边导航、下载目录、封面铺满方式、**输出设备**；改完立即落盘 |
-| 单曲下载 | `W` 把当前播放的歌曲下载到设置里选的目录（默认 `~/Music`） |
-| **桌面集成** | **MPRIS**：注册为 `org.mpris.MediaPlayer2.kugou-tui`，状态栏/媒体控件/`playerctl` 可直接控制并显示封面；**系统托盘**：注册为 `org.kde.StatusNotifierItem` 并带右键菜单（播放/暂停、上一首、下一首、最小化/显示窗口——后者仅 niri），Quickshell / waybar / KDE 等状态栏会显示图标，悬停显示当前曲目 |
+| 检索 | 单曲搜索，结果按服务端相关性排序，`M` 加载更多 |
+| 播放 | 播放/暂停、上下首、±5 秒跳转、音量、静音；顺序 / 列表循环 / 单曲循环 / 随机 |
+| 歌词 | 逐字高亮（KRC）、译文与音译、卡拉 OK 式居中滚动、±100 ms 偏移微调 |
+| 可视化 | 真频谱：FFT + 对数分频，贝斯亮左、镲片亮右 |
+| 播放队列 | 追加（`a`）、插播下一首（`i`）、整列表加入（`A`）、移除（`x`）、清空（`X`） |
+| 云端歌单 | 收藏单曲（`s`）、整个队列同步（`S`）、增删歌单（`N` / `D`） |
+| 登录 | 应用内扫码（`L`），二维码直接画在终端里 |
+| 桌面集成 | MPRIS（`playerctl` 可控）+ 系统托盘（右键菜单，Quickshell / waybar / KDE） |
+| 输入与外观 | 键盘 + 鼠标；6 套主题（真彩 / 16 色各一版）；音频落盘缓存 + LRU 回收 |
 
-支持的音频格式由 rodio 决定：**MP3、FLAC、M4A/MP4、OGG(Vorbis)、WAV**。
-可选的播放音质见[配置文件](docs/CONFIGURATION.md)的 `quality`。
+完整能力（含网络重试策略、概念版 VIP 自动领取等）见
+[docs/USER_GUIDE.md](docs/USER_GUIDE.md#功能一览)。
 
----
+### 和 cmus / mpd + ncmpcpp 比
 
-## 文档
+|  | **kugou-tui** | cmus | mpd + ncmpcpp |
+|---|---|---|---|
+| **曲库** | **酷狗在线曲库**：搜歌即播，不需要本地文件 | 只放本地文件 | 只放本地文件（无内置在线源） |
+| **逐字歌词** | **支持**：KRC 每字时间戳，按字推进的渐变高亮 | 整行 LRC | 整行 LRC |
+| **频谱** | **内置**，零配置 | 无 | 有，但要额外配 mpd 的 fifo 音频输出 |
+| **云端歌单** | **支持**：酷狗账号的云端歌单，终端内扫码登录 | 不支持 | 不支持 |
+| **常驻内存** | 14.2–16.9 MiB | 社区常见量级 10–25 MiB | 合计常见量级 15–30 MiB |
+| **形态** | 单进程、单二进制（约 7.0 MiB） | 单进程 | 客户端 / 服务端分离（mpd 常驻 + 前端） |
+| **需要自建服务** | 需要（本机跑第三方 API 服务，启动器会按需拉起） | 不需要 | 需要（mpd） |
 
-完整说明拆成了几份，各管一块：
+> kugou-tui 的内存是**本机实测**（112×34 终端，读 `/proc/<pid>/status` 的 `VmRSS`，
+> 四个场景 14.2–16.9 MiB，方法与明细见 [docs/DESIGN.md](docs/DESIGN.md)）；
+> cmus 与 mpd 两行是**社区常见量级，未在本机实测**，仅供数量级参考。
+>
+> ⚠️ 这几个数是在**播放小体积曲目**时测的。边下边播的字节缓冲只追加不回收，
+> 所以放几十 MB 的 Hi-Res 时内存会按曲目体积线性上涨（实测 1:1，原因见
+> [docs/DESIGN.md](docs/DESIGN.md#边下边播)）。
+>
+> 一句话：**cmus / mpd 是「放你有的」，kugou-tui 是「放你想听的」。**
+
+### 文档
 
 | 文档 | 内容 |
 |---|---|
+| [docs/INSTALL.md](docs/INSTALL.md) | 环境要求、三种安装路径、API 服务部署、启动脚本与环境变量 |
 | [KEYBINDINGS.md](KEYBINDINGS.md) | 全部快捷键、鼠标操作、歌曲右键菜单 |
-| [docs/USER_GUIDE.md](docs/USER_GUIDE.md) | 界面布局、音源配置、播放队列、登录与云端歌单、桌面集成 |
+| [docs/USER_GUIDE.md](docs/USER_GUIDE.md) | 功能一览、界面布局、音源配置、播放队列、登录与云端歌单、桌面集成 |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | 命令行参数、配置文件每一项、会话持久化 |
 | [docs/FAQ.md](docs/FAQ.md) | 常见问题与排查 |
-| [docs/DESIGN.md](docs/DESIGN.md) | 线程模型、低资源占用、接口适配 |
+| [docs/DESIGN.md](docs/DESIGN.md) | 线程模型、边下边播原理、低资源占用、接口适配 |
+| [docs/LICENSES.md](docs/LICENSES.md) | 第三方依赖许可分析 |
+| [CHANGELOG.md](CHANGELOG.md) | 更新日志 |
 
+### 许可与免责
 
-## 环境要求
+[MIT](LICENSE) © 2026 kugou-tui contributors。
 
-| 项目 | 要求 |
-|---|---|
-| Rust 工具链 | **1.86+**（edition 2024）。下限由 `ratatui-image` 11.x 决定，见 `Cargo.toml` |
-| Node.js | 用于运行 KuGouMusicApi（上游 `engines` 要求 **12+**） |
-| 音频输出 | 任意 rodio 支持的后端（Linux 上为 ALSA/PulseAudio） |
-| 终端 | 支持 UTF-8；**真彩（24 位）** 才能看到完整的主题配色与逐字渐变，老终端可加 `--basic-color` 退回 16 色 |
-| 操作系统 | **Linux**（在 CachyOS 上实测）。macOS 未验证但理论上可行；**Windows 不行**——`zbus` 在 Windows 上要求 `async-io` 特性，而这里按 `default-features = false` 只开了 `tokio` |
-| D-Bus（可选） | 有 session bus 时自动启用 MPRIS 与系统托盘；没有（纯 tty）则跳过，**不影响播放** |
-| 系统托盘（可选） | 需要状态栏提供 `org.kde.StatusNotifierWatcher`（Quickshell / waybar / KDE 都有）。没有就静默跳过；不需要时可用 `--no-tray` 关闭 |
+**仅供学习与技术研究的自用工具**，不提供、不托管、不分发任何音乐内容；不含任何接口实现，
+全部数据来自第三方项目 [KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi)。
+请尊重音乐版权、支持正版。通过非官方接口访问可能违反酷狗的服务条款，风险由使用者自行承担。
+完整条款见 [docs/DISCLAIMER.md](docs/DISCLAIMER.md)。
 
----
-
-## 安装
-
-### 1. 启动 KuGouMusicApi
-
-**本项目不含任何接口实现**，数据全部来自第三方的
-[KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi)——它是**独立仓库**，
-不在本仓库里（没有 submodule，也没有 vendor 目录），所以得先把它拉下来跑起来。
-
-仓库里有个脚本把「clone → 装依赖 → 启动」合成一条命令：
-
-```bash
-./scripts/kugou-api-install kugou
-```
-
-它会 clone 到 `~/KuGouMusicApi`、`npm install`，然后调 `scripts/kugou-api start`
-把标准版（:3000）和概念版（:3001）两个实例都拉起来。`./scripts/kugou-api-install`
-不带参数会列出各音源的仓库、**钉住的提交**与当前运行状态。
-
-只想手动来一遍的话：
-
-```bash
-git clone https://github.com/MakcRe/KuGouMusicApi.git
-cd KuGouMusicApi
-# 锁定到经过验证的提交：上游是活跃仓库，接口字段会变，
-# 直接跟 master 可能某天就解析不出歌名或歌词
-git checkout a5a98013cce79fe0ae2ad65fc84b68176ebcfc1e
-npm install
-npm start          # 注意是 npm start，不是 npm run dev
-```
-
-> 这个提交号在 `scripts/kugou-api-install` 的 `PINNED[kugou]` 里也有一份，
-> 脚本会按它做**浅取**（`git fetch --depth 1 origin <sha>`，只拉那一个提交）。
-> 换验证过的提交时两处一起改。
-
-> 概念版（lite）实例要带 `platform=lite` 启动：
-> `platform=lite PORT=3001 npm start`
-> 不加这个环境变量，概念版搜索会拿不到正确结果。
-> 用 `scripts/kugou-api start` 就不用管这些，它两个实例都会带对参数起。
-
-服务默认监听 `http://127.0.0.1:3000`。验证一下：
-
-```bash
-curl -s "http://127.0.0.1:3000/register/dev"
-```
-
-> `npm run dev` 走的是 nodemon（一个 devDependency），只装过生产依赖的环境里会直接失败。
-
-> **只用「酷狗」音源的话，起这一个实例就够了。**
-> 想用「酷狗概念版」音源，见[常见问题](docs/FAQ.md)里的「概念版音源怎么配」。
->
-> 服务目录默认是 `~/KuGouMusicApi`，用 `KUGOU_API_DIR` 可以改（启动脚本和
-> `kugou-api` 都认这个变量）。
-
-### 2. 编译本客户端
-
-```bash
-git clone https://github.com/sijin-xb/kugou-tui.git
-cd kugou-tui
-cargo build --release
-./target/release/kugou-tui --help
-```
-
-release 产物约 **6.8 MiB**（`opt-level="z"` + fat LTO + strip）。
-
-### 3.（可选）安装启动器脚本
-
-仓库提供两个脚本：
-
-| 脚本 | 作用 |
-|---|---|
-| `scripts/kugou-tui` | 启动播放器；API 服务没起就自动拉起并等待就绪 |
-| `scripts/kugou-api` | 一次拉起**两个** API 实例（标准版 + 概念版） |
-
-```bash
-ln -s "$PWD/scripts/kugou-tui" "$PWD/scripts/kugou-api" ~/.local/bin/
-```
-
-只用一个音源时，装 `kugou-tui` 就够；两个音源都要用，再装 `kugou-api`：
-
-```bash
-kugou-api start     # 启动两个实例（已在跑的会跳过），打印 PID / 日志路径 / 访问地址
-kugou-api status    # 查看状态（运行中会显示 PID；端口被别人占着也会如实说明）
-kugou-api restart   # 先停再起（改了端口/配置后用它）
-kugou-api stop      # 停止（按 PID 精确停止）
-kugou-api help      # 完整说明
-```
-
-`start` 之前会做一轮预检，缺什么补什么：`node`、KuGouMusicApi 目录、
-`node_modules`（缺了自动 `npm install --omit=dev`）、客户端二进制（缺了自动
-`cargo build --release`）。任一步失败都会带着明确原因终止，不会留一个半死不活的进程。
-不想让它碰编译就设 `KUGOU_API_SKIP_BUILD=1`（`stop` / `status` 本来就不触发编译）。
-
-参数按**环境变量 > 配置文件 > 默认值**取值。配置文件是可选的
-`~/.config/kugou-tui/api.env`，每行一个 `KEY=VALUE`：
-
-```bash
-# 临时换端口起一次，不动任何文件
-KUGOU_STANDARD_PORT=3100 KUGOU_LITE_PORT=3101 kugou-api restart
-```
-
-`kugou-api` 认这些（配置文件里写同名键）：
-
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| `KUGOU_API_DIR` | `$HOME/KuGouMusicApi` | 服务所在目录 |
-| `KUGOU_API_LOG_DIR` | `$XDG_CACHE_HOME/kugou-tui` | 日志与 PID 文件目录 |
-| `KUGOU_API_HOST` | `127.0.0.1` | 监听地址 |
-| `KUGOU_STANDARD_PORT` | `3000` | 标准版端口 |
-| `KUGOU_LITE_PORT` | `3001` | 概念版端口 |
-| `KUGOU_API_BIN` | `<仓库>/target/release/kugou-tui` | 客户端二进制路径 |
-| `KUGOU_API_SKIP_BUILD` | 空 | 设为 `1` 跳过编译预检 |
-| `KUGOU_API_CONFIG` | `$XDG_CONFIG_HOME/kugou-tui/api.env` | 配置文件路径 |
-
-`scripts/kugou-tui`（播放器启动器）认的是另一组：
-
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| `KUGOU_API_BASE` | **不设置** | 设了才给程序传 `--api-base`，并拿它探活。不设时让程序**读配置里选中的音源**——否则每次都被强行拉回标准版 `:3000`，用概念版的人得按 `v` 切两次才回得去 |
-| `KUGOU_API_DIR` | `$HOME/KuGouMusicApi` | 服务所在目录，用于自动拉起 |
-| `KUGOU_API_LOG` | `$XDG_CACHE_HOME/kugou-tui/api.log` | 服务日志路径 |
-| `KUGOU_TUI_BIN` | 自动探测 | 手动指定二进制路径 |
-| `API_PORT` | `3000` | 自动拉起服务时用的端口 |
-
----
-
-## 快速上手
-
-**不登录也能听歌**。搜索和云端歌单才需要账号。
-
-1. 确认 KuGouMusicApi 已在跑（见上一步）。
-2. 启动：`./target/release/kugou-tui`
-3. 按 **`3`** 进入歌单广场 → `Enter` 打开一个歌单 → 移动光标 → `Enter` 播放。
-
-数字键落点是 `1` 首页、`2` 搜索、`3` 歌单、`4` 歌手、`5` 排行榜、`6` 云端、
-`7` 队列、`8` 音源、`9` 设置、`0` 可视化（完整表见 [KEYBINDINGS.md](KEYBINDINGS.md)）。
-
-想搜歌（`2`）得先登录，按 **`L`** 扫码即可。
-
-> 首次启动时程序会自动获取设备指纹 `dfid` 并写入配置。取播放直链需要它，
-> 这一步是自动的，不需要你做任何事。
-
----
-
-## 免责声明与合规提示
-
-使用本项目前请务必阅读：
-
-1. **仅供学习与技术研究的自用工具**，不提供、不托管、不分发任何音乐内容。
-2. 本项目**不含任何接口实现**，全部数据来自第三方项目
-   [KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi)。本项目不拥有任何音乐版权，
-   也不对该接口的可用性、稳定性与合法性负责。
-3. **第三方服务合规风险**：酷狗（ KuGou / 腾讯音乐娱乐集团）的相关服务受其用户协议与
-   当地法律法规约束。通过非官方接口访问可能违反其服务条款，存在账号被限制或终止的风险。
-   本项目仅作为客户端调用你在**本机**自行部署的服务，不鼓励、不协助任何形式的
-   批量下载、传播或商业使用。
-4. **版权**：请尊重音乐版权，支持正版。播放过程中产生的缓存文件请在合理期限内清除
-   （默认缓存上限 512 MiB，超出自动回收）。
-5. **地域与法律**：禁止在违反当地法律法规的前提下使用本项目。使用者因使用本项目
-   产生的一切后果，由使用者自行承担。
-6. **隐私**：登录凭据（cookie）仅保存在你本机的配置文件中（权限 `0600`），
-   除访问你自己部署的 API 服务外不会发送到任何地方。本项目无任何遥测。
-
-## 致谢
+### 致谢
 
 - [KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi) —— 本项目的接口来源。
   所有接口路径都对照其 `docs/README.md` 核对过。
@@ -261,35 +127,3 @@ KUGOU_STANDARD_PORT=3100 KUGOU_LITE_PORT=3101 kugou-api restart
 - [ratatui-image](https://github.com/benjajaja/ratatui-image) —— 封面渲染。它把图片
   写进 ratatui 的 Buffer 而不是自己写 stdout，并负责探测 kitty / iTerm2 / sixel
   协议（都不支持时退到彩色半块）。
-
-## 许可
-
-本项目采用 [MIT](LICENSE)（© 2026 kugou-tui contributors）。
-
-### 第三方依赖许可
-
-`Cargo.lock` 共 **469 个包**（含本仓库自己；不区分目标平台）。用
-[`scripts/license-stats.py`](scripts/license-stats.py) 从 `Cargo.lock` 与各依赖的
-`Cargo.toml` 逐个提取 `license` 字段统计得出，分布如下：
-
-| 许可 | 数量 | 说明 |
-|---|---|---|
-| `MIT` / `Apache-2.0` 及其各种组合写法（含 BSD / ISC / Zlib / Unlicense / WTFPL / 0BSD / BSL-1.0 / CC0 / CDLA / LLVM-exception，以及 Unicode 相关） | 429 | 宽松，任选其一即可 |
-| **`MPL-2.0`** | 13 | **弱著佐权**：symphonia 系列（FLAC / MP3 / Vorbis / AAC 等解码器）与 `option-ext`。文件级 copyleft，静态链接分发需保留其源码可得性 |
-| 本机读不到 `license` 字段 | 26 | Windows / Android / macOS 专属包（`winapi*`、`windows*`、`jni`、`ndk-sys`、`objc2-*`、`simd_cesu8`）。Linux 上根本不会下载，所以没有源码可读 |
-
-需要注意的三点：
-
-1. **MPL-2.0**：若以二进制形式分发本项目，需保证 symphonia 相关 MPL 代码的源码可得
-   （保留 `Cargo.lock` 与目标平台的依赖获取方式即满足）。另外 `termina` 是
-   `MIT OR MPL-2.0`，属于**可选**双许可，整体按 MIT 用即可，不构成著佐权义务。
-2. **`ring` / `aws-lc-rs` / `aws-lc-sys`**：加密库（随 `reqwest` + `rustls` 引入），
-   许可是 `Apache-2.0 AND ISC`、`ISC AND (Apache-2.0 OR ISC)` 这类组合；
-   `aws-lc-sys` 还叠了 BSD-3-Clause 与 MIT。这些库在某些司法辖区可能涉及出口管制，
-   商业分发前请自行确认。
-3. **出现 GPL / LGPL 字样的 3 个包**均为**可选**双许可，整体按宽松许可使用即可，
-   不构成著佐权义务：`self_cell`（`Apache-2.0 OR GPL-2.0-only`，随 ratatui-image
-   引入）、`r-efi` 两个版本（`MIT OR Apache-2.0 OR LGPL-2.1-or-later`）。
-
-> 依赖变动后重新跑一次 `python3 scripts/license-stats.py` 即可复核本表。
-> 想更严格的话用 `cargo-deny` 或 `cargo about`。
