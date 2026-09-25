@@ -56,6 +56,31 @@ paru -S kugou-tui          # 或 yay -S kugou-tui
 > `cargo install kugou-tui` 同理——需要先发布到 crates.io，目前未发布。
 > 另外它只能装上主程序，没有那套脚本与服务。
 
+### 路径三：预编译二进制（GitHub Release）
+
+不想装 Rust 工具链的话，直接下 Release 里的 tarball（x86_64 Linux）：
+
+```bash
+tar xzf kugou-tui-0.3.7-x86_64-unknown-linux-gnu.tar.gz
+cd kugou-tui-0.3.7-x86_64-unknown-linux-gnu
+
+# 二进制与三个脚本都链进 PATH。
+# `scripts/kugou-tui` 与二进制同名，所以链过去要改名（同 AUR 包的做法）。
+mkdir -p ~/.local/bin
+ln -s "$PWD/kugou-tui"                    ~/.local/bin/kugou-tui
+ln -s "$PWD/scripts/kugou-api"            ~/.local/bin/kugou-api
+ln -s "$PWD/scripts/kugou-api-install"    ~/.local/bin/kugou-tui-install-api
+ln -s "$PWD/scripts/kugou-tui"            ~/.local/bin/kugou-tui-launch
+
+kugou-tui-install-api kugou   # 一次性：拉取并配置接口服务
+kugou-tui                     # 开播（也可用 kugou-tui-launch，它会按需拉起服务）
+```
+
+> tarball 里除了二进制还带着三个脚本与全部文档，所以这套流程是自足的。
+> `kugou-tui-install-api` 需要 `node` / `npm` / `git` 与网络（它要 clone 服务并装依赖）。
+>
+> 它**不含**接口服务本身——那份服务要么这样拉一次，要么用 AUR 包（包里直接带）。
+
 ---
 
 ## 部署第三方 API 服务

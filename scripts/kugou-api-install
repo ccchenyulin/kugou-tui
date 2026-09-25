@@ -166,7 +166,11 @@ install_one() {
         git checkout -q FETCH_HEAD
     ); then
       printf '  安装依赖（首次约需一两分钟）…\n'
-      ( cd "$dir" && npm install ) || {
+      # `--omit=dev`：服务运行时是 `node app.js`，devDependencies 全是开发工具
+      # （nodemon / typescript / pkg / prettier…），一个都用不到。实测装全量是
+      # 311 个包、只装生产依赖是 120 个——差的那一半纯粹是白等、白占磁盘。
+      # `kugou-api` 的自动补装用的也是这个参数，两处保持一致。
+      ( cd "$dir" && npm install --omit=dev ) || {
         printf '  \033[31m依赖安装失败\033[0m\n'; return 1; }
     else
       printf '  \033[31m克隆失败\033[0m\n'
