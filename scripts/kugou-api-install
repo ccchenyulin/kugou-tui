@@ -21,6 +21,13 @@ set -euo pipefail
 # 安装根目录（各服务会放到它的子目录里）
 ROOT="${KUGOU_API_ROOT:-$HOME}"
 
+# 软件包会把接口服务连同**生产依赖**一起装在 `/usr/share/kugou-tui/api/<音源>`。
+# 有这份就什么都不用装——那才是真正的「装完即用」。
+#
+# 实测这个服务不往自己目录写任何文件，所以只读目录可以直接跑；这也是它能被打包
+# 进 /usr 的前提（见 `scripts/kugou-api` 里的同一条注释）。
+SYSTEM_ROOT="${KUGOU_API_SYSTEM_ROOT:-/usr/share/kugou-tui/api}"
+
 # 各音源对应的上游仓库、**经过验证的提交**、与端口。
 #
 # 为什么固定提交：上游是活跃仓库，接口字段会漂移——直接跟 master 可能某天就
@@ -98,6 +105,20 @@ start_simple() {
 
 install_one() {
   local name="$1"
+
+  # 软件包已经装好了（只读 + 自带依赖）：不必 clone，也不必 npm install。
+  if [ -f "$SYSTEM_ROOT/$name/app.js" ]; then
+    printf '\033[36m== %s ==\033[0m\n' "$name"
+    printf '  已由软件包提供：%s\n' "$SYSTEM_ROOT/$name"
+    printf '  依赖随包安装，无需 clone / npm install。\n'
+    case "$name" in
+      kugou) start_kugou "$SYSTEM_ROOT/$name" ;;
+      netease) start_simple netease 3002 "$SYSTEM_ROOT/$name" ;;
+    esac
+    printf '  端口：%s\n' "${PORT_LABEL[$name]}"
+    return 0
+  fi
+
   local dir; dir=$(dir_for "$name")
 
   printf '\033[36m== %s ==\033[0m\n' "$name"
@@ -145,7 +166,11 @@ install_one() {
         git checkout -q FETCH_HEAD
     ); then
       printf '  安装依赖（首次约需一两分钟）…\n'
-      ( cd "$dir" && npm install ) || {
+      # `--omit=dev`：服务运行时是 `node app.js`，devDependencies 全是开发工具
+      # （nodemon / typescript / pkg / prettier…），一个都用不到。实测装全量是
+      # 311 个包、只装生产依赖是 120 个——差的那一半纯粹是白等、白占磁盘。
+      # `kugou-api` 的自动补装用的也是这个参数，两处保持一致。
+      ( cd "$dir" && npm install --omit=dev ) || {
         printf '  \033[31m依赖安装失败\033[0m\n'; return 1; }
     else
       printf '  \033[31m克隆失败\033[0m\n'

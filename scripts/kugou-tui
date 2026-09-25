@@ -15,37 +15,73 @@ set -euo pipefail
 
 API_LOG="${KUGOU_API_LOG:-${XDG_CACHE_HOME:-$HOME/.cache}/kugou-tui/api.log}"
 
+# 配置文件路径。全新安装（还没跑过客户端）时它并不存在，所以下面每一处读取
+# 都必须容忍这一点。
+config_file="${XDG_CONFIG_HOME:-$HOME/.config}/kugou-tui/config.toml"
+
+# 读配置里的 `sources.active`（值形如 `kugou` / `kugou_concept`）。读不到就输出空，
+# 调用方按标准版处理——那也是服务端的默认值。
+#
+# ⚠️ 这里的 `[ -r ]` 不是多余的：脚本开了 `set -o pipefail`，而 `sed` 遇到不存在的
+# 文件会退出非零，管道因此被判成失败，`set -e` 会让**整个脚本静默退出**（退出码 2，
+# 一句提示都没有）。全新安装、配置文件还没生成时必然踩到——用户第一次跑就是黑的。
+read_active_source() {
+  [ -r "$config_file" ] || return 0
+  sed -n 's/^[[:space:]]*active[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$config_file" |
+    head -n 1
+}
+
 # 服务目录按**当前音源**选择。
 #
 # 每个音源对应一个不同的第三方服务，目录也不同。写死 KuGouMusicApi 会导致：
 # 当前音源是网易云时，启动器拿酷狗的代码去监听 :3002，而真正的网易云服务
 # 已经占用了这个端口 —— 于是 EADDRINUSE，程序直接起不来。
-ACTIVE_SOURCE=$(sed -n 's/^[[:space:]]*active[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
-  "${XDG_CONFIG_HOME:-$HOME/.config}/kugou-tui/config.toml" 2>/dev/null | head -n 1)
+ACTIVE_SOURCE="$(read_active_source)"
+
+# 软件包把接口服务装在 `/usr/share/kugou-tui/api/<音源>`，依赖随包安装。有这份就用它
+# ——那才是「装完即用」；没有才退回 ~ 下自己 clone 的那份。
+# （该服务不往自己目录写文件，所以只读目录能直接跑，见 scripts/kugou-api 里的说明。）
+SYSTEM_API_ROOT="${KUGOU_API_SYSTEM_ROOT:-/usr/share/kugou-tui/api}"
+
+prefer_system_api_dir() {
+  local name="$1" fallback="$2"
+  if [ -f "$SYSTEM_API_ROOT/$name/app.js" ]; then
+    printf '%s' "$SYSTEM_API_ROOT/$name"
+  else
+    printf '%s' "$fallback"
+  fi
+}
 
 case "$ACTIVE_SOURCE" in
   netease)
-    API_DIR="${NETEASE_API_DIR:-$HOME/NeteaseCloudMusicApi}"
+    API_DIR="${NETEASE_API_DIR:-$(prefer_system_api_dir netease "$HOME/NeteaseCloudMusicApi")}"
     SERVICE_NAME="NeteaseCloudMusicApi"
     ;;
   *)
-    API_DIR="${KUGOU_API_DIR:-$HOME/KuGouMusicApi}"
+    API_DIR="${KUGOU_API_DIR:-$(prefer_system_api_dir kugou "$HOME/KuGouMusicApi")}"
     SERVICE_NAME="KuGouMusicApi"
     ;;
 esac
 
-# 定位二进制：优先环境变量，其次脚本所在仓库的 target/release。
+# 定位二进制：优先环境变量，其次脚本所在仓库的 target/release，最后 PATH。
+#
 # 用 readlink -f 解析软链接，这样把脚本软链到 ~/.local/bin 也能找对地方。
+# 但脚本被**装到**（而不是软链到）`/usr/bin` 时，`../target/release` 会指向
+# `/usr/target/...`，必然不存在——发行版打包走的就是这条路，所以要有 PATH 这一层。
 if [ -n "${KUGOU_TUI_BIN:-}" ]; then
   BIN="$KUGOU_TUI_BIN"
 else
   self_path=$(readlink -f -- "${BASH_SOURCE[0]}")
   BIN="$(dirname -- "$self_path")/../target/release/kugou-tui"
+  if [ ! -x "$BIN" ]; then
+    BIN="$(command -v kugou-tui 2>/dev/null || printf '%s' "$BIN")"
+  fi
 fi
 
 if [ ! -x "$BIN" ]; then
   printf '\033[31m找不到可执行文件：%s\033[0m\n' "$BIN" >&2
-  printf '先编译：cd "%s" && cargo build --release\n' "$(dirname -- "$BIN")/.." >&2
+  printf '从源码跑的话先编译：cargo build --release\n' >&2
+  printf '已经装过包的话，用 KUGOU_TUI_BIN 指向 kugou-tui 的实际路径。\n' >&2
   exit 1
 fi
 
@@ -56,21 +92,19 @@ fi
 # 手动按 v 切两次才回到概念版。所以下面只在显式设置了 KUGOU_API_BASE 时才传参。
 #
 # 这里解析出的地址仅供探测服务是否存活；解析不到就退回默认端口。
-config_file="${XDG_CONFIG_HOME:-$HOME/.config}/kugou-tui/config.toml"
-
-# 当前选中的音源（值形如 `kugou` / `kugou_concept`）。
-#
-# 认不出来就按标准版处理——那也是服务端的默认值。
-ACTIVE_SOURCE=$(sed -n 's/^[[:space:]]*active[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
-  "$config_file" 2>/dev/null | head -n 1)
+# （`config_file` 与 `ACTIVE_SOURCE` 在上面已经取过了。）
 
 # 取**选中音源**档案里的 api_base，而不是顶层的那个。
 #
 # 顶层 api_base 有可能是脏的：用 `--api-base` 临时指向别处后退出，它会跟着写进
 # 配置文件，而选中音源没变——于是「顶层写着 :3000、实际用的是概念版 :3001」。
 # 启动器若信了顶层值，就会把服务起在错误的端口上，探活永远过不去。
+#
+# `[ -r ]` 的理由同 `read_active_source`：配置文件不存在时不能让 `sed` 的
+# 非零退出码经由 `pipefail` 把脚本带走。
 source_api_base() {
-  sed -n "/^\[sources\.${1}\]/,/^\[sources\./p" "$config_file" 2>/dev/null |
+  [ -r "$config_file" ] || return 0
+  sed -n "/^\[sources\.${1}\]/,/^\[sources\./p" "$config_file" |
     sed -n 's/^[[:space:]]*api_base[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
 }
 
@@ -94,10 +128,7 @@ fi
 API_PORT=$(printf '%s' "$CHECK_BASE" | sed -n 's#.*:\([0-9]\{1,\}\).*#\1#p')
 API_PORT="${API_PORT:-3000}"
 
-# 从配置的 `sources.active` 判断当前音源（值形如 `kugou` / `kugou_concept`）。
-# 认不出来就按标准版处理——那也是服务端的默认值。
-ACTIVE_SOURCE=$(sed -n 's/^[[:space:]]*active[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
-  "$config_file" 2>/dev/null | head -n 1)
+# 平台（`lite` = 概念版）跟着当前音源走。`ACTIVE_SOURCE` 上面已经取过，这里不重复读。
 case "$ACTIVE_SOURCE" in
   kugou_concept) API_PLATFORM="lite" ;;
   *) API_PLATFORM="" ;;

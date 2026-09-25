@@ -97,7 +97,8 @@ src/
 
 ### 新增依赖要说明理由
 
-本项目的目标之一是"轻量"（release 约 5.4 MiB、常驻约 13 MiB）。加依赖前请说明：
+本项目的目标之一是"轻量"（release 二进制约 **7.0 MiB**、常驻约 **14–17 MiB**，
+实测见 [docs/DESIGN.md](docs/DESIGN.md#低资源占用)）。加依赖前请说明：
 它解决什么问题、有没有几十行代码能替代、会引入多大的依赖树。
 `tracing` / `chrono` / `rand` 目前都被刻意排除在外。
 
@@ -108,7 +109,12 @@ KuGouMusicApi 是逆向封装，**响应结构会漂移，文档也和实测不�
 - 同一语义按**候选键名列表**依次尝试（`pick_string` / `pick_i64` 等）。
 - 类型不假设：`AlbumID` 可能是数字、字符串或 `null`。
 - 单条解析失败只丢这一条，不影响整页。
-- 新增解析逻辑时，请顺手在 README 的「实测修正过的认知」表格里记下与文档不一致的地方。
+- 新增解析逻辑时，请顺手把与文档不一致的地方记进
+  [docs/DESIGN.md](docs/DESIGN.md#接口适配) 的「上游文档说 / 实际是」表格。
+- **同一个上游可能有多套字段布局**，别只认你调试时看到的那一套。网易云就是例子：
+  `/search` 给 `artists` / `album` / `duration`，而 `/playlist/track/all` 与
+  `/artists` 给 `ar` / `al` / `dt`——只认前者的话搜索页正常，歌单页与歌手页的歌
+  会全部没有歌手、没有专辑、时长显示 `00:00`。**每种布局都要有单元测试钉住。**
 
 ### 状态只在主线程改
 
@@ -153,6 +159,59 @@ KUGOU_TUI_DEBUG=1 ./target/release/kugou-tui
 - PR 里请说明：**改了什么、为什么改、怎么验证的**（尤其是接口相关的改动，
   附上一小段真实响应的关键字段会很有帮助）。
 - 如果改动会影响用户可见行为，请同步更新 `README.md`。
+
+## 发版
+
+**用 `./scripts/release`**，不要手工走。它把顺序固化了——下面这些坑都是踩过的，
+脚本已经把它们挡在里面：
+
+```bash
+# 1. 先改版本号与变更日志（脚本会检查，缺了直接中止）
+#    - Cargo.toml 的 version（纯数字 X.Y.Z；Cargo.lock 会跟着变，一起提交）
+#    - CHANGELOG.md 顶部加一节，格式照 [Keep a Changelog]
+git add -A && git commit -m "chore: 版本 X.Y.Z" && git push
+
+# 2. 跑发版（阶段一本地，确认后阶段二推送）
+./scripts/release
+
+# 只想检查、什么都不构建不推送：
+./scripts/release --dry-run
+```
+
+`scripts/release` 会自动做完：前置检查 → 回收上一轮的中间产物 → clippy + 测试 →
+构建 → 打发行包并核对内容清单 → **停下等你确认** → push main → 打 tag → 推 tag →
+更新并验证 AUR → 建 Release → 下载回来核对 → 推 AUR。
+
+**完整规格（版本与标签规则、发行版产物清单、目标仓库、各步骤依赖、
+失败后怎么恢复）见 [docs/RELEASE.md](docs/RELEASE.md)。**
+
+### 两条最容易忘的
+
+1. **工具脚本要在打 tag 之前提交。** `scripts/make-release-tarball` 曾提交在 tag
+   之后，结果 checkout 那个 tag 拿不到它。`scripts/release` 的前置检查要求工作区
+   干净，从机制上挡住了这个。
+2. **上游提交号钉在两个地方，改一处不够**：
+   `scripts/kugou-api-install` 的 `PINNED[kugou]`，以及 AUR 的 `PKGBUILD` 里的
+   `_api_pin`。换 `_api_pin` 时还要重新生成 AUR 仓库里的
+   `kugou-api-package-lock.json`（上游那个提交只有 `pnpm-lock.yaml`，没有
+   `package-lock.json`，而构建用的是 `npm ci`）。生成命令写在 PKGBUILD 的注释里。
+
+### 磁盘
+
+一轮发版会在 `target/package/`、`dist/`、AUR 仓库的 `src/` 与 `pkg/` 留下约
+10 MiB 中间产物。`scripts/release` 开跑前会自动回收；平时也可以手动跑：
+
+```bash
+./scripts/clean --dry-run   # 先看它想删什么
+./scripts/clean             # 回收
+./scripts/clean --all       # 连 target/ 一起清（下次全量重编约 3 分钟）
+```
+
+```bash
+curl -sL -o /tmp/t.tar.gz "https://github.com/sijin-xb/kugou-tui/releases/download/vX.Y.Z/<资产名>"
+tar tzf /tmp/t.tar.gz          # 确认有 scripts/ 与 docs/
+tar xzf /tmp/t.tar.gz && ./<解压出的目录>/kugou-tui --version
+```
 
 ## 法律与合规
 

@@ -22,12 +22,15 @@
 #
 # 参数怎么给（优先级：**环境变量 > 配置文件 > 内置默认值**）：
 #
-#   KUGOU_API_DIR        KuGouMusicApi 的目录        默认 ~/KuGouMusicApi
+#   KUGOU_API_DIR        KuGouMusicApi 的目录        默认 /usr/share/kugou-tui/api/kugou
+#                                                     （软件包提供的只读副本，自带依赖），
+#                                                     没有则退回 ~/KuGouMusicApi
 #   KUGOU_API_LOG_DIR    日志与 PID 文件目录          默认 ${XDG_CACHE_HOME:-~/.cache}/kugou-tui
 #   KUGOU_API_HOST       监听地址                    默认 127.0.0.1
 #   KUGOU_STANDARD_PORT  标准版端口                  默认 3000
 #   KUGOU_LITE_PORT      概念版端口                  默认 3001
-#   KUGOU_API_BIN        客户端二进制路径             默认 <仓库>/target/release/kugou-tui
+#   KUGOU_API_BIN        客户端二进制路径             默认 <仓库>/target/release/kugou-tui，
+#                                                     不存在则用 PATH 上的 kugou-tui
 #   KUGOU_API_SKIP_BUILD 设为 1 时跳过编译预检        默认空（会检查并在缺失时编译）
 #
 # 配置文件（可选）：`${XDG_CONFIG_HOME:-~/.config}/kugou-tui/api.env`，
@@ -88,12 +91,49 @@ pick() {
 self_dir=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)
 repo_dir=$(dirname -- "$self_dir")
 
-API_DIR="$(pick KUGOU_API_DIR "$HOME/KuGouMusicApi")"
+# 客户端二进制在哪。
+#
+# 先看仓库里的构建产物（从源码跑时走这条），找不到再退回 PATH——脚本被**装到**
+# `/usr/bin`（而不是软链过去）时，`$repo_dir/target/release` 会是 `/usr/target/...`，
+# 必然不存在。发行版打包走的就是这条路。
+default_client_bin() {
+  local from_repo="$repo_dir/target/release/kugou-tui"
+  if [ -x "$from_repo" ]; then
+    printf '%s' "$from_repo"
+    return
+  fi
+  # 都找不到时回落到仓库路径：报错信息里那条路径至少能提示「你该先编译」
+  command -v kugou-tui 2>/dev/null || printf '%s' "$from_repo"
+}
+
+# 软件包把接口服务装在 `/usr/share/kugou-tui/api/<音源>`，**依赖随包安装**。
+# 有这份就用它——那才是「装完即用」；没有才退回 ~ 下自己 clone 的那份。
+#
+# 实测这个服务**不往自己目录写任何文件**（源码里没有 writeFile / mkdirSync），
+# 所以从只读目录跑没有问题。这也是它能被打包进 /usr 的前提。
+SYSTEM_API_ROOT="${KUGOU_API_SYSTEM_ROOT:-/usr/share/kugou-tui/api}"
+
+default_api_dir() {
+  if [ -f "$SYSTEM_API_ROOT/kugou/app.js" ]; then
+    printf '%s' "$SYSTEM_API_ROOT/kugou"
+  else
+    printf '%s' "$HOME/KuGouMusicApi"
+  fi
+}
+
+is_system_api_dir() {
+  case "$API_DIR" in
+    "$SYSTEM_API_ROOT"/*) return 0 ;;
+  esac
+  return 1
+}
+
+API_DIR="$(pick KUGOU_API_DIR "$(default_api_dir)")"
 LOG_DIR="$(pick KUGOU_API_LOG_DIR "${XDG_CACHE_HOME:-$HOME/.cache}/kugou-tui")"
 HOST="$(pick KUGOU_API_HOST 127.0.0.1)"
 STANDARD_PORT="$(pick KUGOU_STANDARD_PORT 3000)"
 LITE_PORT="$(pick KUGOU_LITE_PORT 3001)"
-BIN="$(pick KUGOU_API_BIN "$repo_dir/target/release/kugou-tui")"
+BIN="$(pick KUGOU_API_BIN "$(default_client_bin)")"
 SKIP_BUILD="$(pick KUGOU_API_SKIP_BUILD "")"
 
 # 两个实例：名字 / 端口 / platform（标准版不传 platform，服务端默认就是手机版）
@@ -170,6 +210,12 @@ ensure_deps() {
   fi
   if [ ! -f "$API_DIR/package.json" ]; then
     die "「$API_DIR」里没有 package.json，看着不是 KuGouMusicApi。检查 KUGOU_API_DIR。"
+  fi
+
+  # 系统目录是只读的，依赖由软件包带。往 /usr 里写既装不进去、也不该做；
+  # 缺了说明包本身有问题，让用户重装比在这里 npm install 更靠谱。
+  if is_system_api_dir; then
+    die "「$API_DIR」缺少 node_modules。这是软件包提供的位置，请重装：pacman -S kugou-tui"
   fi
 
   printf '\033[36m缺少依赖，正在安装（npm install --omit=dev）…\033[0m\n' >&2

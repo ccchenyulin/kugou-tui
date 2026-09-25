@@ -25,9 +25,21 @@ pub enum AppError {
         message: String,
     },
 
-    /// 响应体不是合法 JSON，或字段类型与预期不符。
-    #[error("JSON 解析失败：{0}")]
-    Json(#[from] serde_json::Error),
+    /// 服务端返回 2xx，但响应体不是 JSON。
+    ///
+    /// 单独成一类，因为**最常见的原因不是「接口坏了」，而是这个端口上跑的根本不是
+    /// 接口服务**——比如被别的程序占了。实测撞过：默认的 3000 端口上跑着另一个 Web
+    /// 服务，返回一页 HTML；那时 serde 只会说
+    /// `expected value at line 1 column 1`，完全看不出该去查什么。
+    ///
+    /// 顺带把响应体的开头带上：是网页、是空响应、还是一段纯文本，一眼能分辨。
+    #[error("接口 {path} 返回的不是 JSON（HTTP {status}）：{preview}")]
+    NonJsonBody {
+        path: String,
+        status: u16,
+        /// 响应体开头一小段（已压掉换行与连续空白）
+        preview: String,
+    },
 
     /// 未附带路径的 IO 错误（多为 `?` 自动转换产生）。
     #[error("IO 错误：{0}")]
@@ -131,7 +143,7 @@ impl AppError {
     /// * 业务错误码（`AppError::Api`）——服务回了话，只是拒绝了这次请求。
     ///   需要登录、页码越界、没有可用的播放地址都属于这一类，重发只会得到同样的答复。
     /// * 其它 4xx——请求本身有问题（参数、鉴权），与时刻无关。
-    /// * `Json`——200 却返回非 JSON，是内容问题不是传输问题（真正的截断会走
+    /// * `NonJsonBody`——200 却返回非 JSON，是内容问题不是传输问题（真正的截断会走
     ///   `is_body` / `is_decode`，那两条在上面算可重试）。
     /// * 请求构造失败、配置 / IO / 音频错误——问题不在网络上。
     pub fn is_transient(&self) -> bool {
@@ -160,6 +172,17 @@ impl AppError {
             Self::Http(error) if error.is_connect() => {
                 "无法连接 KuGouMusicApi 服务，请确认它已启动（默认 127.0.0.1:3000）".to_string()
             }
+            // 端口上跑着别的服务时，响应体多半是网页。这条提示要能直接指向「去改哪个
+            // 配置」，否则用户只会看到 serde 的 `expected value at line 1 column 1`。
+            Self::NonJsonBody { path, preview, .. } if preview.trim_start().starts_with('<') => {
+                format!(
+                    "接口 {path} 返回的是网页不是 JSON：该端口上跑的不是 KuGouMusicApi，\
+                     检查配置里这个音源的 api_base"
+                )
+            }
+            Self::NonJsonBody { path, .. } => {
+                format!("接口 {path} 返回的不是 JSON（HTTP 200）：检查该音源的 api_base")
+            }
             other => other.to_string(),
         }
     }
@@ -186,6 +209,42 @@ mod tests {
         }
         assert!(!api(149).is_auth_related(), "页码越界不是登录问题");
         assert!(api(149).is_page_out_of_range());
+    }
+
+    fn non_json(preview: &str) -> AppError {
+        AppError::NonJsonBody {
+            path: "/search".to_string(),
+            status: 200,
+            preview: preview.to_string(),
+        }
+    }
+
+    /// 端口上跑着网页服务时，提示必须指向「去改 api_base」。
+    ///
+    /// 这是实测撞到的场景：默认的 3000 端口上跑着另一个 Web 服务，返回一页 HTML。
+    /// 改动前用户看到的是 serde 的原话 `expected value at line 1 column 1`，
+    /// 完全看不出该查什么。
+    #[test]
+    fn html_body_points_at_the_wrong_service() {
+        let hint = non_json("<!doctype html><html lang=\"en\">").user_hint();
+        assert!(hint.contains("/search"), "要指出是哪个接口：{hint}");
+        assert!(hint.contains("网页"), "要说明拿到的是网页：{hint}");
+        assert!(hint.contains("api_base"), "要指向该改的配置项：{hint}");
+    }
+
+    /// 非网页的非 JSON 响应（空响应体、一段纯文本）也要有可执行的提示。
+    #[test]
+    fn other_non_json_bodies_still_hint_at_api_base() {
+        for preview in ["（空响应体）", "gateway timeout"] {
+            let hint = non_json(preview).user_hint();
+            assert!(hint.contains("api_base"), "preview={preview} 时提示：{hint}");
+        }
+    }
+
+    /// 内容问题不该被当成瞬时故障重试——重试解决不了「端口上是别的服务」。
+    #[test]
+    fn non_json_body_is_not_retried() {
+        assert!(!non_json("<!doctype html>").is_transient());
     }
 
     #[test]

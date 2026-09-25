@@ -25,7 +25,7 @@ use crate::audio::cache::AudioCache;
 use crate::audio::engine::AudioSource;
 use crate::config::{Config, SUPPORTED_QUALITIES};
 use crate::error::AppError;
-use crate::source::SourceKind;
+use crate::source::{PlaylistRef, SourceKind};
 
 use crate::audio::download::Downloader;
 use crate::audio::engine::{AudioEvent, PlaybackState, SEEK_STEP_MS, VOLUME_STEP};
@@ -715,6 +715,38 @@ impl App {
                 if let Some(next) = s::cycle(&s::COVER_FILLS, config.cover_fill, delta) {
                     config.cover_fill = next;
                 }
+            }
+            // 换一张声卡。设备是在音频线程里重建的，当前这首会停一下，
+            // 等新设备就绪（DeviceOpened）再按原位置续播，所以这里单独提示并返回。
+            s::Setting::AudioDevice => {
+                let options = s::device_options(&self.state.audio_devices);
+                let Some(next) = s::cycle_device(&options, config.audio_device.as_deref(), delta)
+                else {
+                    return;
+                };
+                let target = next
+                    .clone()
+                    .unwrap_or_else(|| s::DEFAULT_DEVICE_LABEL.to_string());
+                config.audio_device = next.clone();
+                // 只在真的有声音在放时才续播：暂停状态下换设备不该自作主张开始播
+                self.pending_device_resume = match self.state.playback {
+                    PlaybackState::Playing => self
+                        .state
+                        .current
+                        .clone()
+                        .map(|song| (song, self.state.position_ms)),
+                    _ => None,
+                };
+                self.audio.use_device(next);
+                self.state.info(crate::ui::views::settings::change_notice(
+                    setting.label(),
+                    &target,
+                ));
+                if let Err(error) = self.state.config.save() {
+                    self.state
+                        .error(format!("保存设置失败：{}", error.user_hint()));
+                }
+                return;
             }
         }
 
@@ -1815,7 +1847,7 @@ impl App {
         let profile = self.state.config.sources.profile(kind);
         crate::api::ApiClient::new(
             &profile.api_base,
-            profile.cookie_header(),
+            profile.cookie_header(kind),
             self.state.config.proxy.as_deref(),
         )
     }
@@ -2105,26 +2137,19 @@ impl App {
             // 大歌单（几百首）即使并发翻页也要好几秒，这段时间界面只有一个"载入中"，
             // 体验很差。学 MoeKoeMusic 的做法：先给首屏，剩下的后台继续取。
             // 它那边是滚动到底再加载；我们一次性取完，但**先让用户看到东西**。
-            let first = match is_own {
-                Some(list_id) => {
-                    api.user_playlist_tracks(list_id, 1, PAGE_LIMIT, fresh)
-                        .await
-                }
-                None => {
-                    api.playlist_tracks(&playlist.id, 1, PAGE_LIMIT, fresh)
-                        .await
-                }
+            let first = {
+                // 走 `active_source` 而不是 `api`：分页同样是音源相关的——酷狗那两个
+                // 端点（参数是 `page` + `pagesize`）网易云根本没有，直接调 `ApiClient`
+                // 会让网易云下打开歌单必然 404；而首屏失败会 return，连下面的后台
+                // 补全都走不到，表现就是「歌单里的歌一直 404」。
+                let target = match is_own {
+                    Some(list_id) => PlaylistRef::Own(list_id),
+                    None => PlaylistRef::Public(&playlist.id),
+                };
+                active_source
+                    .playlist_tracks_page(&api, target, 1, PAGE_LIMIT, fresh)
+                    .await
             };
-
-            // 首屏走的是 `ApiClient` 的分页方法（不经本模块带盖章的 `*_tracks_all`
-            // 封装），解析时 `Song::source` 只会拿到默认值 `Kugou`。在概念版音源下
-            // 不补盖这一章，这些歌就会被当成标准版的歌——播放时把取链请求打到
-            // 标准版端口，而标准版没有概念版会员，只能给 60 秒试听/低码率。
-            // 后台补全的那一批（`*_tracks_all`）自带盖章，所以只有首屏这批是坏的。
-            let first = first.map(|mut songs| {
-                active_source.stamp(&mut songs);
-                songs
-            });
 
             match first {
                 Ok(songs) => {
@@ -2839,10 +2864,13 @@ impl App {
 
         let api = self.api.clone();
         let bus = self.bus.clone();
+        // 走音源分派：网易云的资料在 `/user/detail?uid=` 里，而且得先问出 uid；
+        // 酷狗的是同一个端点但不带参数。写死哪一个都会让另一边报错。
+        let source = self.state.config.active_source_kind();
 
         self.state.user_info_load.begin();
         self.runtime.spawn(async move {
-            match api.user_detail().await {
+            match source.user_detail(&api).await {
                 Ok(info) => bus.emit(Loaded::UserInfo(Box::new(info))),
                 // 早先这里只写日志，于是接口挂掉时首页永远显示「加载中…」——
                 // 用户分不清是失败还是慢。失败也得走事件，面板才有出口。
@@ -2880,7 +2908,11 @@ impl App {
     }
 
     pub fn fetch_vip_status(&mut self) {
-        if !self.state.logged_in {
+        // 会员接口只有酷狗有。网易云没有对应端点（`/user/vip/detail` 是 404），
+        // 去请求只会白打一次接口，所以先问能力再决定。
+        if !self.state.logged_in
+            || !self.state.config.active_source_kind().capability().vip
+        {
             self.state.vip_info = None;
             return;
         }
@@ -4067,6 +4099,19 @@ impl App {
                     .unwrap_or_default();
                 self.state.success(format!("正在播放：{title}"));
             }
+            AudioEvent::DeviceOpened { name } => {
+                // 第一次是启动时上报，只记下来不打扰；之后的切换才提示
+                let is_startup = self.state.output_device.is_empty();
+                self.state.output_device = name.clone();
+
+                if let Some((song, position)) = self.pending_device_resume.take() {
+                    self.start_playback(song, position);
+                    return;
+                }
+                if !is_startup {
+                    self.state.info(format!("输出设备 → {name}"));
+                }
+            }
             AudioEvent::TrackFinished => {
                 self.state.position_ms = 0;
 
@@ -4084,9 +4129,16 @@ impl App {
                 // 自然播完：顺序模式到底就停，单曲循环原地重播
                 self.next_track(false);
             }
+            // 换设备失败：旧设备照旧在播，只提示，不动播放状态
+            AudioEvent::DeviceSwitchFailed(message) => {
+                self.pending_device_resume = None;
+                self.state.warn(message);
+            }
             AudioEvent::Failed(message) => {
                 self.state.busy = None;
                 self.state.download_progress = None;
+                // 换设备失败时旧设备还活着，刚才那首也还在播，别再排队续播了
+                self.pending_device_resume = None;
                 self.state.playback = PlaybackState::Stopped;
                 self.state.error(message);
             }

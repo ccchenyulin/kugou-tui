@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+#
+# clean —— 回收构建与打包过程中产生的中间产物。
+#
+# # 为什么需要它
+#
+# 一次发版会在三个地方留下东西：
+#   - 仓库里   `target/package/`（cargo package 的解包验证目录）
+#              `dist/` 里历史版本的 tarball
+#   - AUR 仓库 `src/`、`pkg/`、以及 makepkg 拉下来的上游源码目录
+#
+# 这些都能再生，但不会自己消失。实测一轮下来 10+ MiB，多留几版就是几百 MiB。
+#
+# # 触发时机
+#
+#   1. 发版**开始前**：保证从干净状态构建（scripts/release 会自动调用）
+#   2. 发版**成功后**：回收本次的中间产物
+#   3. 手动：磁盘紧张时随时跑
+#
+# # 清理范围（默认）
+#
+#   只清「明确可再生的构建中间产物」。**不动**：
+#   - `target/` 整体（会毁掉增量编译，下次全量重编约 3 分钟）——要清得显式加 --all
+#   - 运行时的歌曲磁盘缓存 `~/.cache/kugou-tui`（那是用户数据，且它自己带逐出逻辑，
+#     见 `CacheStore::enforce_limit`）——要清得显式加 --cache
+#   - 任何不是本项目 / AUR 包目录的东西
+#
+# # 用法
+#
+#   ./scripts/clean               # 回收中间产物
+#   ./scripts/clean --dry-run     # 只报告，不删
+#   ./scripts/clean --all         # 额外清 target/
+#   ./scripts/clean --cache       # 额外清运行时歌曲缓存
+#
+# 退出码：0 正常；1 出错（例如某个目录看着不像预期，为安全起见拒绝删）。
+set -euo pipefail
+
+repo_dir=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd)
+aur_dir="${KUGOU_AUR_DIR:-$HOME/aur/kugou-tui}"
+runtime_cache="${XDG_CACHE_HOME:-$HOME/.cache}/kugou-tui"
+
+dry_run=0
+do_all=0
+do_cache=0
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) dry_run=1 ;;
+    --all) do_all=1 ;;
+    --cache) do_cache=1 ;;
+    -h | --help)
+      sed -n '3,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *)
+      echo "未知参数：$arg（-h 看用法）" >&2
+      exit 1
+      ;;
+  esac
+done
+
+# 回收前后对比用。拿不到就当 0，不影响主流程。
+#
+# 注意用 `-e` 而不是 `-d`：要回收的东西里有单个文件（dist/ 里的旧 tarball、
+# makepkg 产出的 .pkg.tar.zst），只判目录会让它们一律记成 0 字节——
+# 回收照做，但汇总数字会少算一大截。
+dir_bytes() {
+  if [ -e "$1" ]; then
+    du -sb "$1" 2>/dev/null | cut -f1
+  else
+    echo 0
+  fi
+}
+
+reclaimed=0
+
+# 删一个目录/文件，并累计回收的字节数。
+#
+# 每一处都先确认「它确实是我们以为的东西」——路径拼错时宁可什么都不删。
+reclaim() {
+  local path="$1" what="$2"
+  if [ ! -e "$path" ]; then
+    return 0
+  fi
+  local before
+  before=$(dir_bytes "$path")
+  local human
+  human=$(du -sh "$path" 2>/dev/null | cut -f1)
+  if [ "$dry_run" -eq 1 ]; then
+    printf '  [试运行] 将删除 %s（%s）—— %s\n' "$path" "$human" "$what"
+  else
+    rm -rf -- "$path"
+    printf '  已回收 %s（%s）—— %s\n' "$path" "$human" "$what"
+  fi
+  reclaimed=$((reclaimed + before))
+}
+
+printf '\033[36m回收构建中间产物\033[0m\n'
+
+# ---- 仓库内 ----
+
+# cargo package 的解包与验证目录
+reclaim "$repo_dir/target/package" "cargo package 的中间产物"
+
+# dist/ 里历史版本的 tarball：只留 Cargo.toml 里那个版本
+current_version=$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$repo_dir/Cargo.toml" | head -n 1)
+if [ -d "$repo_dir/dist" ]; then
+  for tarball in "$repo_dir"/dist/*.tar.gz; do
+    # 通配符没匹配到时 fish/bash 的行为不同，这里显式挡一下
+    [ -e "$tarball" ] || continue
+    case "$tarball" in
+      *"-$current_version-"*) continue ;;
+    esac
+    reclaim "$tarball" "历史版本的发行包（当前版本 $current_version）"
+  done
+fi
+
+# ---- AUR 包仓库 ----
+
+if [ -d "$aur_dir" ]; then
+  # 先确认这真是那个 AUR 包目录，再动里面的东西。
+  if [ -f "$aur_dir/PKGBUILD" ]; then
+    reclaim "$aur_dir/src" "makepkg 解包的源码"
+    reclaim "$aur_dir/pkg" "makepkg 的打包目录"
+    # makepkg 用 git+ 源时拉下来的上游副本，目录名与 PKGBUILD 里的源名一致
+    while IFS= read -r upstream; do
+      [ -n "$upstream" ] || continue
+      reclaim "$aur_dir/$upstream" "makepkg 拉下来的上游源码（$upstream）"
+    done < <(sed -n 's/^[[:space:]]*"\([A-Za-z][A-Za-z0-9_-]*\)::git+.*/\1/p' "$aur_dir/PKGBUILD")
+    # 构建出的包本体也不留（要留的话用 makepkg 自己产出的那份）
+    for pkg in "$aur_dir"/*.pkg.tar.zst; do
+      [ -e "$pkg" ] || continue
+      reclaim "$pkg" "上一次构建出的包"
+    done
+  else
+    printf '  \033[33m跳过 %s：里面没有 PKGBUILD，看着不是 AUR 包目录\033[0m\n' "$aur_dir"
+  fi
+else
+  printf '  （没有 AUR 包目录 %s，跳过）\n' "$aur_dir"
+fi
+
+# ---- 可选：更激进的回收 ----
+
+if [ "$do_all" -eq 1 ]; then
+  printf '\n\033[33m--all：连 target/ 一起清（下次构建要全量重编，约 3 分钟）\033[0m\n'
+  reclaim "$repo_dir/target" "整个构建目录"
+else
+  printf '\n（target/ 保留，增量编译更快；要清加 --all）\n'
+fi
+
+if [ "$do_cache" -eq 1 ]; then
+  printf '\n\033[33m--cache：清运行时的歌曲磁盘缓存\033[0m\n'
+  reclaim "$runtime_cache" "运行时的歌曲磁盘缓存（含已下载的歌）"
+else
+  printf '（运行时歌曲缓存保留——那是用户数据，且它自带逐出逻辑）\n'
+fi
+
+# ---- 汇总 ----
+
+if [ "$reclaimed" -gt 0 ]; then
+  mib=$((reclaimed / 1048576))
+  printf '\n\033[32m合计回收约 %s MiB\033[0m\n' "$mib"
+else
+  printf '\n没有需要回收的东西。\n'
+fi

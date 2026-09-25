@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+#
+# make-release-tarball —— 打出 GitHub Release 用的二进制包。
+#
+# 为什么需要它：这个包是给**非 Arch 用户**用的——他们拿不到 AUR 包（包里直接带了
+# 接口服务），只能靠这个 tarball 把服务配起来。所以它必须同时包含**三个脚本**，
+# 否则用户解压后跑不了 `kugou-tui-install-api`，整套流程就断了。
+#
+# 手工拼目录漏掉脚本是很自然的事（0.3.7 那版就漏了），所以固化成一个脚本。
+#
+# 用法（仓库根目录，先把对应版本编译好）：
+#
+#   cargo build --release
+#   ./scripts/make-release-tarball            # 目标三元组自动取 rustc 的 host
+#   ./scripts/make-release-tarball aarch64-unknown-linux-gnu
+#
+# 产出：`dist/kugou-tui-<版本>-<三元组>.tar.gz`，末尾打印 sha256。
+set -euo pipefail
+
+repo_dir=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd)
+cd "$repo_dir"
+
+version=$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)
+if [ -z "$version" ]; then
+  echo "读不到 Cargo.toml 里的版本号" >&2
+  exit 1
+fi
+
+target="${1:-$(rustc -vV | sed -n 's/^host: //p')}"
+if [ -z "$target" ]; then
+  echo "拿不到目标三元组，手动传一个作为第一个参数" >&2
+  exit 1
+fi
+
+bin="target/release/kugou-tui"
+if [ ! -x "$bin" ]; then
+  echo "找不到 $bin，先 cargo build --release" >&2
+  exit 1
+fi
+
+name="kugou-tui-$version-$target"
+stage="dist/$name"
+rm -rf "$stage"
+install -d "$stage/scripts" "$stage/docs"
+
+install -m755 "$bin" "$stage/kugou-tui"
+install -m755 scripts/kugou-api scripts/kugou-api-install scripts/kugou-tui "$stage/scripts/"
+install -m644 LICENSE README.md CHANGELOG.md KEYBINDINGS.md "$stage/"
+install -m644 docs/*.md "$stage/docs/"
+
+tar -czf "dist/$name.tar.gz" -C dist "$name"
+rm -rf "$stage"
+
+echo
+echo "产出：dist/$name.tar.gz"
+echo "内容："
+tar -tzf "dist/$name.tar.gz" | sed 's/^/  /'
+echo
+sha256sum "dist/$name.tar.gz"

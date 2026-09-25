@@ -1,0 +1,355 @@
+#!/usr/bin/env bash
+#
+# release —— 一条命令走完发版：构建 → 验证 → 打包 → 推送 → 发布 → 更新 AUR。
+#
+# # 为什么需要它
+#
+# 手工发版的坑都是「漏了一步」或「顺序错了」。实测踩过的：
+#   - 打包脚本提交在 tag **之后**，checkout 那个 tag 拿不到它
+#   - 发行包漏了脚本（手工拼目录），非 Arch 用户拿不到就配不起服务
+#   - 改了 PKGBUILD 忘了重新生成 .SRCINFO，AUR 页面不更新版本号
+#   - 发完没下载回来核对，问题要等用户来报
+# 这个脚本把这些顺序固化下来。
+#
+# # 版本号与标签规则
+#
+#   - 版本号写在 `Cargo.toml` 的 `version`，必须是 `X.Y.Z`（纯数字，无后缀）
+#   - 标签固定为 `vX.Y.Z`，**附注 tag**（`git tag -a`），注释里带版本说明
+#   - 标签必须尚不存在（本地与远端都查），已存在就中止——发版不可重来
+#   - `CHANGELOG.md` 里必须有 `## [X.Y.Z]` 一节，否则中止
+#   - AUR 的 `pkgver` 必须等于同一个版本号
+#
+# # 推送边界
+#
+# 阶段一（本地，可反复跑，不产生任何外部影响）：
+#   前置检查 → 回收中间产物 → clippy + 测试 → 构建 → 打发行包
+# 然后**停下来**，列出阶段二将要执行的每一条外部动作，等确认。
+# 阶段二（不可逆）：push main → 打 tag → 推 tag → 更新并验证 AUR → 建 Release → 推 AUR。
+#
+# # 用法
+#
+#   ./scripts/release             # 跑完阶段一，确认后跑阶段二
+#   ./scripts/release --dry-run   # 只做检查，什么都不构建不推送
+#   ./scripts/release --yes       # 跳过确认（谨慎）
+#   ./scripts/release --no-aur    # 跳过 AUR 相关步骤
+#
+# 环境变量：
+#   KUGOU_AUR_DIR   AUR 包目录，默认 ~/aur/kugou-tui
+set -euo pipefail
+
+repo_dir=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd)
+cd "$repo_dir"
+
+aur_dir="${KUGOU_AUR_DIR:-$HOME/aur/kugou-tui}"
+pkgname=kugou-tui
+
+assume_yes=0
+dry_run=0
+skip_aur=0
+for arg in "$@"; do
+  case "$arg" in
+    --yes | -y) assume_yes=1 ;;
+    --dry-run) dry_run=1 ;;
+    --no-aur) skip_aur=1 ;;
+    -h | --help)
+      sed -n '3,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *)
+      echo "未知参数：$arg（-h 看用法）" >&2
+      exit 1
+      ;;
+  esac
+done
+
+step() { printf '\n\033[36m==> %s\033[0m\n' "$1"; }
+ok() { printf '    \033[32m%s\033[0m\n' "$1"; }
+warn() { printf '    \033[33m%s\033[0m\n' "$1" >&2; }
+die() {
+  printf '\n\033[31m中止：%s\033[0m\n' "$1" >&2
+  exit 1
+}
+
+# 网络动作加退避重试。
+#
+# 实测这台机器上 `git push` 会因为 TLS 抖动失败一次
+# （`TLS connect error: unexpected eof while reading`），重试就好。
+# 发版流程中途断掉很难受——可能已经推了 main 却还没打 tag——所以每个网络步骤
+# 都包一层。只包**幂等**动作：推同一个 commit、下载同一个文件，重试都安全。
+# `gh release create` 不是幂等的（建好了再建会报已存在），所以那一步单独处理。
+retry() {
+  local attempts=3 delay=3 n=1
+  while true; do
+    if "$@"; then
+      return 0
+    fi
+    if [ "$n" -ge "$attempts" ]; then
+      warn "重试 $attempts 次仍失败：$*"
+      return 1
+    fi
+    warn "第 $n 次失败，${delay}s 后重试"
+    sleep "$delay"
+    n=$((n + 1))
+    delay=$((delay * 2))
+  done
+}
+
+# ==================================================================
+# 阶段一：本地
+# ==================================================================
+
+step "前置检查"
+
+version=$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)
+[ -n "$version" ] || die "读不到 Cargo.toml 里的 version"
+case "$version" in
+  *[!0-9.]* | .* | *. | *..*) die "版本号 '$version' 不是纯数字的 X.Y.Z 形式" ;;
+esac
+ok "版本号 $version"
+
+tag="v$version"
+
+branch=$(git rev-parse --abbrev-ref HEAD)
+[ "$branch" = "main" ] || die "当前在 '$branch' 分支上，发版必须在 main 上"
+ok "分支 main"
+
+if [ -n "$(git status --porcelain)" ]; then
+  git status --short >&2
+  die "工作区不干净。发版前先把改动提交掉——发行包是从工作区打出来的，
+      有未提交改动的话，打出来的东西对不上任何 commit。"
+fi
+ok "工作区干净"
+
+retry git fetch --quiet origin main
+if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+  die "本地 main 与 origin/main 不一致。先 pull/push 对齐。"
+fi
+ok "与 origin/main 同步"
+
+if git rev-parse -q --verify "refs/tags/$tag" > /dev/null; then
+  die "标签 $tag 已存在于本地——发版不可重来，请改用新的版本号"
+fi
+if git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null 2>&1; then
+  die "标签 $tag 已存在于远端——发版不可重来，请改用新的版本号"
+fi
+ok "标签 $tag 尚未使用"
+
+grep -q "^## \[$version\]" CHANGELOG.md ||
+  die "CHANGELOG.md 里没有 '## [$version]' 一节。发版说明是给用户看的，不能省。"
+ok "CHANGELOG 有 $version 一节"
+
+if [ "$skip_aur" -eq 0 ]; then
+  [ -f "$aur_dir/PKGBUILD" ] || die "找不到 $aur_dir/PKGBUILD（用 --no-aur 跳过 AUR）"
+  ok "AUR 包目录 $aur_dir"
+fi
+
+if [ "$dry_run" -eq 1 ]; then
+  printf '\n\033[32m检查全部通过（--dry-run，到此为止）\033[0m\n'
+  exit 0
+fi
+
+step "回收上一轮的中间产物"
+# 从干净状态构建，避免「上一轮的产物混进这一轮」
+./scripts/clean
+
+step "静态检查与测试"
+# 项目的硬标准：clippy 零告警、测试全过。发版前必须再跑一次——
+# 只跑测试不跑 clippy 的话，告警会跟着版本一起发出去。
+cargo clippy --all-targets --quiet 2>&1 | tail -5
+ok "clippy 零告警"
+cargo test --quiet 2>&1 | grep -E 'test result' | tail -3
+ok "测试通过"
+
+step "构建 release"
+cargo build --release
+built_version=$(./target/release/kugou-tui --version | awk '{print $2}')
+[ "$built_version" = "$version" ] ||
+  die "构建出来的二进制报 $built_version，与 Cargo.toml 的 $version 不一致"
+ok "二进制自报版本 $version"
+
+step "打发行包"
+./scripts/make-release-tarball | tail -3
+tarball="dist/$pkgname-$version-x86_64-unknown-linux-gnu.tar.gz"
+[ -f "$tarball" ] || die "没找到发行包 $tarball"
+# 发行包必须自足：非 Arch 用户拿不到 AUR 包，只能靠它把接口服务配起来。
+#
+# ⚠️ 先把清单落到文件再逐项核对，**不要写成 `tar -tzf … | grep -q`**。
+# `grep -q` 命中即退出，而 tar 是边解析边往 stdout 写的，它会因 SIGPIPE 而死
+# （退出码 141）；`set -o pipefail` 于是把整条管道判为失败——检查会**假报
+# 「发行包里缺 X」**，而包其实是好的。实测撞过：`${PIPESTATUS[*]}` 是 `141 0`。
+# （`sed … | head -n 1` 那种不受影响：sed 的输出只有一行、一次性写出，不会半路被杀。）
+listing=$(mktemp -t kugou-tui-listing-XXXXXX)
+tar -tzf "$tarball" > "$listing"
+for want in "scripts/kugou-api" "scripts/kugou-api-install" "scripts/kugou-tui" "docs/INSTALL.md"; do
+  if ! grep -q -- "$want" "$listing"; then
+    rm -f "$listing"
+    die "发行包里缺 $want —— 它必须自足"
+  fi
+done
+rm -f "$listing"
+ok "发行包自足（含三个脚本与文档）"
+
+# ==================================================================
+# 阶段二：外部动作
+# ==================================================================
+
+step "将要执行的外部动作"
+
+release_sha=$(sha256sum "$tarball" | cut -d' ' -f1)
+
+# 清单必须**跟着 --no-aur 变**。这个脚本存在的意义就是让人在按下回车之前看清
+# 「将要发生什么」——列了 AUR 却跳过它，清单本身就是假的，正是它要防的那类事。
+plan=(
+  "git push origin main"
+  "git tag -a $tag  &&  git push origin $tag"
+)
+if [ "$skip_aur" -eq 0 ]; then
+  plan+=(
+    "取 tag 源码包的 sha256 → 更新 $aur_dir 的 pkgver 与 sha256sums
+         → 重新生成 .SRCINFO → 本地提交（**不推**）"
+    "从该提交克隆出来跑一次 makepkg（验证「用户 clone 到的能构建」）"
+  )
+fi
+plan+=(
+  "gh release create $tag（挂 dist/$pkgname-$version-x86_64-unknown-linux-gnu.tar.gz
+         sha256 $release_sha）"
+  "把 Release 资产下载回来核对内容"
+)
+if [ "$skip_aur" -eq 0 ]; then
+  plan+=("git push（AUR）")
+fi
+
+printf '    以下动作不可逆，tag 与 Release 一旦发出就撤不回来：\n\n'
+idx=1
+for item in "${plan[@]}"; do
+  printf '      %d. %s\n' "$idx" "$item"
+  idx=$((idx + 1))
+done
+if [ "$skip_aur" -eq 1 ]; then
+  printf '\n    已用 --no-aur：跳过 AUR 的更新与推送，PKGBUILD 与 .SRCINFO 不会被改动。\n'
+fi
+
+if [ "$assume_yes" -ne 1 ]; then
+  printf '\n    继续？[y/N] '
+  read -r reply
+  case "$reply" in
+    y | Y | yes | YES) ;;
+    *) die "已取消。阶段一的产物（dist/ 里的发行包）保留着，可以重新跑。" ;;
+  esac
+fi
+
+step "推送 main 与 tag"
+retry git push origin main
+git tag -a "$tag" -m "版本 $version
+
+见 CHANGELOG.md 的 [$version] 一节。"
+retry git push origin "$tag"
+ok "已推送 $tag"
+
+# ==================================================================
+# AUR：必须在 tag 推上去**之后**才能做
+#
+# sha256sums 要取 GitHub 上 tag 源码包的校验和，而那个 tarball 得等 tag 推上去
+# 才存在。所以这一步不能提前到阶段一——这是整条流程里唯一无法重排的依赖。
+# ==================================================================
+
+if [ "$skip_aur" -eq 0 ]; then
+  step "更新 AUR 包"
+  src_url="https://github.com/sijin-xb/$pkgname/archive/refs/tags/$tag.tar.gz"
+  tmp_tar=$(mktemp -t kugou-tui-src-XXXXXX.tar.gz)
+  trap 'rm -f "$tmp_tar"' EXIT
+  retry curl -fsSL -o "$tmp_tar" "$src_url" || die "取不到 $src_url（tag 刚推上去，稍等几秒重试）"
+  src_sha=$(sha256sum "$tmp_tar" | cut -d' ' -f1)
+  ok "tag 源码包 sha256 $src_sha"
+
+  python3 - "$aur_dir" "$version" "$src_sha" <<'PY'
+import pathlib, re, sys
+
+aur_dir, version, src_sha = sys.argv[1], sys.argv[2], sys.argv[3]
+path = pathlib.Path(aur_dir) / "PKGBUILD"
+text = path.read_text()
+
+new, n1 = re.subn(r"^pkgver=.*$", f"pkgver={version}", text, count=1, flags=re.M)
+if n1 != 1:
+    sys.exit("PKGBUILD 里没找到 pkgver=")
+
+# sha256sums 的第一项是主源码包（后面几项是上游服务与锁文件，各自固定）
+new, n2 = re.subn(
+    r"^sha256sums=\(\n\t'[0-9a-f]{64}'",
+    f"sha256sums=(\n\t'{src_sha}'",
+    new,
+    count=1,
+    flags=re.M,
+)
+if n2 != 1:
+    sys.exit("PKGBUILD 里没找到 sha256sums 的第一项")
+
+path.write_text(new)
+print(f"    PKGBUILD: pkgver → {version}，主源码 sha256 → {src_sha[:16]}…")
+PY
+
+  (cd "$aur_dir" && makepkg --printsrcinfo > .SRCINFO)
+  ok "已重新生成 .SRCINFO"
+
+  (cd "$aur_dir" && git add PKGBUILD .SRCINFO &&
+    git commit -q -m "upgpkg: $version-1" && git log --oneline -1)
+
+  step "从提交状态克隆 AUR 仓库并构建"
+  # 用户 clone 到的是提交的内容，不是工作区。这一步能抓出「忘了 git add」。
+  clone_dir=$(mktemp -d -t kugou-tui-aur-XXXXXX)
+  git clone -q "$aur_dir" "$clone_dir"
+  (cd "$clone_dir" && makepkg -f > /dev/null 2>&1) ||
+    die "从克隆出来的 AUR 仓库构建失败。$clone_dir 保留着，自己看一眼。"
+  ok "克隆 → makepkg 构建通过"
+  rm -rf "$clone_dir"
+fi
+
+step "创建 GitHub Release"
+# 做成幂等的：`gh release create` 本身不幂等——如果上次「Release 建好了但资产没传
+# 上去」，重跑会直接报「已存在」，人就卡住了。所以先看有没有，有就补传资产。
+if gh release view "$tag" > /dev/null 2>&1; then
+  warn "$tag 的 Release 已存在，改为补传资产（--clobber）"
+  gh release upload "$tag" "$tarball" --clobber
+else
+  gh release create "$tag" --title "$tag" --notes-file - "$tarball" <<EOF
+版本 $version
+
+见 [CHANGELOG.md](CHANGELOG.md) 的 [$version] 一节。
+EOF
+fi
+ok "已创建 $tag"
+
+step "下载回来核对"
+verify_dir=$(mktemp -d -t kugou-tui-verify-XXXXXX)
+asset="$(basename "$tarball")"
+retry curl -fsSL -o "$verify_dir/$asset" \
+  "https://github.com/sijin-xb/$pkgname/releases/download/$tag/$asset" ||
+  die "下载 Release 资产失败——**别跳过这步**，0.3.7 的发行包漏脚本就是因为只看本地文件"
+downloaded_sha=$(sha256sum "$verify_dir/$asset" | cut -d' ' -f1)
+[ "$downloaded_sha" = "$release_sha" ] ||
+  die "下载回来的资产 sha256 与本地不一致：本地 $release_sha，远端 $downloaded_sha"
+# 同样不能写成 `tar … | grep -q`，理由见上面「打发行包」那段的注释
+tar -tzf "$verify_dir/$asset" > "$verify_dir/listing.txt"
+grep -q "scripts/kugou-api-install" "$verify_dir/listing.txt" ||
+  die "下载回来的发行包里没有 scripts/kugou-api-install"
+ok "资产一致，且含脚本"
+rm -rf "$verify_dir"
+
+if [ "$skip_aur" -eq 0 ]; then
+  step "推送 AUR"
+  if ssh -o ConnectTimeout=10 -o BatchMode=yes -T aur@aur.archlinux.org 2>&1 |
+    grep -qi 'permission denied'; then
+    warn "AUR 拒绝了这个密钥——公钥还没贴到账户（My Account → SSH Public Key）。"
+    warn "本地提交已经做好了，贴完公钥跑这一条即可："
+    warn "    cd $aur_dir && git push --set-upstream origin master"
+  else
+    (cd "$aur_dir" && retry git push --set-upstream origin master)
+    ok "已推送到 AUR"
+  fi
+fi
+
+step "完成"
+printf '    版本    %s\n' "$version"
+printf '    标签    %s\n' "$tag"
+printf '    Release https://github.com/sijin-xb/%s/releases/tag/%s\n' "$pkgname" "$tag"
+printf '\n    别忘了：README 与 docs/INSTALL.md 里的安装方式要跟着改。\n'

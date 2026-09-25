@@ -982,6 +982,17 @@ pub struct AppState {
     pub smooth_spectrum: Vec<f32>,
     /// 峰值保持：柱顶那条刻度线的高度，比柱子本身落得慢，形成经典频谱的观感。
     pub peak_spectrum: Vec<f32>,
+    /// 实际打开的音频输出设备名，由音频线程上报。
+    ///
+    /// 要把它显示出来，是因为 Linux 上「进度在走、却一点声音都没有」几乎都是
+    /// 声音去了另一张卡，而进程本身毫无异常（不报错、状态是播放中）。设备名
+    /// 摆在界面上，用户一眼就能发现自己听的不是这张卡。
+    pub output_device: String,
+    /// 可选的输出设备名，设置页在这里挑。
+    ///
+    /// 启动时枚举一次就够：插拔声卡是少数情况，真换了大不了重开一次，
+    /// 没必要为了它去轮询设备列表。
+    pub audio_devices: Vec<String>,
     /// 当前音量，`0.0 ~ 1.0`。
     pub volume: f32,
     /// 静音前的音量，用于 `m` 键还原。
@@ -1383,6 +1394,8 @@ impl AppState {
             peak_spectrum: Vec::new(),
             duration_ms: 0,
             volume,
+            output_device: String::new(),
+            audio_devices: Vec::new(),
             volume_before_mute: None,
             lyric: LyricPane::default(),
             cover: CoverArt::default(),

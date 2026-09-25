@@ -239,9 +239,10 @@ impl ApiClient {
                 Ok(value)
             }
             Err(error) => {
+                let preview = body_preview(&body);
                 tlog!(
                     crate::logger::LEVEL_WARN,
-                    "接口 {path} 返回了非 JSON 内容（HTTP {status}，前 200 字节）：{}",
+                    "接口 {path} 返回了非 JSON 内容（HTTP {status}）：serde 说「{error}」，前 200 字节：{}",
                     body.chars().take(200).collect::<String>()
                 );
                 if !(200..300).contains(&status) {
@@ -250,7 +251,14 @@ impl ApiClient {
                         status,
                     });
                 }
-                Err(AppError::Json(error))
+                // 2xx 却不是 JSON：多半是**这个端口上跑着别的服务**，而不是接口坏了。
+                // 单独报这一类，提示才能说清该去查什么——serde 的原话
+                // （`expected value at line 1 column 1`）看不出这个。
+                Err(AppError::NonJsonBody {
+                    path: path.to_string(),
+                    status,
+                    preview,
+                })
             }
         }
     }
@@ -265,6 +273,42 @@ impl ApiClient {
             });
         }
         Ok(body)
+    }
+}
+
+/// 取响应体的开头一小段，压掉换行与连续空白，用于错误信息里认出「这是什么」。
+///
+/// 只用来给人看：`<!doctype html>` 一眼就知道端口上跑的是网页服务，空字符串说明
+/// 服务端什么都没返回。**按字符截而不是按字节**——响应体可能是中文。
+fn body_preview(body: &str) -> String {
+    const MAX_CHARS: usize = 120;
+
+    let mut out = String::new();
+    let mut count = 0;
+    let mut last_was_space = false;
+    for ch in body.chars() {
+        let ch = if ch.is_whitespace() { ' ' } else { ch };
+        if ch == ' ' {
+            if last_was_space {
+                continue;
+            }
+            last_was_space = true;
+        } else {
+            last_was_space = false;
+        }
+        if count >= MAX_CHARS {
+            out.push('…');
+            return out.trim().to_string();
+        }
+        out.push(ch);
+        count += 1;
+    }
+
+    let trimmed = out.trim();
+    if trimmed.is_empty() {
+        "（空响应体）".to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -283,5 +327,37 @@ mod tests {
         assert_eq!(RetryPolicy::delay_after(2), Duration::from_millis(900));
         // attempt 只会取到 MAX_ATTEMPTS - 1，但函数本身不能因此溢出
         assert_eq!(RetryPolicy::delay_after(20), Duration::from_millis(300 * 3u64.pow(19)));
+    }
+
+    /// 端口上跑着别的服务时，响应体是网页——摘要要能让人一眼认出来。
+    #[test]
+    fn body_preview_keeps_the_recognizable_start() {
+        let html = "<!doctype html>\n<html lang=\"en\">\n\t<head>…";
+        let preview = body_preview(html);
+        assert!(preview.starts_with("<!doctype html>"), "实际：{preview}");
+        assert!(!preview.contains('\n'), "换行应当被压掉：{preview}");
+    }
+
+    /// 空响应体要明说，不能给一个空串让人以为「没报错」。
+    #[test]
+    fn body_preview_names_an_empty_body() {
+        assert_eq!(body_preview(""), "（空响应体）");
+        assert_eq!(body_preview("   \n\t "), "（空响应体）");
+    }
+
+    /// 连续空白要压成一个空格，否则状态栏里全是空白。
+    #[test]
+    fn body_preview_collapses_whitespace_runs() {
+        assert_eq!(body_preview("a \n\t  b"), "a b");
+    }
+
+    /// 截断按**字符**算。按字节截会把中文切成半个字，那是乱码。
+    #[test]
+    fn body_preview_truncates_by_chars_not_bytes() {
+        let long = "中文".repeat(200);
+        let preview = body_preview(&long);
+        assert!(preview.ends_with('…'), "超长应当带省略号：{preview}");
+        // 120 个字符 + 省略号；按字节截的话这里会短很多
+        assert_eq!(preview.chars().count(), 121);
     }
 }

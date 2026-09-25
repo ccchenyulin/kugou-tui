@@ -14,31 +14,20 @@
 //!
 //! # 界面与业务怎么用它
 //!
-//! [`Source`] 只暴露三个能力：搜索、取歌单歌曲、取播放直链。两个平台走的是同一套
-//! 接口语义（都是 KuGouMusicApi），因此这里不需要按平台分派——差异全部收敛在
-//! `api_base` / `cookie` / `device_id` 上。这也是它比接一个全新音源便宜得多的原因。
+//! 业务层只认 [`SourceKind`]，不感知具体音源：搜索、取链、歌词、目录浏览、云端歌单
+//! 全部通过 `SourceKind` 上的方法调用，由本文件末尾的**分派层**转发到对应实现。
 //!
-//! # 当前接入状态
+//! - 酷狗的两个平台走同一套接口语义（都是 KuGouMusicApi），差异全部收敛在
+//!   `api_base` / `cookie` / `device_id` 上，因此共用 [`crate::api`] 里的实现；
+//! - 网易云是**另一套服务**（NeteaseCloudMusicApi）：端点、参数名、以及「登录态
+//!   归谁保管」都不一样，实现放在 [`netease`] 子模块，由分派层按 kind 选路。
 //!
-//! 已经打通并验证的：配置持久化（`config.rs`）、切换动作（`update.rs` 的
-//! `App::switch_source`）、界面显示与 `--print-config`。
+//! # 曾经删掉的东西
 //!
-//! 还没做的：运行时目前**直接持有 `ApiClient`**，没有套这层 `Source`。因为两个
-//! 平台共用同一个客户端，`Source` 在当下只是转发，套上去要改所有 `self.api.xxx()`
-//! 调用点，收益为零、风险不为零。等接入**非酷狗**音源（那时才需要按 kind 分派）
-//! 时再套，改动才划算。
-//!
-//! 所以本文件**只保留数据模型**（[`SourceKind`] / [`SourceProfile`] / [`SourceSet`]）：
-//! 地址、登录态、设备指纹这三样差异就是全部，已由 `Config::switch_source` 统一切换。
-//! 曾有一个 `Source` 行为包装（转发 search / playlist_tracks / stream_url），但两个平台
-//! 接口语义完全一致，它只会多一层无意义转发，且从未被调用——按死代码删除。
-//! 将来接入**非酷狗**音源时，再按 [`SourceKind`] 分派各自的请求与解析实现。
-//!
-//! 所以本文件**只保留数据模型**（[`SourceKind`] / [`SourceProfile`] / [`SourceSet`]）：
-//! 地址、登录态、设备指纹这三样差异就是全部，且已由 `Config::switch_source` 统一切换。
-//! 曾有一个 `Source` 行为包装（转发 search / playlist_tracks / stream_url），但因为
-//! 两个平台接口语义完全一致，它只会多一层无意义转发，且从未被使用——已按死代码删除。
-//! 将来接入**非酷狗**音源时，再按 [`SourceKind`] 分派各自的请求与解析实现，改动只在本文件与调用点。
+//! 早先有一个 `Source` 行为包装，转发 search / playlist_tracks / stream_url。
+//! 那时只有酷狗两个平台，接口语义完全一致，那层包装只是无意义的转发、且从未被
+//! 调用，已按死代码删除。现在确实需要按 kind 分派了，分派直接落在 [`SourceKind`]
+//! 的方法上——不必再引入一个与之平行的 trait 对象。
 //!
 
 pub mod netease;
@@ -46,6 +35,7 @@ pub mod netease;
 use serde::{Deserialize, Serialize};
 
 use crate::api::client::ApiClient;
+use crate::api::cloud::UserInfo;
 use crate::api::model::{Artist, Lyric, Playlist, RankBoard, Song};
 use crate::error::Result;
 
@@ -54,9 +44,10 @@ use crate::error::Result;
 /// # 新增一个音源要动哪里
 ///
 /// 1. 在这里加一个变体；
-/// 2. 在下面 `label` / `default_api_base` / `capability` / `platform_env` 里补分支；
-/// 3. 在 [`SourceSet`] 里加一个配置字段；
-/// 4. 在 [`crate::source::dispatch`] 的分派函数里加分支，指向新模块的实现。
+/// 2. 在下面 `label` / `default_api_base` / `capability` / `platform_env` 等能力方法里补分支；
+/// 3. 在 [`SourceSet`] 里加一个配置字段（`profile` / `profile_mut` 也要跟着补）；
+/// 4. 写一个实现模块，并在下面**分派层**的每个 `SourceKind` 方法里加分支指向它。
+///    新增能力时别忘了一并声明到 [`Capability`]，界面据此决定要不要展示入口。
 ///
 /// 业务层只通过 `SourceKind` 的方法调用，不感知具体音源。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -96,6 +87,11 @@ pub struct Capability {
     pub catalog: bool,
     /// 是否支持云端歌单的读写（收藏、同步、增删改）。
     pub cloud: bool,
+    /// 是否有会员信息接口（`/user/vip/detail` 那套）。
+    ///
+    /// 只有酷狗有：它的标准版与概念版是两套会员体系。网易云没有对应端点，
+    /// 去请求只会拿到 404，所以调用方要先问这里。
+    pub vip: bool,
 }
 
 impl SourceKind {
@@ -126,10 +122,12 @@ impl SourceKind {
                 client_token: true,
                 catalog: true,
                 cloud: true,
+                vip: true,
             },
             // 网易云：NeteaseCloudMusicApi 提供扫码登录与完整的云端歌单接口，
             // 读（列表 + 曲目）与写（加歌/删歌/建/删歌单）都已支持。
-            // 目录类（歌单广场、歌手、排行榜）不走这一套，仍然不可用。
+            // 目录类（歌单广场、歌手、排行榜）也走它自己那套端点。
+            // 会员信息没有对应接口，`vip` 为假。
             SourceKind::Netease => Capability {
                 stream: true,
                 lyric: true,
@@ -138,6 +136,7 @@ impl SourceKind {
                 client_token: false,
                 catalog: true,
                 cloud: true,
+                vip: false,
             },
         }
     }
@@ -236,6 +235,48 @@ impl Default for SourceProfile {
     }
 }
 
+/// 组装最终发出去的 cookie 头：先规范化凭据，再按音源决定要不要补 `dfid`。
+///
+/// # 三件事，各自的理由
+///
+/// 1. **规范化**（[`crate::util::normalize_cookie_header`]）。网易云服务端下发的是
+///    整段 `Set-Cookie`，直接回传会让它认不出里面的 `MUSIC_U`——详见那个函数的
+///    说明。对酷狗那串是幂等的。
+/// 2. **`dfid` 只补给它认的音源**（[`SourceKind::uses_device_fingerprint`]）。
+///    `dfid` 是酷狗的设备指纹，它把 dfid 拼进 cookie 交给上游做风控校验；网易云
+///    没有这个机制。以前这里无条件补，等于**把酷狗的 dfid 发给网易云**——既没用，
+///    又让人分不清这串凭据到底属于谁。
+/// 3. **配置里已经写了 `dfid` 就以它为准**，不再拼第二个：重复的键最终谁生效取决于
+///    服务端的解析顺序，不如不给它这个机会。
+pub fn cookie_header_for(
+    kind: SourceKind,
+    cookie: Option<&str>,
+    device_id: Option<&str>,
+) -> Option<String> {
+    let base = crate::util::normalize_cookie_header(cookie.unwrap_or_default());
+
+    if !kind.uses_device_fingerprint() {
+        return base;
+    }
+
+    // 已经带了 dfid 就别重复拼
+    if let Some(base) = base.as_deref() {
+        if base.split("; ").any(|pair| pair.starts_with("dfid=")) {
+            return Some(base.to_string());
+        }
+    }
+
+    let dfid = device_id.map(str::trim).filter(|dfid| !dfid.is_empty());
+
+    match (base, dfid) {
+        (Some(base), Some(dfid)) => Some(format!("{base}; dfid={dfid}")),
+        (Some(base), None) => Some(base),
+        // 只有 dfid 也能用：取播放直链靠它过风控，不带登录态照样能听
+        (None, Some(dfid)) => Some(format!("dfid={dfid}")),
+        (None, None) => None,
+    }
+}
+
 impl SourceProfile {
     pub fn new(kind: SourceKind) -> Self {
         Self {
@@ -249,19 +290,11 @@ impl SourceProfile {
 
     /// 拼出可直接放进请求头的 cookie（必要时补上 dfid）。
     ///
-    /// 与 `Config::cookie_header` 同样的规则，区别是这里读的是**本音源档案**
-    /// 里的凭据。跨音源播放时要用它——队列里的歌可能来自另一个音源，
-    /// 拿当前音源的 cookie 去请求是错的。
-    pub fn cookie_header(&self) -> Option<String> {
-        let base = self.cookie.as_deref().unwrap_or_default().trim();
-        let has_dfid = base.split(';').any(|pair| pair.trim().starts_with("dfid="));
-
-        match (base.is_empty(), has_dfid, self.device_id.as_deref()) {
-            (true, _, Some(dfid)) => Some(format!("dfid={dfid}")),
-            (true, _, None) => None,
-            (false, false, Some(dfid)) => Some(format!("{base}; dfid={dfid}")),
-            (false, _, _) => Some(base.to_string()),
-        }
+    /// 与 `Config::cookie_header` 走的是同一条规则（见 [`cookie_header_for`]），
+    /// 区别是这里读的是**本音源档案**里的凭据。跨音源播放时要用它——队列里的歌
+    /// 可能来自另一个音源，拿当前音源的 cookie 去请求是错的。
+    pub fn cookie_header(&self, kind: SourceKind) -> Option<String> {
+        cookie_header_for(kind, self.cookie.as_deref(), self.device_id.as_deref())
     }
 
     /// 默认优先级：按声明顺序拉开间距，方便 UI 把某个音源插到中间。
@@ -348,6 +381,19 @@ impl SourceSet {
 // 新增音源 = 在本文件加枚举变体 + 在下面各方法加一个分支 + 写一个实现模块。
 // ============================================================================
 
+/// 取歌单曲目时的标识。
+///
+/// 酷狗把「自己的歌单」与「公开歌单」分成**两套端点**（前者按数字 `listid`，后者按
+/// `global_collection_id`），所以调用方必须说清是哪一种。网易云没有这个区分——
+/// 两者都是 `/playlist/track/all?id=`。
+#[derive(Debug, Clone, Copy)]
+pub enum PlaylistRef<'a> {
+    /// 自己的歌单：自建、收藏的。酷狗按数字 `listid` 取。
+    Own(i64),
+    /// 公开歌单：歌单广场、榜单等。酷狗按 `global_collection_id` 取。
+    Public(&'a str),
+}
+
 /// 给解析出来的歌曲盖上来源章。
 ///
 /// 每个返回 `Vec<Song>` 的分派方法都要调它——队列允许跨音源，
@@ -359,19 +405,6 @@ fn stamp_songs(songs: &mut [Song], kind: SourceKind) {
 }
 
 impl SourceKind {
-    /// 给一批歌曲盖上本音源的来源章（公开版，供调用方在分派层之外补盖）。
-    ///
-    /// 为什么需要它：歌单首屏为了「先用上界面」，直接调 `ApiClient` 的分页方法
-    /// （`user_playlist_tracks` / `playlist_tracks`）拿第一页，绕过了本模块里
-    /// 会盖章的 `*_tracks_all` 封装。而解析函数给 `Song::source` 填的是默认值
-    /// `Kugou`——在概念版下就不盖章会导致取链打到标准版端口（标准版没有概念版
-    /// 会员，只能给 60 秒试听/低码率），表现为「手机能听完整、TUI 里是试听」。
-    ///
-    /// 所以首屏这条路径必须自己补盖一次。
-    pub fn stamp(self, songs: &mut [Song]) {
-        stamp_songs(songs, self);
-    }
-
     /// 单曲搜索。
     pub async fn search_songs(
         self,
@@ -468,6 +501,44 @@ impl SourceKind {
         }
     }
 
+    /// 取歌单曲目的**一页**。
+    ///
+    /// 首屏用：先给一页让界面立刻有内容，剩下的交给 `*_tracks_all` 在后台补齐。
+    ///
+    /// ⚠️ 分页也必须走这层分派。首屏曾经图省事直接调 `ApiClient` 的酷狗分页方法
+    /// （`user_playlist_tracks` / `playlist_tracks`，参数是 `page` + `pagesize`），
+    /// 而那两个端点网易云服务根本没有——于是**网易云下打开歌单必然 404**；又因为
+    /// 首屏失败会直接返回、走不到后台补全那段，用户看到的就是「歌单里的歌一直 404」。
+    ///
+    /// 顺带一提，首屏走分派之后，「解析时 `Song::source` 是默认值、需要调用方补盖
+    /// 来源章」这个问题也一并消失了——盖章由本方法统一负责。
+    pub async fn playlist_tracks_page(
+        self,
+        client: &ApiClient,
+        playlist: PlaylistRef<'_>,
+        page: u32,
+        page_size: u32,
+        fresh: bool,
+    ) -> Result<Vec<Song>> {
+        let mut songs = match (self, playlist) {
+            (Self::Kugou | Self::KugouConcept, PlaylistRef::Own(list_id)) => {
+                client.user_playlist_tracks(list_id, page, page_size, fresh).await
+            }
+            (Self::Kugou | Self::KugouConcept, PlaylistRef::Public(global_id)) => {
+                client.playlist_tracks(global_id, page, page_size, fresh).await
+            }
+            // 网易云两种情况都是同一个端点，按 id 取
+            (Self::Netease, PlaylistRef::Own(list_id)) => {
+                netease::playlist_tracks_page(client, &list_id.to_string(), page, page_size).await
+            }
+            (Self::Netease, PlaylistRef::Public(global_id)) => {
+                netease::playlist_tracks_page(client, global_id, page, page_size).await
+            }
+        }?;
+        stamp_songs(&mut songs, self);
+        Ok(songs)
+    }
+
     pub async fn playlist_tracks_all(
         self,
         client: &ApiClient,
@@ -531,6 +602,17 @@ impl SourceKind {
         }
     }
 
+    /// 取当前登录用户的资料。
+    ///
+    /// 两个音源的字段完全不同（酷狗在顶层给 `nickname`/`pic`，网易云把它们埋在
+    /// `profile` 里，而且必须先有 uid），各自解析后收敛到同一个 [`UserInfo`]。
+    pub async fn user_detail(self, client: &ApiClient) -> Result<UserInfo> {
+        match self {
+            Self::Kugou | Self::KugouConcept => client.user_detail().await,
+            Self::Netease => netease::user_detail(client).await,
+        }
+    }
+
     pub async fn user_playlist_tracks_all(
         self,
         client: &ApiClient,
@@ -541,7 +623,8 @@ impl SourceKind {
             Self::Kugou | Self::KugouConcept => {
                 client.user_playlist_tracks_all(list_id, fresh).await
             }
-            Self::Netease => netease::user_playlist_tracks_all(client, list_id).await,
+            // 网易云没有「自己的歌单」专用端点，按 id 取即可
+            Self::Netease => netease::playlist_tracks_all(client, &list_id.to_string()).await,
         }?;
         stamp_songs(&mut songs, self);
         Ok(songs)
@@ -581,13 +664,17 @@ mod tests {
     /// 跨音源取链接要用**目标音源档案**里的凭据，不能拿当前音源的。
     #[test]
     fn profile_cookie_header_uses_own_credentials() {
-        let mut profile = SourceProfile::new(SourceKind::Netease);
-        assert_eq!(profile.cookie_header(), None, "没有凭据时不给 cookie");
+        let mut profile = SourceProfile::new(SourceKind::Kugou);
+        assert_eq!(
+            profile.cookie_header(SourceKind::Kugou),
+            None,
+            "没有凭据时不给 cookie"
+        );
 
         profile.cookie = Some("token=abc; userid=1".to_string());
         profile.device_id = Some("df-1".to_string());
         assert_eq!(
-            profile.cookie_header().as_deref(),
+            profile.cookie_header(SourceKind::Kugou).as_deref(),
             Some("token=abc; userid=1; dfid=df-1"),
             "应把 dfid 拼进去"
         );
@@ -595,8 +682,48 @@ mod tests {
         // 已经带了 dfid 就不要重复拼
         profile.cookie = Some("token=abc; dfid=own".to_string());
         assert_eq!(
-            profile.cookie_header().as_deref(),
+            profile.cookie_header(SourceKind::Kugou).as_deref(),
             Some("token=abc; dfid=own")
+        );
+    }
+
+    /// `dfid` 是酷狗的设备指纹，只该发给酷狗。
+    ///
+    /// 以前这里无条件拼，于是网易云的请求会带上**酷狗的** dfid——那是另一个平台
+    /// 的设备标识，既没用，又让「这串凭据是谁的」变得没法判断。
+    #[test]
+    fn netease_never_carries_the_kugou_device_fingerprint() {
+        let mut profile = SourceProfile::new(SourceKind::Netease);
+        profile.cookie = Some("MUSIC_U=abc".to_string());
+        // 配置文件里可能残留着早年写进去的 dfid，也得被挡住
+        profile.device_id = Some("df-from-kugou".to_string());
+
+        assert_eq!(
+            profile.cookie_header(SourceKind::Netease).as_deref(),
+            Some("MUSIC_U=abc"),
+            "网易云不该带 dfid"
+        );
+
+        // 只有 dfid、没有登录态时，网易云就是没有凭据
+        profile.cookie = None;
+        assert_eq!(profile.cookie_header(SourceKind::Netease), None);
+    }
+
+    /// 存下来的凭据可能是服务端下发的整段 `Set-Cookie`，组装时必须先规范化。
+    ///
+    /// 这条守的是「配置里已经有坏数据」的情况：老配置里存着未规范化的 cookie，
+    /// 用户不该为了修它重新扫一次码。
+    #[test]
+    fn cookie_header_normalizes_stored_credentials() {
+        let mut profile = SourceProfile::new(SourceKind::Netease);
+        profile.cookie = Some(
+            "MUSIC_A_T=1; Max-Age=2147483647; Path=/openapi/clientlog;;MUSIC_U=abc".to_string(),
+        );
+
+        assert_eq!(
+            profile.cookie_header(SourceKind::Netease).as_deref(),
+            Some("MUSIC_A_T=1; MUSIC_U=abc"),
+            "属性段与 `;;` 都要被清掉"
         );
     }
 }

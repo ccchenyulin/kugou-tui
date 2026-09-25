@@ -60,6 +60,16 @@ pub struct Config {
     /// 音量，范围 `0.0 ~ 1.0`。
     pub volume: f32,
 
+    /// 音频输出设备名（cpal 枚举到的名字）。`None` 表示跟随系统默认。
+    ///
+    /// 为什么需要显式指定：Linux 上 cpal 打开的是 ALSA 的 `default`，而 `default`
+    /// 可能被 `/etc/asound.conf` 写死成某一张声卡。实测就踩过：写死成板载卡，
+    /// 而用户在听 USB 声卡 —— 表现是「进度在走、完全没声音」，而且因为是直连
+    /// 硬件（绕过了 PipeWire），`pactl list sink-inputs` 里连这个程序都看不到。
+    /// 能在界面上改设备，这类问题就不用去翻系统配置了。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_device: Option<String>,
+
     /// 播放模式。
     pub playback_mode: PlaybackMode,
 
@@ -215,6 +225,7 @@ impl Default for Config {
             cookie: None,
             dfid: None,
             volume: DEFAULT_VOLUME,
+            audio_device: None,
             playback_mode: PlaybackMode::Sequential,
             cache_dir: default_cache_dir(),
             cache_limit_mib: DEFAULT_CACHE_LIMIT_MIB,
@@ -447,20 +458,19 @@ impl Config {
         }
     }
 
-    /// 组装最终发给 KuGouMusicApi 的 cookie 串。
+    /// 组装最终发给 API 服务的 cookie 串。
     ///
-    /// 若用户配置里已包含 `dfid=`，则以用户配置为准；否则用自动探测到的 dfid 补齐。
-    /// `/song/url` 接口缺少 dfid 会返回「本次请求需要验证」。
+    /// 规则统一在 [`crate::source::cookie_header_for`] 里，这里只负责把当前会话的
+    /// 凭据与音源递过去：先规范化（网易云服务端下发的是整段 `Set-Cookie`，不修就
+    /// 认不出里面的 `MUSIC_U`），再按当前音源决定要不要补 `dfid`（只有酷狗用得上）。
+    ///
+    /// `/song/url` 缺少 dfid 会返回「本次请求需要验证」，所以酷狗那边少不得。
     pub fn cookie_header(&self) -> Option<String> {
-        let base = self.cookie.as_deref().unwrap_or_default().trim();
-        let has_dfid = base.split(';').any(|pair| pair.trim().starts_with("dfid="));
-
-        match (base.is_empty(), has_dfid, self.dfid.as_deref()) {
-            (true, _, Some(dfid)) => Some(format!("dfid={dfid}")),
-            (true, _, None) => None,
-            (false, false, Some(dfid)) => Some(format!("{base}; dfid={dfid}")),
-            (false, _, _) => Some(base.to_string()),
-        }
+        crate::source::cookie_header_for(
+            self.active_source_kind(),
+            self.cookie.as_deref(),
+            self.dfid.as_deref(),
+        )
     }
 
     /// 是否已配置登录态。
