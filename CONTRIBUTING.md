@@ -97,7 +97,8 @@ src/
 
 ### 新增依赖要说明理由
 
-本项目的目标之一是"轻量"（release 约 5.4 MiB、常驻约 13 MiB）。加依赖前请说明：
+本项目的目标之一是"轻量"（release 二进制约 **7.0 MiB**、常驻约 **14–17 MiB**，
+实测见 [docs/DESIGN.md](docs/DESIGN.md#低资源占用)）。加依赖前请说明：
 它解决什么问题、有没有几十行代码能替代、会引入多大的依赖树。
 `tracing` / `chrono` / `rand` 目前都被刻意排除在外。
 
@@ -108,7 +109,12 @@ KuGouMusicApi 是逆向封装，**响应结构会漂移，文档也和实测不�
 - 同一语义按**候选键名列表**依次尝试（`pick_string` / `pick_i64` 等）。
 - 类型不假设：`AlbumID` 可能是数字、字符串或 `null`。
 - 单条解析失败只丢这一条，不影响整页。
-- 新增解析逻辑时，请顺手在 README 的「实测修正过的认知」表格里记下与文档不一致的地方。
+- 新增解析逻辑时，请顺手把与文档不一致的地方记进
+  [docs/DESIGN.md](docs/DESIGN.md#接口适配) 的「上游文档说 / 实际是」表格。
+- **同一个上游可能有多套字段布局**，别只认你调试时看到的那一套。网易云就是例子：
+  `/search` 给 `artists` / `album` / `duration`，而 `/playlist/track/all` 与
+  `/artists` 给 `ar` / `al` / `dt`——只认前者的话搜索页正常，歌单页与歌手页的歌
+  会全部没有歌手、没有专辑、时长显示 `00:00`。**每种布局都要有单元测试钉住。**
 
 ### 状态只在主线程改
 
@@ -153,6 +159,78 @@ KUGOU_TUI_DEBUG=1 ./target/release/kugou-tui
 - PR 里请说明：**改了什么、为什么改、怎么验证的**（尤其是接口相关的改动，
   附上一小段真实响应的关键字段会很有帮助）。
 - 如果改动会影响用户可见行为，请同步更新 `README.md`。
+
+## 发版
+
+按顺序走，**别跳步**——下面每条都是踩过的。
+
+### 1. 改版本号与变更日志
+
+```bash
+# Cargo.toml 里的 version
+# CHANGELOG.md 顶部加一节，格式照 [Keep a Changelog]
+```
+
+`Cargo.lock` 会跟着变，一起提交。
+
+### 2. 提交、推送、打 tag、发 Release
+
+```bash
+git add -A && git commit -m "chore: 版本 X.Y.Z"
+git push origin main
+git tag -a vX.Y.Z -m "版本 X.Y.Z …"    # 用附注 tag
+git push origin vX.Y.Z
+
+cargo build --release
+./scripts/make-release-tarball          # 产出 dist/ 里的 tarball 并打印 sha256
+gh release create vX.Y.Z --title "vX.Y.Z" --notes-file <说明> \
+  dist/kugou-tui-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz
+```
+
+**顺序很重要**：`make-release-tarball` 这类工具脚本要在**打 tag 之前**就提交进去，
+否则 checkout 那个 tag 拿不到它。
+
+**Release 的 tarball 必须含三个脚本与文档**，不只是二进制——非 Arch 用户拿不到
+AUR 包（包里直接带了接口服务），只能靠这个 tarball 把服务配起来，少了脚本
+`kugou-tui-install-api` 就跑不了。`make-release-tarball` 已经把这套内容固化下来。
+
+### 3. 更新 AUR 包
+
+AUR 仓库在 `~/aur/kugou-tui`（不在本仓库里）。发新版后要改：
+
+```bash
+cd ~/aur/kugou-tui
+# 1. PKGBUILD 里的 pkgver
+# 2. source 里 tarball 的 sha256sums —— 取新 tag 的：
+#      curl -sL -o /tmp/t.tar.gz \
+#        "https://github.com/sijin-xb/kugou-tui/archive/refs/tags/vX.Y.Z.tar.gz"
+#      sha256sum /tmp/t.tar.gz
+makepkg --printsrcinfo > .SRCINFO    # 元数据变了就必须重新生成，否则 AUR 页面不更新
+makepkg -f                            # 构建验证，别直接推
+git add PKGBUILD .SRCINFO && git commit -m "upgpkg: X.Y.Z-1" && git push
+```
+
+### 上游提交号钉在两个地方，改一处不够
+
+接口服务的验证过的提交写在：
+
+- `scripts/kugou-api-install` 的 `PINNED[kugou]`
+- AUR 的 `PKGBUILD` 里的 `_api_pin`
+
+**两处要一起改。** 换 `_api_pin` 时还要重新生成 AUR 仓库里的
+`kugou-api-package-lock.json`（上游那个提交只有 `pnpm-lock.yaml`，没有
+`package-lock.json`，而构建用的是 `npm ci`）。生成命令写在 PKGBUILD 的注释里。
+
+### 4. 发完自己验一遍
+
+**下载回来核对，不要只看本地文件。** 0.3.7 那版就是因为只看本地目录，漏掉了
+tarball 里的脚本，一直到有人模拟新用户才发现。
+
+```bash
+curl -sL -o /tmp/t.tar.gz "https://github.com/sijin-xb/kugou-tui/releases/download/vX.Y.Z/<资产名>"
+tar tzf /tmp/t.tar.gz          # 确认有 scripts/ 与 docs/
+tar xzf /tmp/t.tar.gz && ./<解压出的目录>/kugou-tui --version
+```
 
 ## 法律与合规
 

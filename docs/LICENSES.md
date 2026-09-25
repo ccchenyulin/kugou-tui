@@ -2,7 +2,14 @@
 
 ## 本项目
 
-本项目采用 [MIT](../LICENSE)（© 2026 kugou-tui contributors）。
+本项目采用 **MIT**（© 2026 kugou-tui contributors）。
+
+许可原文在仓库根目录的 `LICENSE`；用包管理器装的话，它在
+`/usr/share/licenses/kugou-tui/LICENSE`。
+
+> 这里刻意不用相对链接指向 `LICENSE`：这份文档会被装到
+> `/usr/share/doc/kugou-tui/docs/`，而许可按 Arch 惯例放在 `/usr/share/licenses/`
+> 下——相对链接在安装后必然失效。写路径反而两种场合都读得懂。
 
 ## 第三方依赖许可
 
