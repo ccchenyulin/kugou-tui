@@ -4,6 +4,31 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.7] - 2026-09-25
+
+### 新增
+
+- **支持「软件包内置的接口服务」**。为 AUR 包的「装完即用」准备：包会把接口服务连同
+  生产依赖装到 `/usr/share/kugou-tui/api/<音源>`（只读），三个脚本现在都会优先用它，
+  没有才退回 `~` 下自己 clone 的那份——`kugou-api-install` 发现系统目录就直接启动，
+  **跳过 clone 与 npm install**。
+
+  之所以能把服务打进包里：它**不往自己目录写任何文件**（源码里没有 `writeFile` /
+  `mkdirSync`），实测整个目录 `chmod -R a-w` 之后照样能起、能返回真实数据。
+  于是 `/usr` 保持只读、不被 npm 污染，也不需要常驻进程。
+
+  路径可用 `KUGOU_API_SYSTEM_ROOT` 覆盖（给非 `/usr` 前缀的打包与测试用）。
+
+### 修复
+
+- **全新安装时启动器静默退出**。`scripts/kugou-tui` 开了 `set -o pipefail`，而读配置
+  用的是 `sed -n ... | head -n 1`；**全新安装时配置文件还不存在**，`sed` 退出非零 →
+  管道被判失败 → `set -e` 让整个脚本静默退出（退出码 2，一句提示都没有）。
+  用户第一次跑就是黑的，而这条路径正是「装完即用」要走的。
+
+  现在读取前先 `[ -r ]` 判可读。顺带把重复了**三遍**的 `sources.active` 提取合并成
+  一个 `read_active_source()`。
+
 ## [0.3.6] - 2026-09-25
 
 ### 修复
