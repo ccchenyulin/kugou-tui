@@ -196,19 +196,38 @@ ok "发行包自足（含三个脚本与文档）"
 step "将要执行的外部动作"
 
 release_sha=$(sha256sum "$tarball" | cut -d' ' -f1)
-cat <<EOF
-    以下动作不可逆，tag 与 Release 一旦发出就撤不回来：
 
-      1. git push origin main
-      2. git tag -a $tag  &&  git push origin $tag
-      3. 取 tag 源码包的 sha256 → 更新 $aur_dir 的 pkgver 与 sha256sums
-         → 重新生成 .SRCINFO → 本地提交（**不推**）
-      4. 从该提交克隆出来跑一次 makepkg（验证「用户 clone 到的能构建」）
-      5. gh release create $tag（挂 dist/$pkgname-$version-x86_64-unknown-linux-gnu.tar.gz
-         sha256 $release_sha）
-      6. 把 Release 资产下载回来核对内容
-      7. git push（AUR）
-EOF
+# 清单必须**跟着 --no-aur 变**。这个脚本存在的意义就是让人在按下回车之前看清
+# 「将要发生什么」——列了 AUR 却跳过它，清单本身就是假的，正是它要防的那类事。
+plan=(
+  "git push origin main"
+  "git tag -a $tag  &&  git push origin $tag"
+)
+if [ "$skip_aur" -eq 0 ]; then
+  plan+=(
+    "取 tag 源码包的 sha256 → 更新 $aur_dir 的 pkgver 与 sha256sums
+         → 重新生成 .SRCINFO → 本地提交（**不推**）"
+    "从该提交克隆出来跑一次 makepkg（验证「用户 clone 到的能构建」）"
+  )
+fi
+plan+=(
+  "gh release create $tag（挂 dist/$pkgname-$version-x86_64-unknown-linux-gnu.tar.gz
+         sha256 $release_sha）"
+  "把 Release 资产下载回来核对内容"
+)
+if [ "$skip_aur" -eq 0 ]; then
+  plan+=("git push（AUR）")
+fi
+
+printf '    以下动作不可逆，tag 与 Release 一旦发出就撤不回来：\n\n'
+idx=1
+for item in "${plan[@]}"; do
+  printf '      %d. %s\n' "$idx" "$item"
+  idx=$((idx + 1))
+done
+if [ "$skip_aur" -eq 1 ]; then
+  printf '\n    已用 --no-aur：跳过 AUR 的更新与推送，PKGBUILD 与 .SRCINFO 不会被改动。\n'
+fi
 
 if [ "$assume_yes" -ne 1 ]; then
   printf '\n    继续？[y/N] '
