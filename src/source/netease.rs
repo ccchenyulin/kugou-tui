@@ -39,9 +39,9 @@ use crate::error::Result;
 /// 搜索结果里每页取多少条。与酷狗保持一致，便于 UI 分页逻辑复用。
 const DEFAULT_PAGE_SIZE: u32 = 30;
 
-/// 取歌单/榜单曲目时最多翻多少页。
+/// 取歌单 / 榜单曲目时最多翻多少页。
 ///
-/// 榜单一般就 100 首（一页够），歌单可能上千首。上限取 20 页 × 100 = 2000 首，
+/// 榜单一般就 100 首（一页够），歌单可能上千首。上限取 20 页 × 500 = 10000 首，
 /// 再大的歌单也够用了，同时避免服务端分页异常时无限翻下去。
 const MAX_TRACK_PAGES: u32 = 20;
 
@@ -78,16 +78,31 @@ pub async fn search_songs(
     Ok(songs)
 }
 
-/// 从搜索结果的一条记录里解析出 [`Song`]。
+/// 从一条歌曲 JSON 里解析出 [`Song`]。
 ///
-/// 网易云的字段是嵌套的：歌手在 `artists[]`、专辑在 `album{}`、封面在
-/// `album.picUrl`。全部走 `Option` 取值，任何一段缺失只丢这一条。
+/// # 两套布局都得认
+///
+/// 网易云用**两套完全不同的字段名**描述同一首歌，取决于走哪个接口（实测 4.30.1）：
+///
+/// | 接口 | 歌手 | 专辑 | 时长 |
+/// |---|---|---|---|
+/// | `/search`（搜索） | `artists` | `album` | `duration` |
+/// | `/playlist/track/all`（歌单 / 榜单） | `ar` | `al` | `dt` |
+/// | `/artists` → `hotSongs`（歌手热歌） | `ar` | `al` | `dt` |
+///
+/// 只认第一套的后果很隐蔽：**搜索页一切正常，歌单页与歌手页里的歌却全部没有
+/// 歌手、没有专辑、时长显示 `00:00`**（封面也会退化成再打一次 `/song/detail`）。
+/// 只看搜索页很难发现，所以这里两套都试，并留了单元测试钉住两种布局。
+///
+/// 字段都是嵌套的：歌手在 `artists[]` / `ar[]`、专辑在 `album{}` / `al{}`。
+/// 全部走 `Option` 取值，任何一段缺失只丢这一条。
 fn song_from_json(value: &Value) -> Option<Song> {
     // 网易云用数字 id 标识歌曲，它是取播放链接与歌词的唯一依据
     let id = pick_i64(value, &["id"])?;
     let name = pick_string(value, &["name"]).unwrap_or_else(|| "未知曲目".to_string());
 
-    let album = value.get("album");
+    // 专辑：搜索给 `album`，歌单/歌手给 `al`（见上面的布局对照表）
+    let album = value.get("album").or_else(|| value.get("al"));
     let cover = album
         .and_then(|album| pick_string(album, &["picUrl", "pic", "img1v1Url"]))
         // 网易云的封面 URL 可以带尺寸参数，缩到 300 够终端与桌面控件用
@@ -108,8 +123,8 @@ fn song_from_json(value: &Value) -> Option<Song> {
             .and_then(|album| pick_i64(album, &["id"]))
             .map(|id| id.to_string())
             .unwrap_or_default(),
-        // 网易云用 duration 表示毫秒，与领域模型一致，无需换算
-        duration_ms: pick_u64(value, &["duration"]).unwrap_or_default(),
+        // 毫秒，与领域模型一致，无需换算。搜索是 `duration`，歌单/歌手是 `dt`。
+        duration_ms: pick_u64(value, &["duration", "dt"]).unwrap_or_default(),
         singers: parse_singers(value),
         album_name: album
             .and_then(|album| pick_string(album, &["name"]))
@@ -124,9 +139,13 @@ fn song_from_json(value: &Value) -> Option<Song> {
     })
 }
 
-/// 歌手数组：`artists[].name`。
+/// 歌手数组：搜索是 `artists[]`，歌单/歌手是 `ar[]`（见 [`song_from_json`] 的布局对照表）。
 fn parse_singers(value: &Value) -> Vec<Singer> {
-    let Some(artists) = value.get("artists").and_then(Value::as_array) else {
+    let Some(artists) = value
+        .get("artists")
+        .or_else(|| value.get("ar"))
+        .and_then(Value::as_array)
+    else {
         return Vec::new();
     };
     artists
@@ -468,43 +487,38 @@ fn playlist_from_json(value: &Value) -> Option<crate::api::model::Playlist> {
     })
 }
 
-/// 取一个歌单里的全部歌曲。
+/// 取歌单的**一页**曲目。
 ///
-/// `/playlist/track/all` 一次最多 500 条且可能分页，这里沿用酷狗那套
-/// 「翻页直到拿不到新数据」的做法。
-pub async fn user_playlist_tracks_all(client: &ApiClient, list_id: i64) -> Result<Vec<Song>> {
-    let mut songs = Vec::new();
-    let mut offset = 0u32;
-    // 单页取 500：**这个接口本身很慢**（实测 145 首要 2.4~3.4 秒，跟 limit
-    // 关系不大，是服务端在逐个补全曲目信息）。所以优化点是「少发几次请求」，
-    // 而不是「每次少拿一点」。400 首的歌单这样一次就够。
-    const PAGE: u32 = 500;
-    const MAX_PAGES: u32 = 20;
+/// 首屏用：先给一页让界面立刻有内容，剩下的交给 [`playlist_tracks_all`] 在后台补齐。
+///
+/// 网易云没有「自己的歌单 / 公开歌单」两套端点（酷狗有），两者都按歌单 id 取，
+/// 所以调用方不必区分。
+pub async fn playlist_tracks_page(
+    client: &ApiClient,
+    playlist_id: &str,
+    page: u32,
+    page_size: u32,
+) -> Result<Vec<Song>> {
+    let limit = if page_size == 0 {
+        DEFAULT_PAGE_SIZE
+    } else {
+        page_size
+    };
+    // 第一页 offset 为 0
+    let offset = page.saturating_sub(1).saturating_mul(limit);
 
-    for _ in 0..MAX_PAGES {
-        let root = client
-            .get_json_uncached(
-                "/playlist/track/all",
-                &[
-                    ("id", list_id.to_string()),
-                    ("limit", PAGE.to_string()),
-                    ("offset", offset.to_string()),
-                ],
-            )
-            .await?;
-        let data = data_of(&root);
+    let root = client
+        .get_json_uncached(
+            "/playlist/track/all",
+            &[
+                ("id", playlist_id.to_string()),
+                ("limit", limit.to_string()),
+                ("offset", offset.to_string()),
+            ],
+        )
+        .await?;
 
-        let page = extract_list(data, &["songs"], song_from_json);
-        let got = page.len() as u32;
-        songs.extend(page);
-
-        if got < PAGE {
-            break;
-        }
-        offset += got;
-    }
-
-    Ok(songs)
+    Ok(extract_list(data_of(&root), &["songs"], song_from_json))
 }
 
 // ==================================================================
@@ -746,29 +760,27 @@ pub async fn rank_tracks_all(client: &ApiClient, rank_id: i64) -> Result<Vec<Son
     playlist_tracks_all(client, &rank_id.to_string()).await
 }
 
-/// 公开歌单的全部曲目。
+/// 取一个歌单 / 榜单的**全部**曲目。
+///
+/// 翻页直到拿不到新数据。单页取 500：**这个接口本身很慢**（实测 145 首要 2.4~3.4 秒，
+/// 跟 limit 关系不大，是服务端在逐个补全曲目信息），所以优化点是「少发几次请求」，
+/// 而不是「每次少拿一点」。400 首的歌单这样一次就够。
+///
+/// 「自己的歌单」与「公开歌单」在这里是同一个端点，调用方传 id 字符串即可。
 pub async fn playlist_tracks_all(client: &ApiClient, playlist_id: &str) -> Result<Vec<Song>> {
-    const PAGE: u32 = 100;
+    const PAGE: u32 = 500;
     let mut all: Vec<Song> = Vec::new();
 
     for page in 1..=MAX_TRACK_PAGES {
-        let offset = (page - 1) * PAGE;
-        let root = client
-            .get_json_uncached(
-                "/playlist/track/all",
-                &[
-                    ("id", playlist_id.to_string()),
-                    ("limit", PAGE.to_string()),
-                    ("offset", offset.to_string()),
-                ],
-            )
-            .await?;
-        let songs = extract_list(data_of(&root), &["songs"], song_from_json);
-        if songs.is_empty() {
+        let songs = playlist_tracks_page(client, playlist_id, page, PAGE).await?;
+        let got = songs.len() as u32;
+        all.extend(songs);
+        // 不足一页说明已经取到末尾
+        if got < PAGE {
             break;
         }
-        all.extend(songs);
     }
+
     Ok(all)
 }
 
@@ -795,6 +807,70 @@ mod tests {
     fn write_result_accepts_200() {
         let root = json!({"code": 200, "id": 123});
         check_api_code("/playlist/create", &root).expect("200 表示成功");
+    }
+
+    /// 搜索布局：`artists` / `album` / `duration`。
+    #[test]
+    fn song_parses_the_search_layout() {
+        let value = json!({
+            "id": 123,
+            "name": "想你就写信 (Live)",
+            "duration": 238698,
+            "artists": [{"id": 6452, "name": "周杰伦"}],
+            "album": {"id": 999, "name": "中国新歌声第二季 第13期"}
+        });
+
+        let song = song_from_json(&value).expect("应当能解析");
+        assert_eq!(song.name, "想你就写信 (Live)");
+        assert_eq!(song.hash, "123");
+        assert_eq!(song.duration_ms, 238_698);
+        assert_eq!(song.album_name, "中国新歌声第二季 第13期");
+        assert_eq!(song.album_id, "999");
+        assert_eq!(song.singers.len(), 1);
+        assert_eq!(song.singers[0].name, "周杰伦");
+    }
+
+    /// 「歌曲详情」布局：`ar` / `al` / `dt`。歌单、榜单、歌手热歌都走这套。
+    ///
+    /// 这个测试是防回归的关键：只认搜索布局时，搜索页照常正常，而歌单页与歌手页
+    /// 里的歌会全部退化成「无歌手、无专辑、时长 00:00」——肉眼很难第一眼发现。
+    #[test]
+    fn song_parses_the_detail_layout() {
+        let value = json!({
+            "id": 1440570723,
+            "name": "Normal No More",
+            "dt": 199578,
+            "ar": [{"id": 1234, "name": "TYSM"}],
+            "al": {
+                "id": 5678,
+                "name": "Normal No More",
+                "picUrl": "https://p1.music.126.net/x.jpg"
+            }
+        });
+
+        let song = song_from_json(&value).expect("应当能解析");
+        assert_eq!(song.name, "Normal No More");
+        assert_eq!(song.duration_ms, 199_578, "时长应当取 dt");
+        assert_eq!(song.album_name, "Normal No More", "专辑名应当取 al.name");
+        assert_eq!(song.album_id, "5678", "专辑 id 应当取 al.id");
+        assert_eq!(song.singers.len(), 1, "歌手应当取 ar");
+        assert_eq!(song.singers[0].name, "TYSM");
+        assert_eq!(
+            song.cover.as_deref(),
+            Some("https://p1.music.126.net/x.jpg?param=300y300"),
+            "封面应当取 al.picUrl 并缩到 300"
+        );
+    }
+
+    /// 没有 id 就丢这一条；字段缺一半也不能 panic。
+    #[test]
+    fn song_tolerates_missing_fields() {
+        assert!(song_from_json(&json!({"name": "没有 id"})).is_none());
+        assert!(song_from_json(&json!({"id": 1})).is_some(), "只有 id 也算一首");
+        assert!(
+            song_from_json(&json!({"id": 1, "ar": [], "al": null})).is_some(),
+            "空歌手与空专辑不该 panic"
+        );
     }
 
     /// 响应里没有 code 字段时按成功处理（部分接口只给数据）。

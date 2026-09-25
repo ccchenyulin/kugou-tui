@@ -381,6 +381,19 @@ impl SourceSet {
 // 新增音源 = 在本文件加枚举变体 + 在下面各方法加一个分支 + 写一个实现模块。
 // ============================================================================
 
+/// 取歌单曲目时的标识。
+///
+/// 酷狗把「自己的歌单」与「公开歌单」分成**两套端点**（前者按数字 `listid`，后者按
+/// `global_collection_id`），所以调用方必须说清是哪一种。网易云没有这个区分——
+/// 两者都是 `/playlist/track/all?id=`。
+#[derive(Debug, Clone, Copy)]
+pub enum PlaylistRef<'a> {
+    /// 自己的歌单：自建、收藏的。酷狗按数字 `listid` 取。
+    Own(i64),
+    /// 公开歌单：歌单广场、榜单等。酷狗按 `global_collection_id` 取。
+    Public(&'a str),
+}
+
 /// 给解析出来的歌曲盖上来源章。
 ///
 /// 每个返回 `Vec<Song>` 的分派方法都要调它——队列允许跨音源，
@@ -392,19 +405,6 @@ fn stamp_songs(songs: &mut [Song], kind: SourceKind) {
 }
 
 impl SourceKind {
-    /// 给一批歌曲盖上本音源的来源章（公开版，供调用方在分派层之外补盖）。
-    ///
-    /// 为什么需要它：歌单首屏为了「先用上界面」，直接调 `ApiClient` 的分页方法
-    /// （`user_playlist_tracks` / `playlist_tracks`）拿第一页，绕过了本模块里
-    /// 会盖章的 `*_tracks_all` 封装。而解析函数给 `Song::source` 填的是默认值
-    /// `Kugou`——在概念版下就不盖章会导致取链打到标准版端口（标准版没有概念版
-    /// 会员，只能给 60 秒试听/低码率），表现为「手机能听完整、TUI 里是试听」。
-    ///
-    /// 所以首屏这条路径必须自己补盖一次。
-    pub fn stamp(self, songs: &mut [Song]) {
-        stamp_songs(songs, self);
-    }
-
     /// 单曲搜索。
     pub async fn search_songs(
         self,
@@ -501,6 +501,44 @@ impl SourceKind {
         }
     }
 
+    /// 取歌单曲目的**一页**。
+    ///
+    /// 首屏用：先给一页让界面立刻有内容，剩下的交给 `*_tracks_all` 在后台补齐。
+    ///
+    /// ⚠️ 分页也必须走这层分派。首屏曾经图省事直接调 `ApiClient` 的酷狗分页方法
+    /// （`user_playlist_tracks` / `playlist_tracks`，参数是 `page` + `pagesize`），
+    /// 而那两个端点网易云服务根本没有——于是**网易云下打开歌单必然 404**；又因为
+    /// 首屏失败会直接返回、走不到后台补全那段，用户看到的就是「歌单里的歌一直 404」。
+    ///
+    /// 顺带一提，首屏走分派之后，「解析时 `Song::source` 是默认值、需要调用方补盖
+    /// 来源章」这个问题也一并消失了——盖章由本方法统一负责。
+    pub async fn playlist_tracks_page(
+        self,
+        client: &ApiClient,
+        playlist: PlaylistRef<'_>,
+        page: u32,
+        page_size: u32,
+        fresh: bool,
+    ) -> Result<Vec<Song>> {
+        let mut songs = match (self, playlist) {
+            (Self::Kugou | Self::KugouConcept, PlaylistRef::Own(list_id)) => {
+                client.user_playlist_tracks(list_id, page, page_size, fresh).await
+            }
+            (Self::Kugou | Self::KugouConcept, PlaylistRef::Public(global_id)) => {
+                client.playlist_tracks(global_id, page, page_size, fresh).await
+            }
+            // 网易云两种情况都是同一个端点，按 id 取
+            (Self::Netease, PlaylistRef::Own(list_id)) => {
+                netease::playlist_tracks_page(client, &list_id.to_string(), page, page_size).await
+            }
+            (Self::Netease, PlaylistRef::Public(global_id)) => {
+                netease::playlist_tracks_page(client, global_id, page, page_size).await
+            }
+        }?;
+        stamp_songs(&mut songs, self);
+        Ok(songs)
+    }
+
     pub async fn playlist_tracks_all(
         self,
         client: &ApiClient,
@@ -585,7 +623,8 @@ impl SourceKind {
             Self::Kugou | Self::KugouConcept => {
                 client.user_playlist_tracks_all(list_id, fresh).await
             }
-            Self::Netease => netease::user_playlist_tracks_all(client, list_id).await,
+            // 网易云没有「自己的歌单」专用端点，按 id 取即可
+            Self::Netease => netease::playlist_tracks_all(client, &list_id.to_string()).await,
         }?;
         stamp_songs(&mut songs, self);
         Ok(songs)

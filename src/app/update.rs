@@ -25,7 +25,7 @@ use crate::audio::cache::AudioCache;
 use crate::audio::engine::AudioSource;
 use crate::config::{Config, SUPPORTED_QUALITIES};
 use crate::error::AppError;
-use crate::source::SourceKind;
+use crate::source::{PlaylistRef, SourceKind};
 
 use crate::audio::download::{Downloader, PREROLL_BYTES};
 use crate::audio::engine::{AudioEvent, PlaybackState, SEEK_STEP_MS, VOLUME_STEP};
@@ -2137,26 +2137,19 @@ impl App {
             // 大歌单（几百首）即使并发翻页也要好几秒，这段时间界面只有一个"载入中"，
             // 体验很差。学 MoeKoeMusic 的做法：先给首屏，剩下的后台继续取。
             // 它那边是滚动到底再加载；我们一次性取完，但**先让用户看到东西**。
-            let first = match is_own {
-                Some(list_id) => {
-                    api.user_playlist_tracks(list_id, 1, PAGE_LIMIT, fresh)
-                        .await
-                }
-                None => {
-                    api.playlist_tracks(&playlist.id, 1, PAGE_LIMIT, fresh)
-                        .await
-                }
+            let first = {
+                // 走 `active_source` 而不是 `api`：分页同样是音源相关的——酷狗那两个
+                // 端点（参数是 `page` + `pagesize`）网易云根本没有，直接调 `ApiClient`
+                // 会让网易云下打开歌单必然 404；而首屏失败会 return，连下面的后台
+                // 补全都走不到，表现就是「歌单里的歌一直 404」。
+                let target = match is_own {
+                    Some(list_id) => PlaylistRef::Own(list_id),
+                    None => PlaylistRef::Public(&playlist.id),
+                };
+                active_source
+                    .playlist_tracks_page(&api, target, 1, PAGE_LIMIT, fresh)
+                    .await
             };
-
-            // 首屏走的是 `ApiClient` 的分页方法（不经本模块带盖章的 `*_tracks_all`
-            // 封装），解析时 `Song::source` 只会拿到默认值 `Kugou`。在概念版音源下
-            // 不补盖这一章，这些歌就会被当成标准版的歌——播放时把取链请求打到
-            // 标准版端口，而标准版没有概念版会员，只能给 60 秒试听/低码率。
-            // 后台补全的那一批（`*_tracks_all`）自带盖章，所以只有首屏这批是坏的。
-            let first = first.map(|mut songs| {
-                active_source.stamp(&mut songs);
-                songs
-            });
 
             match first {
                 Ok(songs) => {
