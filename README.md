@@ -104,6 +104,7 @@ cd kugou-tui && cargo build --release
 | [docs/FAQ.md](docs/FAQ.md) | 常见问题与排查 |
 | [docs/DESIGN.md](docs/DESIGN.md) | 线程模型、边下边播原理、低资源占用、接口适配 |
 | [docs/LICENSES.md](docs/LICENSES.md) | 第三方依赖许可分析 |
+| [docs/RELEASE.md](docs/RELEASE.md) | 发版流程与依赖顺序、发行版产物清单、版本与标签规则、回收逻辑 |
 | [CHANGELOG.md](CHANGELOG.md) | 更新日志 |
 
 ### 许可与免责

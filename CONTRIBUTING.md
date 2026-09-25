@@ -162,69 +162,50 @@ KUGOU_TUI_DEBUG=1 ./target/release/kugou-tui
 
 ## 发版
 
-按顺序走，**别跳步**——下面每条都是踩过的。
-
-### 1. 改版本号与变更日志
-
-```bash
-# Cargo.toml 里的 version
-# CHANGELOG.md 顶部加一节，格式照 [Keep a Changelog]
-```
-
-`Cargo.lock` 会跟着变，一起提交。
-
-### 2. 提交、推送、打 tag、发 Release
+**用 `./scripts/release`**，不要手工走。它把顺序固化了——下面这些坑都是踩过的，
+脚本已经把它们挡在里面：
 
 ```bash
-git add -A && git commit -m "chore: 版本 X.Y.Z"
-git push origin main
-git tag -a vX.Y.Z -m "版本 X.Y.Z …"    # 用附注 tag
-git push origin vX.Y.Z
+# 1. 先改版本号与变更日志（脚本会检查，缺了直接中止）
+#    - Cargo.toml 的 version（纯数字 X.Y.Z；Cargo.lock 会跟着变，一起提交）
+#    - CHANGELOG.md 顶部加一节，格式照 [Keep a Changelog]
+git add -A && git commit -m "chore: 版本 X.Y.Z" && git push
 
-cargo build --release
-./scripts/make-release-tarball          # 产出 dist/ 里的 tarball 并打印 sha256
-gh release create vX.Y.Z --title "vX.Y.Z" --notes-file <说明> \
-  dist/kugou-tui-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz
+# 2. 跑发版（阶段一本地，确认后阶段二推送）
+./scripts/release
+
+# 只想检查、什么都不构建不推送：
+./scripts/release --dry-run
 ```
 
-**顺序很重要**：`make-release-tarball` 这类工具脚本要在**打 tag 之前**就提交进去，
-否则 checkout 那个 tag 拿不到它。
+`scripts/release` 会自动做完：前置检查 → 回收上一轮的中间产物 → clippy + 测试 →
+构建 → 打发行包并核对内容清单 → **停下等你确认** → push main → 打 tag → 推 tag →
+更新并验证 AUR → 建 Release → 下载回来核对 → 推 AUR。
 
-**Release 的 tarball 必须含三个脚本与文档**，不只是二进制——非 Arch 用户拿不到
-AUR 包（包里直接带了接口服务），只能靠这个 tarball 把服务配起来，少了脚本
-`kugou-tui-install-api` 就跑不了。`make-release-tarball` 已经把这套内容固化下来。
+**完整规格（版本与标签规则、发行版产物清单、目标仓库、各步骤依赖、
+失败后怎么恢复）见 [docs/RELEASE.md](docs/RELEASE.md)。**
 
-### 3. 更新 AUR 包
+### 两条最容易忘的
 
-AUR 仓库在 `~/aur/kugou-tui`（不在本仓库里）。发新版后要改：
+1. **工具脚本要在打 tag 之前提交。** `scripts/make-release-tarball` 曾提交在 tag
+   之后，结果 checkout 那个 tag 拿不到它。`scripts/release` 的前置检查要求工作区
+   干净，从机制上挡住了这个。
+2. **上游提交号钉在两个地方，改一处不够**：
+   `scripts/kugou-api-install` 的 `PINNED[kugou]`，以及 AUR 的 `PKGBUILD` 里的
+   `_api_pin`。换 `_api_pin` 时还要重新生成 AUR 仓库里的
+   `kugou-api-package-lock.json`（上游那个提交只有 `pnpm-lock.yaml`，没有
+   `package-lock.json`，而构建用的是 `npm ci`）。生成命令写在 PKGBUILD 的注释里。
+
+### 磁盘
+
+一轮发版会在 `target/package/`、`dist/`、AUR 仓库的 `src/` 与 `pkg/` 留下约
+10 MiB 中间产物。`scripts/release` 开跑前会自动回收；平时也可以手动跑：
 
 ```bash
-cd ~/aur/kugou-tui
-# 1. PKGBUILD 里的 pkgver
-# 2. source 里 tarball 的 sha256sums —— 取新 tag 的：
-#      curl -sL -o /tmp/t.tar.gz \
-#        "https://github.com/sijin-xb/kugou-tui/archive/refs/tags/vX.Y.Z.tar.gz"
-#      sha256sum /tmp/t.tar.gz
-makepkg --printsrcinfo > .SRCINFO    # 元数据变了就必须重新生成，否则 AUR 页面不更新
-makepkg -f                            # 构建验证，别直接推
-git add PKGBUILD .SRCINFO && git commit -m "upgpkg: X.Y.Z-1" && git push
+./scripts/clean --dry-run   # 先看它想删什么
+./scripts/clean             # 回收
+./scripts/clean --all       # 连 target/ 一起清（下次全量重编约 3 分钟）
 ```
-
-### 上游提交号钉在两个地方，改一处不够
-
-接口服务的验证过的提交写在：
-
-- `scripts/kugou-api-install` 的 `PINNED[kugou]`
-- AUR 的 `PKGBUILD` 里的 `_api_pin`
-
-**两处要一起改。** 换 `_api_pin` 时还要重新生成 AUR 仓库里的
-`kugou-api-package-lock.json`（上游那个提交只有 `pnpm-lock.yaml`，没有
-`package-lock.json`，而构建用的是 `npm ci`）。生成命令写在 PKGBUILD 的注释里。
-
-### 4. 发完自己验一遍
-
-**下载回来核对，不要只看本地文件。** 0.3.7 那版就是因为只看本地目录，漏掉了
-tarball 里的脚本，一直到有人模拟新用户才发现。
 
 ```bash
 curl -sL -o /tmp/t.tar.gz "https://github.com/sijin-xb/kugou-tui/releases/download/vX.Y.Z/<资产名>"
