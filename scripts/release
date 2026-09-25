@@ -70,6 +70,30 @@ die() {
   exit 1
 }
 
+# 网络动作加退避重试。
+#
+# 实测这台机器上 `git push` 会因为 TLS 抖动失败一次
+# （`TLS connect error: unexpected eof while reading`），重试就好。
+# 发版流程中途断掉很难受——可能已经推了 main 却还没打 tag——所以每个网络步骤
+# 都包一层。只包**幂等**动作：推同一个 commit、下载同一个文件，重试都安全。
+# `gh release create` 不是幂等的（建好了再建会报已存在），所以那一步单独处理。
+retry() {
+  local attempts=3 delay=3 n=1
+  while true; do
+    if "$@"; then
+      return 0
+    fi
+    if [ "$n" -ge "$attempts" ]; then
+      warn "重试 $attempts 次仍失败：$*"
+      return 1
+    fi
+    warn "第 $n 次失败，${delay}s 后重试"
+    sleep "$delay"
+    n=$((n + 1))
+    delay=$((delay * 2))
+  done
+}
+
 # ==================================================================
 # 阶段一：本地
 # ==================================================================
@@ -96,7 +120,7 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 ok "工作区干净"
 
-git fetch --quiet origin main
+retry git fetch --quiet origin main
 if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
   die "本地 main 与 origin/main 不一致。先 pull/push 对齐。"
 fi
@@ -184,11 +208,11 @@ if [ "$assume_yes" -ne 1 ]; then
 fi
 
 step "推送 main 与 tag"
-git push origin main
+retry git push origin main
 git tag -a "$tag" -m "版本 $version
 
 见 CHANGELOG.md 的 [$version] 一节。"
-git push origin "$tag"
+retry git push origin "$tag"
 ok "已推送 $tag"
 
 # ==================================================================
@@ -203,7 +227,7 @@ if [ "$skip_aur" -eq 0 ]; then
   src_url="https://github.com/sijin-xb/$pkgname/archive/refs/tags/$tag.tar.gz"
   tmp_tar=$(mktemp -t kugou-tui-src-XXXXXX.tar.gz)
   trap 'rm -f "$tmp_tar"' EXIT
-  curl -fsSL -o "$tmp_tar" "$src_url" || die "取不到 $src_url（tag 刚推上去，稍等几秒重试）"
+  retry curl -fsSL -o "$tmp_tar" "$src_url" || die "取不到 $src_url（tag 刚推上去，稍等几秒重试）"
   src_sha=$(sha256sum "$tmp_tar" | cut -d' ' -f1)
   ok "tag 源码包 sha256 $src_sha"
 
@@ -250,17 +274,24 @@ PY
 fi
 
 step "创建 GitHub Release"
-gh release create "$tag" --title "$tag" --notes-file - "$tarball" <<EOF
+# 做成幂等的：`gh release create` 本身不幂等——如果上次「Release 建好了但资产没传
+# 上去」，重跑会直接报「已存在」，人就卡住了。所以先看有没有，有就补传资产。
+if gh release view "$tag" > /dev/null 2>&1; then
+  warn "$tag 的 Release 已存在，改为补传资产（--clobber）"
+  gh release upload "$tag" "$tarball" --clobber
+else
+  gh release create "$tag" --title "$tag" --notes-file - "$tarball" <<EOF
 版本 $version
 
 见 [CHANGELOG.md](CHANGELOG.md) 的 [$version] 一节。
 EOF
+fi
 ok "已创建 $tag"
 
 step "下载回来核对"
 verify_dir=$(mktemp -d -t kugou-tui-verify-XXXXXX)
 asset="$(basename "$tarball")"
-curl -fsSL -o "$verify_dir/$asset" \
+retry curl -fsSL -o "$verify_dir/$asset" \
   "https://github.com/sijin-xb/$pkgname/releases/download/$tag/$asset" ||
   die "下载 Release 资产失败——**别跳过这步**，0.3.7 的发行包漏脚本就是因为只看本地文件"
 downloaded_sha=$(sha256sum "$verify_dir/$asset" | cut -d' ' -f1)
@@ -279,7 +310,7 @@ if [ "$skip_aur" -eq 0 ]; then
     warn "本地提交已经做好了，贴完公钥跑这一条即可："
     warn "    cd $aur_dir && git push --set-upstream origin master"
   else
-    (cd "$aur_dir" && git push --set-upstream origin master)
+    (cd "$aur_dir" && retry git push --set-upstream origin master)
     ok "已推送到 AUR"
   fi
 fi
