@@ -1,4 +1,4 @@
-//! 事件 → 状态变更。
+//! 事件 → 状态变更。主线程的调度器。
 //!
 //! 这是整个程序的「大脑」：所有输入（按键、异步结果、音频事件、定时心跳）都在
 //! 这里被翻译成对 [`AppState`] 的修改。它**不**渲染、不阻塞、不直接做 IO——
@@ -6,6 +6,27 @@
 //!
 //! 这条纪律带来的直接好处：`handle_*` 全是纯同步函数，可以逐个单元测试，
 //! 也不会因为某个网络请求卡住而冻结界面。
+//!
+//! # 这个文件里该留什么
+//!
+//! 从 4700 行拆到现在的样子，判据一直是**「调用方在哪、结果谁处理」**，不是行数。
+//! 留下来的是三类东西：
+//!
+//! 1. **分派**：`handle_event` / `handle_action` / `activate`。它们按
+//!    `(Tab, Focus)` 或模态状态决定该叫谁，横跨多个模块——搬进任何一个模块都会
+//!    让那个模块反过来依赖别的模块（`navigation.rs` 顶部那段说明就是为此写的）。
+//! 2. **加载层**：`load_*` / `open_selected_*`。`navigation.rs` 的
+//!    `ensure_tab_loaded` 只请它们拉数据，自己不发请求。
+//! 3. **结果与收尾**：`handle_loaded`（每条异步结果的身份判据都在这里）、
+//!    `handle_audio_event`、`tick`。
+//!
+//! 已经搬走的：`navigation.rs`（导航）、`search.rs`（搜索）、`playback.rs`
+//! （播放控制）、`desktop.rs`（MPRIS / 托盘 / 窗口）、`cloud.rs`（登录 / 音源 /
+//! VIP / 云端歌单）、`settings.rs`（设置页的三个交互）。
+//!
+//! 要守的形状是**星形**：`update` 指向所有模块，模块之间互不调用（只回指
+//! `update` / `mod` / `settings`）。出现叶子 ↔ 叶子就说明切错了地方，
+//! 回去找那个「按 Tab 分派」的函数。
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -13,36 +34,29 @@ use std::time::Instant;
 use ratatui::crossterm::event::MouseEvent;
 
 use crate::api::catalog::PAGE_LIMIT;
-use crate::api::cloud::QrStatus;
-use crate::api::model::{Artist, Playlist, RankBoard, Song};
+use crate::api::model::{Artist, Playlist, RankBoard, Song, format_duration_ms};
 use crate::app::App;
+use crate::app::settings::quality_label;
 use crate::app::state::{
-    ConfirmAction, Connection, CoverArt, EntryList, Focus, HitTarget, HitZone, LoginPicker,
-    LoginState, PromptAction, PromptState, QualityPicker, Tab, move_selection, select_first,
-    select_last,
+    ConfirmAction, Connection, CoverArt, Focus, HitTarget, HitZone, LoginState, PromptAction,
+    PromptState, QualityPicker, Tab,
 };
-use crate::audio::cache::AudioCache;
 use crate::audio::engine::AudioSource;
-use crate::config::{Config, SUPPORTED_QUALITIES};
 use crate::error::AppError;
 use crate::source::{PlaylistRef, SourceKind};
 
-use crate::audio::download::Downloader;
+use crate::audio::download::{Downloader, PREROLL_BYTES, StreamOutcome};
 use crate::audio::engine::{AudioEvent, PlaybackState, SEEK_STEP_MS, VOLUME_STEP};
 use crate::audio::spectrum::BAND_COUNT;
 use crate::event::{Event, Loaded, LoadingTarget, PlaylistSource, VipClaimOutcome};
 use crate::keymap::{Action, CHEATSHEET, KeyMode};
 use crate::logger::tlog;
-use crate::ui::theme::ThemeName;
 
 /// 翻页时跳过的行数。
 const PAGE_STEP: isize = 10;
 
 /// 下载进度上报的字节间隔。太小会让事件通道被高频消息淹没。
 const PROGRESS_STEP_BYTES: u64 = 256 * 1024;
-
-/// 「上一首」在播放超过这个时长后，先回到本曲开头而不是切歌。
-const RESTART_THRESHOLD_MS: u64 = 3_000;
 
 /// 每帧最多处理的事件数，防止事件洪水导致画面完全停止刷新。
 const MAX_EVENTS_PER_FRAME: usize = 64;
@@ -52,12 +66,6 @@ const MAX_EVENTS_PER_FRAME: usize = 64;
 /// 默认 200ms 一拍，50 拍约 10 秒。目录扫描放在阻塞线程池里，
 /// 因此这个频率不会影响界面流畅度。
 const CACHE_MEASURE_TICKS: u64 = 50;
-
-/// 搜索接口的最大页数。
-///
-/// 实测 `page` 超过 16 会返回 `error_code: 149`（Out Page Range）。分页是服务端
-/// 硬限，不是约定，所以提在这里并注明：改这个数之前要重新打一次接口确认。
-const SEARCH_MAX_PAGES: u32 = 16;
 
 /// 歌手列表一次取多少个。接口叫 `hotsize`，与「歌曲每页条数」不是一个概念，
 /// 因此刻意不跟着 `config.page_size` 走。
@@ -78,9 +86,6 @@ fn expand_cover_size(url: &str, size: u32) -> String {
         url.to_string()
     }
 }
-
-/// 桌面组件（MPRIS）用的封面像素尺寸。控件显示得不大，没必要拉原图。
-const MPRIS_COVER_SIZE: u32 = 400;
 
 /// 图片真实宽高比（宽/高）。
 ///
@@ -107,29 +112,6 @@ fn not_logged_in_hint(source: SourceKind) -> String {
         SourceKind::Kugou | SourceKind::KugouConcept => {
             "云端歌单需要登录，请配置 cookie（--cookie 或配置文件）".to_string()
         }
-    }
-}
-
-/// 领取当日概念版 VIP：**先领一天，再升级成畅听 VIP**。
-///
-/// 两步是连着的——上游要求先领一天才能升级，中间隔 500ms 让服务端状态落库。
-/// MoeKoeMusic 的 `getVip()` 也是这两步加同一个间隔。
-async fn claim_and_upgrade(api: &crate::api::ApiClient, day: &str) -> crate::error::Result<()> {
-    api.claim_day_vip(day).await?;
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    api.upgrade_day_vip().await?;
-    Ok(())
-}
-
-/// 从错误里取出**该给用户看**的那句话。
-///
-/// `AppError::Api` 的 Display 是「接口 /youth/day/vip 返回错误：code=30201 今日已领取」。
-/// 路径那半句对用户是纯噪音（他只有一个可能的操作），而且会把状态栏挤爆、
-/// 把真正有用的原因截掉——实测过，112 列的终端上「今日已领取」正好被切没。
-fn readable_reason(error: &AppError) -> String {
-    match error {
-        AppError::Api { message, .. } => message.clone(),
-        other => other.to_string(),
     }
 }
 
@@ -174,7 +156,7 @@ impl App {
     }
 
     // ==================================================================
-    // 鼠标
+    // 鼠标与列表交互
     // ==================================================================
 
     /// 鼠标事件：点击选中、双击激活、滚轮移动选中、点击进度条跳转。
@@ -231,6 +213,7 @@ impl App {
                 self.click_list_row(zone, mouse)
             }
             HitTarget::Progress => self.click_progress(zone, mouse),
+            HitTarget::LyricLine => self.click_lyric(zone, mouse),
             HitTarget::Settings => self.click_setting(zone, mouse),
             HitTarget::VipClaim => self.claim_daily_vip(),
             HitTarget::ProfileRetry => {
@@ -271,6 +254,7 @@ impl App {
             }
             HitTarget::Tab(_)
             | HitTarget::Progress
+            | HitTarget::LyricLine
             | HitTarget::Settings
             | HitTarget::VipClaim
             | HitTarget::ProfileRetry => {
@@ -279,6 +263,103 @@ impl App {
         }
 
         self.open_context_menu();
+    }
+
+    /// 点击列表行：选中，双击则激活（等同 Enter）。
+    fn click_list_row(&mut self, zone: HitZone, mouse: &MouseEvent) {
+        let Some(index) = zone.index_at(mouse.row) else {
+            return;
+        };
+
+        // 双击判定要在覆盖 last_click 之前做
+        let double = self.state.is_double_click(zone.target, Some(index));
+
+        match zone.target {
+            HitTarget::Entries => self.state.select_entry_index(index),
+            HitTarget::Songs => self.state.select_song_index(index),
+            HitTarget::Queue => {
+                self.focus_hit_target(zone.target);
+                self.state.queue_cursor.select(Some(index));
+            }
+            HitTarget::Tab(_)
+            | HitTarget::Progress
+            | HitTarget::LyricLine
+            | HitTarget::Settings
+            | HitTarget::VipClaim
+            | HitTarget::ProfileRetry => {
+                return;
+            }
+        }
+
+        self.focus_hit_target(zone.target);
+        self.state.set_last_click(zone.target, Some(index));
+
+        if double {
+            self.activate();
+        }
+    }
+
+    /// 点击进度条：按 x 比例跳转到对应时间。
+    fn click_progress(&mut self, zone: HitZone, mouse: &MouseEvent) {
+        let duration_ms = self.state.duration_ms;
+        if duration_ms == 0 || zone.rect.width == 0 {
+            return;
+        }
+
+        let ratio =
+            f64::from(mouse.column.saturating_sub(zone.rect.left())) / f64::from(zone.rect.width);
+        let target = (ratio * duration_ms as f64) as u64;
+        let target = target.min(duration_ms.saturating_sub(1));
+        self.audio.seek_to(target);
+        // 乐观更新，让进度条立刻响应
+        self.state.position_ms = target;
+    }
+
+    /// 点击歌词行：跳到这一句的起始时间。
+    ///
+    /// 命中区记的是**显示行**（译文/音译各占一行），而跳转要的是**歌词行**，
+    /// 所以经 `display_line_index` 换一次下标——那个映射由渲染层每帧回填，
+    /// 因为只有它知道这次滚动到了哪里。
+    fn click_lyric(&mut self, zone: HitZone, mouse: &MouseEvent) {
+        let Some(display) = zone.index_at(mouse.row) else {
+            return;
+        };
+        let Some(line_index) = self.state.lyric.line_index_at_display(display) else {
+            return;
+        };
+        let Some(line) = self.state.lyric.lyric.lines.get(line_index) else {
+            return;
+        };
+
+        // **要加回歌词偏移**：当前行是按 `position - lyric_offset_ms` 算出来的，
+        // 直接跳到 `line.time_ms` 会正好差一句。偏移为 0 时看不出，调过的人一眼
+        // 就发现。
+        self.seek_to(lyric_seek_target(
+            line.time_ms,
+            self.state.config.lyric_offset_ms,
+        ));
+    }
+
+    /// 把焦点切到命中区对应的面板。离开搜索框时退出输入态，否则字母键会被吞掉。
+    fn focus_hit_target(&mut self, target: HitTarget) {
+        let focus = match target {
+            HitTarget::Entries => Focus::Primary,
+            HitTarget::Songs => Focus::Secondary,
+            HitTarget::Queue => Focus::Queue,
+            HitTarget::Settings => Focus::Primary,
+            // 领取 VIP 是一行即时动作，不改变焦点——点完继续看首页
+            // 歌词行同理：点它是「跳到这句」，跳完还在原处看歌词
+            HitTarget::Tab(_)
+            | HitTarget::Progress
+            | HitTarget::LyricLine
+            | HitTarget::VipClaim
+            | HitTarget::ProfileRetry => return,
+        };
+
+        if self.state.focus == Focus::Primary && focus != Focus::Primary {
+            self.state.search.editing = false;
+        }
+        self.state.focus = focus;
     }
 
     // ==================================================================
@@ -374,64 +455,9 @@ impl App {
         }
     }
 
-    /// 设置页上下移动选中项。到头就停住，不回绕——设置项一共十来个，
-    /// 绕回去反而容易改错项。
-    fn move_settings(&mut self, delta: isize) {
-        let len = crate::app::settings::Setting::ALL.len() as isize;
-        let next = (self.state.settings_cursor as isize + delta).clamp(0, len - 1);
-        self.state.settings_cursor = next as usize;
-    }
-
-    /// 点击设置项：点一下选中，**再点一下**改值。
-    ///
-    /// 之所以不做「点一次就改」：设置行横跨整屏，用户更多时候只是想选中它，
-    /// 误触就改值会很难受。两次点击的语义和列表的「双击激活」一致。
-    fn click_setting(&mut self, zone: HitZone, mouse: &MouseEvent) {
-        let Some(index) = zone.index_at(mouse.row) else {
-            return;
-        };
-        let already_selected = self.state.settings_cursor == index;
-        self.state.settings_cursor = index;
-
-        let double = self.state.is_double_click(zone.target, Some(index));
-        self.state.set_last_click(zone.target, Some(index));
-        if already_selected || double {
-            self.adjust_setting(1);
-        }
-    }
-
-    /// 点击列表行：选中，双击则激活（等同 Enter）。
-    fn click_list_row(&mut self, zone: HitZone, mouse: &MouseEvent) {
-        let Some(index) = zone.index_at(mouse.row) else {
-            return;
-        };
-
-        // 双击判定要在覆盖 last_click 之前做
-        let double = self.state.is_double_click(zone.target, Some(index));
-
-        match zone.target {
-            HitTarget::Entries => self.state.select_entry_index(index),
-            HitTarget::Songs => self.state.select_song_index(index),
-            HitTarget::Queue => {
-                self.focus_hit_target(zone.target);
-                self.state.queue_cursor.select(Some(index));
-            }
-            HitTarget::Tab(_)
-            | HitTarget::Progress
-            | HitTarget::Settings
-            | HitTarget::VipClaim
-            | HitTarget::ProfileRetry => {
-                return;
-            }
-        }
-
-        self.focus_hit_target(zone.target);
-        self.state.set_last_click(zone.target, Some(index));
-
-        if double {
-            self.activate();
-        }
-    }
+    // ==================================================================
+    // 下载：预取下一首、把单曲存到下载目录
+    // ==================================================================
 
     /// 把队列里的下一首提前下载到缓存（**不播放、不打扰界面**）。
     ///
@@ -516,8 +542,6 @@ impl App {
         self.open_quality_picker(song);
     }
 
-    /// 下载指定歌曲。菜单里点的歌不一定是当前在放的那首，所以这里收一首歌
-    /// 而不是读 `state.current`。
     /// 打开音质选择框。选完之后走 [`Self::download_song`]。
     ///
     /// 不直接用全局音质：那个是**播放**音质（要照顾流量和缓冲），下载到
@@ -539,6 +563,8 @@ impl App {
         self.download_song(song, quality);
     }
 
+    /// 下载指定歌曲。菜单里点的歌不一定是当前在放的那首，所以这里收一首歌
+    /// 而不是读 `state.current`。
     fn download_song(&mut self, song: Song, quality: String) {
         let dir =
             crate::app::settings::expand_download_dir(self.state.config.download_dir.as_deref());
@@ -620,191 +646,9 @@ impl App {
         });
     }
 
-    /// 把设置页选中的那一项按 `delta` 调整一档（左为 -1、右为 +1），并落盘。
-    ///
-    /// 改完立刻 `save()`：设置页的价值就在于「改了就是改了」，退出时再保存
-    /// 的话，崩溃或强制退出会丢掉刚才那几下调整，用户会觉得没生效。
-    fn adjust_setting(&mut self, delta: isize) {
-        use crate::app::settings as s;
-
-        let Some(setting) = s::Setting::ALL.get(self.state.settings_cursor).copied() else {
-            return;
-        };
-        let config = &mut self.state.config;
-
-        match setting {
-            s::Setting::Theme => {
-                if let Some(next) = s::cycle(&ThemeName::ALL, config.theme, delta) {
-                    config.theme = next;
-                }
-            }
-            s::Setting::Quality => {
-                if let Some(next) = s::cycle_str(SUPPORTED_QUALITIES, &config.quality, delta) {
-                    config.quality = next.to_string();
-                }
-            }
-            s::Setting::PlaybackMode => {
-                if let Some(next) = s::cycle(&s::PLAYBACK_MODES, config.playback_mode, delta) {
-                    config.playback_mode = next;
-                }
-            }
-            s::Setting::RefreshMs => {
-                if let Some(next) = s::cycle(&s::REFRESH_MS_OPTIONS, config.tick_ms, delta) {
-                    config.tick_ms = next;
-                }
-            }
-            s::Setting::LyricOffsetMs => {
-                let next = config.lyric_offset_ms + delta as i64 * s::LYRIC_OFFSET_STEP;
-                config.lyric_offset_ms = next.clamp(-s::LYRIC_OFFSET_LIMIT, s::LYRIC_OFFSET_LIMIT);
-            }
-            s::Setting::PageSize => {
-                if let Some(next) = s::cycle(&s::PAGE_SIZE_OPTIONS, config.page_size, delta) {
-                    config.page_size = next;
-                }
-            }
-            s::Setting::CacheLimitMib => {
-                if let Some(next) = s::cycle(&s::CACHE_LIMIT_OPTIONS, config.cache_limit_mib, delta)
-                {
-                    config.cache_limit_mib = next;
-                    // AudioCache 只认构造时传进来的上限，改了要重建。
-                    // 它没有别的状态（就是目录 + 上限字节数），重建是安全的。
-                    self.cache = AudioCache::new(config.cache_dir.clone(), next);
-                    self.refresh_cache_usage();
-                }
-            }
-            // 这三项只影响界面，不进配置文件：它们是「这次会话想不想看」
-            // 而不是「以后都要这样」，持久化反而会在下次启动时让人困惑
-            s::Setting::BasicColor => {
-                if delta != 0 {
-                    config.basic_color = !config.basic_color;
-                }
-            }
-            s::Setting::LyricPanel => {
-                if delta != 0 {
-                    self.state.show_lyric_panel = !self.state.show_lyric_panel;
-                }
-            }
-            s::Setting::Sidebar => {
-                if delta != 0 {
-                    self.state.sidebar_visible = !self.state.sidebar_visible;
-                }
-            }
-            // 简易模式进配置文件：它是「这台机器要不要省资源」的长期选择，
-            // 不像歌词面板那样只关乎这一次会话。
-            s::Setting::LiteMode => {
-                if delta != 0 {
-                    config.lite_mode = !config.lite_mode;
-                    // 关掉封面就把已解码的那张也扔了，否则内存不会降
-                    if config.lite_mode {
-                        self.state.cover = crate::app::state::CoverArt::default();
-                    }
-                }
-            }
-            // 路径用 Cycle 在几个预设之间切，配置文件里空着也行
-            // （首次启动按 `~/Music` 走，不会坏在「路径不存在」上）。
-            s::Setting::DownloadDir => {
-                let current = config.download_dir.as_deref().unwrap_or("~/Music");
-                if let Some(next) = s::cycle(&s::DOWNLOAD_DIR_OPTIONS, current, delta) {
-                    config.download_dir = Some(next.to_string());
-                }
-            }
-            // 进配置文件：这是「这块封面以后都这么铺」的长期选择，不是一次性开关。
-            // 改了下一帧就生效——`cover_fill` 是每帧从 config 读的，封面协议会
-            // 因为铺满方式变了而重新裁一次图。
-            s::Setting::CoverFill => {
-                if let Some(next) = s::cycle(&s::COVER_FILLS, config.cover_fill, delta) {
-                    config.cover_fill = next;
-                }
-            }
-            // 换一张声卡。设备是在音频线程里重建的，当前这首会停一下，
-            // 等新设备就绪（DeviceOpened）再按原位置续播，所以这里单独提示并返回。
-            s::Setting::AudioDevice => {
-                let options = s::device_options(&self.state.audio_devices);
-                let Some(next) = s::cycle_device(&options, config.audio_device.as_deref(), delta)
-                else {
-                    return;
-                };
-                let target = next
-                    .clone()
-                    .unwrap_or_else(|| s::DEFAULT_DEVICE_LABEL.to_string());
-                config.audio_device = next.clone();
-                // 只在真的有声音在放时才续播：暂停状态下换设备不该自作主张开始播
-                self.pending_device_resume = match self.state.playback {
-                    PlaybackState::Playing => self
-                        .state
-                        .current
-                        .clone()
-                        .map(|song| (song, self.state.position_ms)),
-                    _ => None,
-                };
-                self.audio.use_device(next);
-                self.state.info(crate::ui::views::settings::change_notice(
-                    setting.label(),
-                    &target,
-                ));
-                if let Err(error) = self.state.config.save() {
-                    self.state
-                        .error(format!("保存设置失败：{}", error.user_hint()));
-                }
-                return;
-            }
-        }
-
-        let label = setting.label();
-        let value = s::value_text(setting, &self.state);
-        // 这两项只改本次会话的界面，不进配置文件：它们是「现在想不想看」
-        // 而不是「以后都这样」，持久化反而会在下次启动时让人困惑
-        if matches!(setting, s::Setting::LyricPanel | s::Setting::Sidebar) {
-            self.state
-                .info(crate::ui::views::settings::change_notice(label, &value));
-            return;
-        }
-
-        match self.state.config.save() {
-            Ok(()) => self
-                .state
-                .info(crate::ui::views::settings::change_notice(label, &value)),
-            Err(error) => self
-                .state
-                .error(format!("保存设置失败：{}", error.user_hint())),
-        }
-    }
-
-    /// 点击进度条：按 x 比例跳转到对应时间。
-    fn click_progress(&mut self, zone: HitZone, mouse: &MouseEvent) {
-        let duration_ms = self.state.duration_ms;
-        if duration_ms == 0 || zone.rect.width == 0 {
-            return;
-        }
-
-        let ratio =
-            f64::from(mouse.column.saturating_sub(zone.rect.left())) / f64::from(zone.rect.width);
-        let target = (ratio * duration_ms as f64) as u64;
-        let target = target.min(duration_ms.saturating_sub(1));
-        self.audio.seek_to(target);
-        // 乐观更新，让进度条立刻响应
-        self.state.position_ms = target;
-    }
-
-    /// 把焦点切到命中区对应的面板。离开搜索框时退出输入态，否则字母键会被吞掉。
-    fn focus_hit_target(&mut self, target: HitTarget) {
-        let focus = match target {
-            HitTarget::Entries => Focus::Primary,
-            HitTarget::Songs => Focus::Secondary,
-            HitTarget::Queue => Focus::Queue,
-            HitTarget::Settings => Focus::Primary,
-            // 领取 VIP 是一行即时动作，不改变焦点——点完继续看首页
-            HitTarget::Tab(_)
-            | HitTarget::Progress
-            | HitTarget::VipClaim
-            | HitTarget::ProfileRetry => return,
-        };
-
-        if self.state.focus == Focus::Primary && focus != Focus::Primary {
-            self.state.search.editing = false;
-        }
-        self.state.focus = focus;
-    }
+    // ==================================================================
+    // 按键分派：模态优先级 → 编辑态 → 浏览态
+    // ==================================================================
 
     /// 处理一个按键动作。
     pub fn handle_action(&mut self, action: Action) {
@@ -1204,201 +1048,16 @@ impl App {
     }
 
     // ==================================================================
-    // 导航
+    // 输入意图分派：跨模块的入口
+    //
+    // `activate` 与 `startup_search` 都不是单一模块的事，所以住在分派层：
+    //
+    // * `activate`：Enter 键按 `(Tab, Focus)` 决定该搜索、该播放还是该打开。
+    //   它原本住在 `navigation.rs` 里，结果让 navigation 同时依赖 search 与
+    //   playback——一个「导航」模块去调播放，边界就说不通了。
+    // * `startup_search`：`--search` 的启动胶水（切到搜索页 + 填词 + 提交），
+    //   同样横跨两个模块；留在 `search.rs` 会让 search 反过来依赖 navigation。
     // ==================================================================
-
-    pub fn switch_tab(&mut self, tab: Tab) {
-        self.switch_tab_inner(tab, true);
-    }
-
-    /// 切到指定标签页。
-    ///
-    /// `move_focus` 为 `false` 时**保留当前焦点**。用方向键在侧边栏里连续上下走时
-    /// 必须这样：若每次移动都把焦点甩回主区，用户按第二下就没反应了。
-    fn switch_tab_inner(&mut self, tab: Tab, move_focus: bool) {
-        self.state.tab = tab;
-        self.state.search.editing = false;
-        if move_focus {
-            self.state.focus = Focus::Primary;
-        }
-        self.ensure_tab_loaded(tab);
-    }
-
-    /// 侧边栏里上下移动：切换标签，焦点留在侧边栏。
-    ///
-    /// 走 [`Tab::SIDEBAR_ORDER`]——那是**屏幕上真正显示的顺序**。以前走的是
-    /// `ALL`（数字键落点），而两者顺序不同：从「队列」按一下 j 会跳到「歌词」，
-    /// 可屏幕上下一个明明写着「首页」。首页置顶之后这种错位会出现在第一屏，
-    /// 所以按显示顺序走是硬要求。
-    fn move_sidebar(&mut self, delta: isize) {
-        let current = Tab::SIDEBAR_ORDER
-            .iter()
-            .position(|tab| *tab == self.state.tab)
-            .unwrap_or(0);
-        let next = (current as isize + delta).clamp(0, Tab::SIDEBAR_ORDER.len() as isize - 1);
-        let tab = Tab::SIDEBAR_ORDER[next as usize];
-
-        if tab != self.state.tab {
-            self.switch_tab_inner(tab, false);
-        }
-    }
-
-    /// 首次进入某个标签页时惰性加载数据。
-    ///
-    /// 加载失败时列表保持为空、`loading` 复位，于是下次再切回来会重试——
-    /// 对「服务刚启动完还没就绪」这类瞬时故障很友好。
-    pub fn ensure_tab_loaded(&mut self, tab: Tab) {
-        match tab {
-            Tab::Playlists
-                if self.state.playlists.list.is_empty() && !self.state.playlists.list.load.is_loading() =>
-            {
-                self.load_plaza_playlists();
-            }
-            Tab::Artists
-                if self.state.artists.list.is_empty() && !self.state.artists.list.load.is_loading() =>
-            {
-                self.load_artists();
-            }
-            Tab::Ranks
-                if self.state.ranks.list.is_empty() && !self.state.ranks.list.load.is_loading() =>
-            {
-                self.load_ranks();
-            }
-            Tab::Cloud
-                if self.state.cloud.list.is_empty() && !self.state.cloud.list.load.is_loading() =>
-            {
-                self.load_cloud_playlists();
-            }
-            _ => {}
-        }
-    }
-
-    /// 侧边栏：跳到第一个 / 最后一个标签（同样是**显示顺序**上的首尾）。
-    fn select_sidebar_edge(&mut self, to_first: bool) {
-        let target = if to_first {
-            Tab::SIDEBAR_ORDER[0]
-        } else {
-            Tab::SIDEBAR_ORDER[Tab::SIDEBAR_ORDER.len() - 1]
-        };
-        if target != self.state.tab {
-            self.switch_tab_inner(target, false);
-        }
-    }
-
-    /// 条目列表（歌单 / 歌手 / 榜单）跳到首/末项。泛型是因为三类条目的类型不同。
-    fn select_entry_edge<T>(list: &mut EntryList<T>, to_first: bool) {
-        if to_first {
-            list.select_first();
-        } else {
-            list.select_last();
-        }
-    }
-
-    /// 移动当前列表的选择（↑/↓、PgUp/PgDn）。
-    fn move_selection(&mut self, delta: isize) {
-        match (self.state.tab, self.state.focus) {
-            // 侧边栏里上下移动 = 切换标签页（侧边栏的高亮就是当前标签）
-            (_, Focus::Sidebar) => self.move_sidebar(delta),
-            (_, Focus::Queue) => {
-                move_selection(&mut self.state.queue_cursor, self.state.queue.len(), delta);
-            }
-            // 首页与可视化页都是纯展示页，没有任何列表，焦点在哪都退化成切换
-            // 标签页——否则这两页会「上下键完全无响应」（可视化页实测踩过）。
-            // 放在 Sidebar / Queue 之后即可，那两个焦点的行为仍由上面的分支决定。
-            (Tab::Home | Tab::Visualizer, _) => self.move_sidebar(delta),
-            // 队列页的主区就是队列本身
-            (Tab::Queue, Focus::Primary) => {
-                move_selection(&mut self.state.queue_cursor, self.state.queue.len(), delta);
-            }
-            // 搜索页主区就是结果列表
-            (Tab::Search, Focus::Primary | Focus::Secondary) => {
-                self.state.search.results.move_by(delta);
-            }
-            // 其余标签页的 Primary 是「条目列表」（歌单 / 歌手 / 榜单）
-            (Tab::Playlists, Focus::Primary) => self.state.playlists.list.move_by(delta),
-            (Tab::Artists, Focus::Primary) => self.state.artists.list.move_by(delta),
-            (Tab::Ranks, Focus::Primary) => self.state.ranks.list.move_by(delta),
-            (Tab::Cloud, Focus::Primary) => self.state.cloud.list.move_by(delta),
-            // 音源页有自己的列表（音源条目），单独走一套
-            (Tab::Sources, Focus::Primary) => {
-                let len = self.state.config.sources.ordered().len();
-                move_selection(&mut self.state.sources_cursor, len, delta);
-            }
-            // 设置页是一列设置项，焦点在哪都归它——否则这一页方向键没反应
-            (Tab::Settings, _) => self.move_settings(delta),
-            // Secondary 一律是当前标签页的歌曲列表。走 `songs_mut()` 而不是逐个
-            // 枚举标签，新增标签页时这里不用跟着改。
-            (_, Focus::Secondary) => {
-                if let Some(list) = self.state.songs_mut() {
-                    list.move_by(delta);
-                }
-            }
-        }
-    }
-
-    /// 移动到当前列表的首/末项（Home/End、g/G）。
-    fn move_selection_edge(&mut self, to_first: bool) {
-        let len = self.state.queue.len();
-        match (self.state.tab, self.state.focus) {
-            (_, Focus::Sidebar) => self.select_sidebar_edge(to_first),
-            (_, Focus::Queue) => {
-                if to_first {
-                    select_first(&mut self.state.queue_cursor, len);
-                } else {
-                    select_last(&mut self.state.queue_cursor, len);
-                }
-            }
-            // 首页与可视化页没有列表，首/末项退化成侧边栏的首/末个标签
-            (Tab::Home | Tab::Visualizer, _) => self.select_sidebar_edge(to_first),
-            (Tab::Queue, Focus::Primary) => {
-                if to_first {
-                    select_first(&mut self.state.queue_cursor, len);
-                } else {
-                    select_last(&mut self.state.queue_cursor, len);
-                }
-            }
-            (Tab::Settings, _) => {
-                let last = crate::app::settings::Setting::ALL.len() - 1;
-                self.state.settings_cursor = if to_first { 0 } else { last };
-            }
-            (Tab::Search, _) => {
-                if to_first {
-                    self.state.search.results.select_first();
-                } else {
-                    self.state.search.results.select_last();
-                }
-            }
-            (Tab::Playlists, Focus::Primary) => {
-                Self::select_entry_edge(&mut self.state.playlists.list, to_first);
-            }
-            (Tab::Artists, Focus::Primary) => {
-                Self::select_entry_edge(&mut self.state.artists.list, to_first);
-            }
-            (Tab::Ranks, Focus::Primary) => {
-                Self::select_entry_edge(&mut self.state.ranks.list, to_first);
-            }
-            (Tab::Cloud, Focus::Primary) => {
-                Self::select_entry_edge(&mut self.state.cloud.list, to_first);
-            }
-            (Tab::Sources, Focus::Primary) => {
-                let len = self.state.config.sources.ordered().len();
-                if to_first {
-                    select_first(&mut self.state.sources_cursor, len);
-                } else {
-                    select_last(&mut self.state.sources_cursor, len);
-                }
-            }
-            (_, Focus::Secondary) => {
-                if let Some(list) = self.state.songs_mut() {
-                    if to_first {
-                        list.select_first();
-                    } else {
-                        list.select_last();
-                    }
-                }
-            }
-        }
-    }
 
     /// Enter：进入下一层，或播放选中歌曲。
     fn activate(&mut self) {
@@ -1435,411 +1094,26 @@ impl App {
         }
     }
 
-    /// Esc：回到上一层。
-    fn go_back(&mut self) {
-        match self.state.focus {
-            Focus::Queue => self.state.focus = Focus::Secondary,
-            // 歌曲列表是两层浏览的第二层，退回条目列表（搜索页也一样：
-            // Secondary 是结果列表，Primary 是输入框）
-            Focus::Secondary | Focus::Primary | Focus::Sidebar => {
-                self.state.focus = Focus::Primary;
-                self.state.sidebar_visible = true;
-            }
-        }
+    /// 启动时带关键词直接进入搜索结果页（对应 `--search`）。
+    pub fn startup_search(&mut self, keyword: &str) {
+        self.switch_tab(Tab::Search);
+        self.state.search.input.set(keyword);
+        self.run_search();
     }
 
     // ==================================================================
-    // 播放控制
+    // 共享辅助：按音源构造 HTTP 客户端
     // ==================================================================
-
-    /// 用一批歌曲替换播放队列并起播第 `index` 首。
-    pub fn play_from(&mut self, songs: Vec<Song>, index: usize) {
-        let Some(song) = self.state.queue.replace_with(songs, index).cloned() else {
-            self.state.warn("列表为空，无法播放");
-            return;
-        };
-        self.sync_queue_cursor(index);
-        self.start_playback(song, 0);
-    }
-
-    fn play_from_focused_songs(&mut self) {
-        let selection = self.state.focused_songs().and_then(|songs| {
-            songs
-                .selected_index()
-                .map(|index| (songs.songs.clone(), index))
-        });
-
-        match selection {
-            Some((songs, index)) => self.play_from(songs, index),
-            None => self.state.warn("当前没有可播放的歌曲"),
-        }
-    }
-
-    fn play_from_queue(&mut self) {
-        let Some(index) = self.state.queue_cursor.selected() else {
-            self.state.warn("播放队列为空");
-            return;
-        };
-        let Some(song) = self.state.queue.jump_to(index).cloned() else {
-            self.state.warn("播放队列为空");
-            return;
-        };
-        self.start_playback(song, 0);
-    }
-
-    fn toggle_playback(&mut self) {
-        match self.state.playback {
-            // 正在缓冲时忽略，避免连按导致状态错乱
-            PlaybackState::Loading => {}
-            PlaybackState::Playing | PlaybackState::Paused => self.audio.toggle(),
-            PlaybackState::Stopped => {
-                if let Some(song) = self.state.queue.current().cloned() {
-                    // 会话恢复的那首：从上次的位置续播，而不是从头。
-                    // hash 对不上就说明用户换了歌，这个位置作废。
-                    let resume = match self.state.resume.take() {
-                        Some((hash, ms)) if hash == song.hash => ms,
-                        _ => 0,
-                    };
-                    if resume > 0 {
-                        self.state.info(format!(
-                            "接着上次播：{}",
-                            crate::api::model::format_duration_ms(resume)
-                        ));
-                    }
-                    self.start_playback(song, resume);
-                } else {
-                    self.play_from_focused_songs();
-                }
-            }
-        }
-    }
-
-    fn next_track(&mut self, triggered_by_user: bool) {
-        let Some(index) = self.state.queue.advance(triggered_by_user) else {
-            // 顺序播放到底：停止而不是循环
-            self.audio.stop();
-            self.state.playback = PlaybackState::Stopped;
-            self.state.position_ms = 0;
-            self.state.info("播放队列已到末尾");
-            return;
-        };
-        self.sync_queue_cursor(index);
-        if let Some(song) = self.state.queue.current().cloned() {
-            self.start_playback(song, 0);
-        }
-    }
-
-    fn previous_track(&mut self) {
-        // 播放超过 3 秒时先回到本曲开头，这是主流播放器的通用行为
-        if self.state.position_ms > RESTART_THRESHOLD_MS {
-            self.audio.seek_to(0);
-            self.state.position_ms = 0;
-            return;
-        }
-
-        let Some(index) = self.state.queue.retreat() else {
-            self.state.warn("播放队列为空");
-            return;
-        };
-        self.sync_queue_cursor(index);
-        if let Some(song) = self.state.queue.current().cloned() {
-            self.start_playback(song, 0);
-        }
-    }
-
-    /// 把当前播放信息推给 MPRIS，供桌面组件显示。
-    ///
-    /// 每次 tick 调一次。开销就是一次互斥锁写入，可忽略；桌面组件的轮询
-    /// 频率远低于此，没必要更高频。
-    fn sync_mpris(&mut self) {
-        // D-Bus 注册是异步的，尚未成功（或压根没有 session bus）时没必要每帧
-        // 构造一份快照——那只是白白做几次字符串克隆。
-        let Some(handle) = self.mpris.as_ref().filter(|handle| handle.is_connected()) else {
-            return;
-        };
-
-        let info = match self.state.current.as_ref() {
-            Some(song) => crate::mpris::TrackInfo {
-                title: song.name.clone(),
-                artists: song
-                    .singers
-                    .iter()
-                    .map(|singer| singer.name.clone())
-                    .collect(),
-                album: song.album_name.clone(),
-                // 在这里展开 {size}：MprisSnapshot 只存最终可用的地址，
-                // 展开规则收敛到 Song::cover_url，避免各调用点各写一份
-                art_url: song.cover_url(MPRIS_COVER_SIZE),
-                position_us: (self.state.position_ms as i64) * 1_000,
-                duration_us: (self.state.duration_ms as i64) * 1_000,
-                status: self.state.playback,
-            },
-            None => crate::mpris::TrackInfo {
-                status: self.state.playback,
-                ..Default::default()
-            },
-        };
-
-        handle.update(info);
-    }
-
-    /// 把当前播放信息推给系统托盘，让 ToolTip 和状态图标跟着变。
-    ///
-    /// 设计取舍和 [`Self::sync_mpris`] 一致：只把数据写到快照里，DBus 的属性刷新
-    /// 和 `New*` 信号由托盘线程自己轮询+发，避免反向调用主线程。
-    fn sync_tray(&mut self) {
-        // 没注册成功时跳过——还没连上 watcher 的进程每帧构造一次快照是白干。
-        let Some(handle) = self.tray.as_ref().filter(|handle| handle.is_connected()) else {
-            return;
-        };
-
-        let info = match self.state.current.as_ref() {
-            Some(song) => crate::tray::TrayInfo {
-                title: song.name.clone(),
-                artists: song
-                    .singers
-                    .iter()
-                    .map(|singer| singer.name.clone())
-                    .collect(),
-                status: self.state.playback,
-            },
-            None => crate::tray::TrayInfo {
-                status: self.state.playback,
-                ..Default::default()
-            },
-        };
-
-        handle.update(info);
-    }
-
-    /// 绝对定位到 `position_ms`。
-    ///
-    /// 与 [`Self::seek_by`] 的区别：那个是相对步进，这个是"跳到某处"。
-    /// MPRIS 的 SetPosition（桌面组件拖进度条）需要后者。
-    fn seek_to(&mut self, position_ms: u64) {
-        if self.state.current.is_none() {
-            return;
-        }
-        // 夹在时长范围内，避免拖到尽头后位置越界
-        let target = if self.state.duration_ms > 0 {
-            position_ms.min(self.state.duration_ms.saturating_sub(1))
-        } else {
-            position_ms
-        };
-
-        self.audio.seek_to(target);
-        // 乐观更新，让进度条立刻响应；音频线程随后给出真实位置
-        self.state.position_ms = target;
-    }
-
-    /// 搜索结果「加载更多」：追加下一页。
-    ///
-    /// 之所以分页而不是一次取全：酷狗搜索只有第 1 页是精确匹配，
-    /// 深页塞的是兜底内容（实测搜「黑色幽默」第 2 页起变成有声书）。
-    /// 全量合并会把相关结果淹没，所以让用户主动一页页要看。
-    fn load_more_search(&mut self) {
-        let keyword = self.state.search.submitted.clone();
-        if keyword.is_empty() {
-            self.state.warn("请先搜索");
-            return;
-        }
-        if self.state.search.results.songs.is_empty() {
-            self.state.warn("当前没有搜索结果");
-            return;
-        }
-
-        let next_page = self.state.search.page + 1;
-        // 实测上限 16 页，再往后会返回 code=149 Out Page Range
-        if next_page > SEARCH_MAX_PAGES {
-            self.state.info("已经到最后一页了");
-            return;
-        }
-
-        let api = self.api.clone();
-        let active_source = self.state.config.active_source_kind();
-        let bus = self.bus.clone();
-        let page_size = self.state.config.page_size;
-        self.state.busy = Some(format!("加载「{keyword}」第 {next_page} 页"));
-
-        self.state.search.page = next_page;
-
-        self.runtime.spawn(async move {
-            match active_source
-                .search_songs(&api, &keyword, next_page, page_size)
-                .await
-            {
-                Ok(songs) => bus.emit(Loaded::Search {
-                    keyword,
-                    songs,
-                    append: true,
-                }),
-                Err(error) => {
-                    // 越界就是没有更多了，不是故障
-                    if error.is_page_out_of_range() {
-                        bus.emit(Loaded::Search {
-                            keyword,
-                            songs: Vec::new(),
-                            append: true,
-                        });
-                    } else {
-                        bus.fail_loading(
-                            LoadingTarget::SearchResults,
-                            format!("加载「{keyword}」更多结果失败"),
-                            error,
-                        );
-                    }
-                }
-            }
-        });
-    }
-
-    fn seek_by(&mut self, delta_ms: i64) {
-        if self.state.current.is_none() {
-            return;
-        }
-        self.audio.seek_by(delta_ms);
-        // 乐观更新，让进度条立刻响应；音频线程随后会给出真实位置
-        let next = (self.state.position_ms as i64 + delta_ms).max(0) as u64;
-        self.state.position_ms = match self.state.duration_ms {
-            0 => next,
-            duration => next.min(duration),
-        };
-    }
-
-    fn adjust_volume(&mut self, delta: f32) {
-        // 静音状态下按音量键，先解除静音再调整
-        let base = self
-            .state
-            .volume_before_mute
-            .take()
-            .unwrap_or(self.state.volume);
-        let next = (base + delta).clamp(0.0, 1.0);
-
-        self.state.volume = next;
-        self.audio.set_volume(next);
-        self.state.info(format!("音量 {:.0}%", next * 100.0));
-    }
-
-    /// 切换窗口的最小化状态（仅 niri，目前由托盘菜单触发）。
-    ///
-    /// 把 TUI 从平铺布局里收起来但**音乐照常播**——收起来之后键盘就够不着了，
-    /// 这时托盘菜单与 MPRIS 是唯一的控制入口。
-    ///
-    /// 失败只提示一句 + 记日志：窗口操作不成功不该影响播放。
-    fn toggle_window(&mut self) {
-        if !crate::window::available() {
-            self.state.warn("当前环境不支持窗口控制（需要 niri）");
-            return;
-        }
-        if crate::window::toggle_minimized() {
-            self.state.info("已切换窗口最小化");
-        } else {
-            self.state.warn("窗口操作失败（详见日志）");
-        }
-    }
-
-    fn toggle_mute(&mut self) {
-        match self.state.volume_before_mute.take() {
-            Some(previous) => {
-                self.state.volume = previous;
-                self.audio.set_volume(previous);
-                self.state
-                    .info(format!("取消静音，音量 {:.0}%", previous * 100.0));
-            }
-            None => {
-                self.state.volume_before_mute = Some(self.state.volume);
-                self.state.volume = 0.0;
-                self.audio.set_volume(0.0);
-                self.state.info("已静音");
-            }
-        }
-    }
-
-    fn adjust_lyric_offset(&mut self, delta_ms: i64) {
-        let offset = (self.state.config.lyric_offset_ms + delta_ms).clamp(-10_000, 10_000);
-        self.state.config.lyric_offset_ms = offset;
-        self.state.info(format!("歌词偏移 {offset:+} ms"));
-    }
-
-    /// 起播一首歌：先查缓存，未命中则解析直链 → 下载 → 播放。
-    fn start_playback(&mut self, song: Song, start_at_ms: u64) {
-        self.state.current = Some(song.clone());
-        self.state.duration_ms = song.duration_ms;
-        self.state.position_ms = start_at_ms;
-        self.state.download_progress = None;
-        self.state.lyric = crate::app::state::LyricPane {
-            hash: Some(song.hash.clone()),
-            ..Default::default()
-        };
-        // 切歌后先把旧封面清掉，否则会短暂显示上一张
-        if !self.state.cover.belongs_to(&song.hash) {
-            self.state.cover = CoverArt::default();
-        }
-        self.load_cover(&song);
-
-        self.audio.mark_loading();
-        self.state.playback = PlaybackState::Loading;
-
-        // privilege 不含可播标记时提前提示，省得用户对着「缓冲中」干等
-        if song.looks_playable() {
-            self.state
-                .info(format!("正在解析播放地址：{}", describe_song(&song)));
-        } else {
-            self.state.warn(format!(
-                "《{}》可能受版权限制（VIP/已下架），若取链失败请换一首",
-                song.name
-            ));
-        }
-
-        self.request_lyric(song.clone());
-        self.request_stream(song, start_at_ms);
-    }
-
-    fn request_stream(&mut self, song: Song, start_at_ms: u64) {
-        let key = song.cache_key(&self.state.config.quality);
-
-        // 缓存命中直接播，零网络开销
-        if let Some(path) = self.cache.find(&key) {
-            tlog!(crate::logger::LEVEL_DEBUG, "缓存命中：{}", path.display());
-            self.audio
-                .load(AudioSource::File(path), start_at_ms, song.duration_ms);
-            return;
-        }
-
-        // 用**这首歌自己的来源**，不是当前音源：队列可以跨音源，
-        // 切过音源之后队列里的旧歌仍要能播。
-        let source = song.source;
-        let api = match self.client_for(source) {
-            Ok(client) => client,
-            Err(error) => {
-                self.state
-                    .error(format!("无法连接「{}」：{error}", source.label()));
-                return;
-            }
-        };
-        let bus = self.bus.clone();
-        let quality = self.state.config.quality.clone();
-
-        self.runtime.spawn(async move {
-            match source.song_stream_url(&api, &song, &quality).await {
-                Ok(stream) => bus.emit(Loaded::StreamReady {
-                    song: Box::new(song),
-                    url: stream.url,
-                    start_at_ms,
-                    is_trial: stream.is_trial,
-                    reason: stream.reason,
-                }),
-                Err(error) => bus.fail(format!("获取《{}》的播放地址失败", song.name), error),
-            }
-        });
-    }
 
     /// 为**指定音源**构造 HTTP 客户端。
     ///
     /// 队列允许跨音源：播放队列里的歌时不能想当然地用「当前音源」的客户端——
     /// 那会把请求发到另一个服务上，而这首歌的 hash 在那个平台根本查不到。
     /// 地址与凭据都取自目标音源自己的档案。
-    fn client_for(&self, kind: SourceKind) -> crate::error::Result<crate::api::ApiClient> {
+    pub(super) fn client_for(
+        &self,
+        kind: SourceKind,
+    ) -> crate::error::Result<crate::api::ApiClient> {
         if kind == self.state.config.active_source_kind() {
             // 当前音源已经有现成的客户端，直接复用（省一次连接池重建）
             return Ok(self.api.clone());
@@ -1852,108 +1126,9 @@ impl App {
         )
     }
 
-    fn request_lyric(&mut self, song: Song) {
-        // 歌词同样按歌曲自己的来源取：跨音源时 hash 只在该平台的接口里有意义
-        let source = song.source;
-        let bus = self.bus.clone();
-        let api = match self.client_for(source) {
-            Ok(client) => client,
-            Err(error) => {
-                crate::logger::tlog!(
-                    crate::logger::LEVEL_WARN,
-                    "无法连接「{}」取歌词：{error}",
-                    source.label()
-                );
-                // 面板也得知道——不然它会停在上一次的歌词上，或者显示
-                // 「暂无歌词」，两种都不对
-                bus.emit(Loaded::LyricFailed {
-                    hash: song.hash.clone(),
-                    reason: error.user_hint(),
-                });
-                return;
-            }
-        };
-
-        self.state.lyric.load.begin();
-        self.runtime.spawn(async move {
-            match source.fetch_lyric(&api, &song).await {
-                Ok(lyric) => bus.emit(Loaded::Lyric {
-                    hash: song.hash.clone(),
-                    lyric,
-                }),
-                Err(error) => {
-                    tlog!(
-                        crate::logger::LEVEL_WARN,
-                        "获取《{}》的歌词失败：{error}",
-                        song.name
-                    );
-                    // 走 LyricFailed 而不是塞一份空歌词：空歌词会被面板渲染成
-                    // 「暂无歌词」，等于替这首歌断言「它本来就没有歌词」。
-                    // 也不走 Loaded::Failed——那会往状态栏写错误，而歌词失败
-                    // 不影响播放，每切一首歌闪一条太吵。
-                    bus.emit(Loaded::LyricFailed {
-                        hash: song.hash.clone(),
-                        reason: error.user_hint(),
-                    });
-                }
-            }
-        });
-    }
-
     // ==================================================================
     // 数据加载
     // ==================================================================
-
-    /// 启动时带关键词直接进入搜索结果页（对应 `--search`）。
-    pub fn startup_search(&mut self, keyword: &str) {
-        self.switch_tab(Tab::Search);
-        self.state.search.input.set(keyword);
-        self.run_search();
-    }
-
-    pub fn run_search(&mut self) {
-        let keyword = self.state.search.input.text().trim().to_string();
-        if keyword.is_empty() {
-            self.state.warn("请输入搜索关键词");
-            return;
-        }
-
-        self.state.search.submitted = keyword.clone();
-        self.state.search.editing = false;
-        self.state.search.results.load.begin();
-        self.state.search.results.title = format!("搜索「{keyword}」");
-        self.state.busy = Some(format!("搜索 {keyword}"));
-
-        let api = self.api.clone();
-        let active_source = self.state.config.active_source_kind();
-        let bus = self.bus.clone();
-        let page_size = self.state.config.page_size;
-
-        self.runtime.spawn(async move {
-            // 刻意**只取第一页**，不做全量翻页。
-            //
-            // 实测：酷狗搜索只有第 1 页是精确匹配，深页塞的是兜底内容——
-            // 搜「黑色幽默」翻到第 2 页往后全是「卖花的惹不起」这类有声书，
-            // 全量合并会把相关结果淹没在垃圾里。MoeKoeMusic 也是分页浏览
-            // （`searchResults.value = response.data.lists` 只放当前页）。
-            // 想看更多按 `M` 一页页追加，顺序保持服务端的相关性。
-            match active_source
-                .search_songs(&api, &keyword, 1, page_size)
-                .await
-            {
-                Ok(songs) => bus.emit(Loaded::Search {
-                    keyword,
-                    songs,
-                    append: false,
-                }),
-                Err(error) => bus.fail_loading(
-                    LoadingTarget::SearchResults,
-                    format!("搜索「{keyword}」失败"),
-                    error,
-                ),
-            }
-        });
-    }
 
     pub fn load_plaza_playlists(&mut self) {
         let api = self.api.clone();
@@ -1970,12 +1145,11 @@ impl App {
                 .await
             {
                 Ok(items) => bus.emit(Loaded::Playlists {
+                    category,
                     title: "歌单广场".to_string(),
                     items,
                 }),
-                Err(error) => {
-                    bus.fail_loading(LoadingTarget::Playlists, "载入歌单广场失败", error)
-                }
+                Err(error) => bus.fail_loading(LoadingTarget::Playlists, "载入歌单广场失败", error),
             }
         });
     }
@@ -1994,10 +1168,8 @@ impl App {
                 .artist_list(&api, kind, ARTIST_LIST_SIZE)
                 .await
             {
-                Ok(artists) => bus.emit(Loaded::Artists(artists)),
-                Err(error) => {
-                    bus.fail_loading(LoadingTarget::Artists, "载入歌手列表失败", error)
-                }
+                Ok(artists) => bus.emit(Loaded::Artists { kind, artists }),
+                Err(error) => bus.fail_loading(LoadingTarget::Artists, "载入歌手列表失败", error),
             }
         });
     }
@@ -2046,9 +1218,7 @@ impl App {
         self.runtime.spawn(async move {
             match active_source.rank_boards(&api).await {
                 Ok(boards) => bus.emit(Loaded::RankBoards(boards)),
-                Err(error) => {
-                    bus.fail_loading(LoadingTarget::Ranks, "载入排行榜失败", error)
-                }
+                Err(error) => bus.fail_loading(LoadingTarget::Ranks, "载入排行榜失败", error),
             }
         });
     }
@@ -2077,7 +1247,7 @@ impl App {
         });
     }
 
-    fn open_selected_playlist(&mut self) {
+    pub(super) fn open_selected_playlist(&mut self) {
         let Some(playlist) = self.state.playlists.list.selected().cloned() else {
             self.state.warn("请先选择一个歌单");
             return;
@@ -2085,7 +1255,7 @@ impl App {
         self.load_playlist_songs(playlist, PlaylistSource::Plaza, false);
     }
 
-    fn open_selected_cloud_playlist(&mut self) {
+    pub(super) fn open_selected_cloud_playlist(&mut self) {
         let Some(playlist) = self.state.cloud.list.selected().cloned() else {
             self.state.warn("请先选择一个歌单");
             return;
@@ -2128,38 +1298,52 @@ impl App {
         }
         self.state.busy = Some(format!("载入歌单《{}》", playlist.name));
 
+        let first_page =
+            first_screen_page(self.state.sort_descending, playlist.song_count, PAGE_LIMIT);
+
         self.runtime.spawn(async move {
             // 自建/收藏歌单走新版接口（按数字 listid），公开歌单走 global_collection_id
             let is_own = playlist.list_id.filter(|_| playlist.is_own);
 
-            // ---- 首屏：先只取第一页，让界面立刻有内容 ----
+            // ---- 首屏：先只取一页，让界面立刻有内容 ----
             //
             // 大歌单（几百首）即使并发翻页也要好几秒，这段时间界面只有一个"载入中"，
             // 体验很差。学 MoeKoeMusic 的做法：先给首屏，剩下的后台继续取。
             // 它那边是滚动到底再加载；我们一次性取完，但**先让用户看到东西**。
-            let first = {
-                // 走 `active_source` 而不是 `api`：分页同样是音源相关的——酷狗那两个
-                // 端点（参数是 `page` + `pagesize`）网易云根本没有，直接调 `ApiClient`
-                // 会让网易云下打开歌单必然 404；而首屏失败会 return，连下面的后台
-                // 补全都走不到，表现就是「歌单里的歌一直 404」。
-                let target = match is_own {
-                    Some(list_id) => PlaylistRef::Own(list_id),
-                    None => PlaylistRef::Public(&playlist.id),
-                };
-                active_source
-                    .playlist_tracks_page(&api, target, 1, PAGE_LIMIT, fresh)
-                    .await
+            //
+            // 取哪一页见 [`first_screen_page`]：倒序显示时取的是**最后一页**，
+            // 这样首屏出现的就是最终列表的头部，后面整表到位时画面不会整体翻一次。
+            //
+            // 走 `active_source` 而不是 `api`：分页同样是音源相关的——酷狗那两个
+            // 端点（参数是 `page` + `pagesize`）网易云根本没有，直接调 `ApiClient`
+            // 会让网易云下打开歌单必然 404；而首屏失败会 return，连下面的后台
+            // 补全都走不到，表现就是「歌单里的歌一直 404」。
+            let target = match is_own {
+                Some(list_id) => PlaylistRef::Own(list_id),
+                None => PlaylistRef::Public(&playlist.id),
             };
+            let mut fetched_page = first_page;
+            let mut first = active_source
+                .playlist_tracks_page(&api, target, fetched_page, PAGE_LIMIT, fresh)
+                .await;
+            // 曲数过期（歌单被删过歌）时算出来的那一页可能是空的。宁可闪一屏
+            // 最老的歌，也不能让用户对着一个空列表——退回第 1 页重取。
+            if fetched_page > 1 && first.as_ref().is_ok_and(|songs| songs.is_empty()) {
+                fetched_page = 1;
+                first = active_source
+                    .playlist_tracks_page(&api, target, fetched_page, PAGE_LIMIT, fresh)
+                    .await;
+            }
 
             match first {
                 Ok(songs) => {
-                    let has_more = songs.len() >= PAGE_LIMIT as usize;
+                    let has_more = needs_full_fetch(fetched_page, songs.len(), PAGE_LIMIT);
                     bus.emit(Loaded::PlaylistTracks {
                         playlist: playlist.clone(),
                         songs,
                         source,
                     });
-                    // 不足一页说明这首页就是全部，没必要再取
+                    // 这一页就是全部，没必要再取
                     if !has_more {
                         return;
                     }
@@ -2206,7 +1390,7 @@ impl App {
         });
     }
 
-    fn open_selected_artist(&mut self) {
+    pub(super) fn open_selected_artist(&mut self) {
         let Some(artist) = self.state.artists.list.selected().cloned() else {
             self.state.warn("请先选择一位歌手");
             return;
@@ -2218,6 +1402,8 @@ impl App {
 
         self.state.artists.songs.load.begin();
         self.state.artists.songs.title = artist.name.clone();
+        // 记下打开的是谁：结果回来时要靠它判断这条结果还该不该采纳
+        self.state.artists.open_artist = Some(artist.clone());
         self.state.busy = Some(format!("载入歌手 {}", artist.name));
 
         self.runtime.spawn(async move {
@@ -2235,7 +1421,7 @@ impl App {
         });
     }
 
-    fn open_selected_rank(&mut self) {
+    pub(super) fn open_selected_rank(&mut self) {
         let Some(board) = self.state.ranks.list.selected().cloned() else {
             self.state.warn("请先选择一个榜单");
             return;
@@ -2247,6 +1433,8 @@ impl App {
 
         self.state.ranks.songs.load.begin();
         self.state.ranks.songs.title = board.name.clone();
+        // 记下打开的是哪个榜单，理由同 `open_selected_artist`
+        self.state.ranks.open_board = Some(board.clone());
         self.state.busy = Some(format!("载入榜单 {}", board.name));
 
         self.runtime.spawn(async move {
@@ -2297,7 +1485,7 @@ impl App {
     }
 
     // ==================================================================
-    // 队列与云端
+    // 队列、列表顺序与缓存
     // ==================================================================
 
     fn queue_focused_song(&mut self, play_next: bool) {
@@ -2349,684 +1537,6 @@ impl App {
 
         self.state
             .info(format!("已从队列移除：{}", describe_song(&removed)));
-    }
-
-    // ==================================================================
-    // 扫码登录
-    // ==================================================================
-
-    /// `L`：在应用内开始扫码登录。
-    ///
-    /// 流程是 `/login/qr/key` → `/login/qr/create` → 轮询 `/login/qr/check`。
-    /// 二维码直接渲染在界面上，不用切终端，也不用额外依赖 `qrencode` 之类的命令行工具。
-    fn start_login(&mut self) {
-        // 先决定「给哪个音源登录」：登录态按音源分开存，登错了地方等于没登。
-        self.open_login_picker();
-    }
-
-    /// 弹出音源选择器。只有一个候选时直接跳过，不多一次交互。
-    fn open_login_picker(&mut self) {
-        let candidates: Vec<SourceKind> = SourceKind::ALL
-            .iter()
-            .copied()
-            .filter(|kind| kind.capability().login)
-            .collect();
-
-        match candidates.len() {
-            0 => self.state.warn("当前没有任何音源支持登录"),
-            1 => self.begin_login_for(candidates[0]),
-            _ => {
-                let mut picker = LoginPicker {
-                    candidates,
-                    ..Default::default()
-                };
-                // 默认停在当前音源上：多数情况下用户就是想登这个
-                let current = self.state.config.active_source_kind();
-                if let Some(index) = picker.candidates.iter().position(|kind| *kind == current) {
-                    picker.cursor.select(Some(index));
-                } else {
-                    picker.cursor.select(Some(0));
-                }
-                self.state.login_picker = Some(picker);
-            }
-        }
-    }
-
-    /// 选定了音源：必要时先切过去（会重建 HTTP 客户端），再走扫码。
-    fn confirm_login_source(&mut self) {
-        let Some(picker) = self.state.login_picker.take() else {
-            return;
-        };
-        let Some(kind) = picker.selected() else {
-            return;
-        };
-        self.begin_login_for(kind);
-    }
-
-    /// 对指定音源开始扫码登录。
-    fn begin_login_for(&mut self, kind: SourceKind) {
-        // 音源不同就先切过去：登录请求要发到那个服务上，凭据也要存进它的档案。
-        if kind != self.state.config.active_source_kind() {
-            self.switch_source_to(kind);
-        }
-
-        // 已登录时**不能**就此挡住。
-        //
-        // `logged_in` 只看 cookie 里有没有 `token=` 字段，判断不出 token 是否已经
-        // 被服务端作废（实测 `/user/playlist` 会返回 20017）。若在这里直接返回，
-        // 用户就会陷入死局：云端功能全部报登录失效，可按 `L` 只回一句「已登录」，
-        // 没有任何途径重新扫码。
-        //
-        // 但仍要确认一次：凭据有效时误按 `L` 会把它冲掉。
-        if self.state.logged_in {
-            self.state.pending_confirm = Some(ConfirmAction::Relogin);
-            return;
-        }
-
-        self.begin_login();
-    }
-
-    /// 确认后重新登录：清掉旧凭据（保留 dfid，它是设备指纹不是登录态）再扫码。
-    fn relogin(&mut self) {
-        self.state.config.cookie = None;
-        self.state.logged_in = false;
-        // cookie 清空后 cookie_header() 只会剩下 dfid，正是想要的效果
-        self.api.set_cookie(self.state.config.cookie_header());
-        self.begin_login();
-    }
-
-    /// 真正发起扫码请求。与「要不要扫」的判断分开，两条入口共用。
-    fn begin_login(&mut self) {
-        if let Some(login) = self.state.login.as_ref() {
-            if !login.finished {
-                self.state.info("登录已在进行中，扫码或按 Esc 取消");
-                return;
-            }
-        }
-
-        // 节流：每次取 key 都是向服务端申请一个新的登录会话，短时间内反复申请
-        // 会被判「登录频繁」，手机端就扫不了了（实测用户就是这么被限的）。
-        // 宁可让用户多等几秒，也别把账号搞限流。
-        const QR_KEY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
-        if let Some(last) = self.state.last_qr_key_at {
-            let waited = last.elapsed();
-            if waited < QR_KEY_COOLDOWN {
-                let left = (QR_KEY_COOLDOWN - waited).as_secs() + 1;
-                self.state.warn(format!(
-                    "取二维码太频繁了，请 {left} 秒后再按 L（频繁申请会被服务端限流）"
-                ));
-                return;
-            }
-        }
-        self.state.last_qr_key_at = Some(Instant::now());
-
-        self.state.login = Some(LoginState {
-            message: "正在获取二维码…".to_string(),
-            ..Default::default()
-        });
-
-        let api = self.api.clone();
-        let bus = self.bus.clone();
-        let active_source = self.state.config.active_source_kind();
-
-        self.runtime.spawn(async move {
-            let key = match active_source.login_qr_key(&api).await {
-                Ok(key) => key,
-                Err(error) => {
-                    bus.fail("获取登录二维码失败", error);
-                    return;
-                }
-            };
-
-            match active_source.login_qr_create(&api, &key).await {
-                Ok(content) => bus.emit(Loaded::LoginQr { key, content }),
-                Err(error) => bus.fail("生成登录二维码失败", error),
-            }
-        });
-    }
-
-    /// 轮询扫码状态。由 tick 每约 2 秒调用一次。
-    fn poll_login(&mut self) {
-        let Some(login) = self.state.login.as_ref() else {
-            return;
-        };
-        if login.finished || login.key.is_empty() {
-            return;
-        }
-
-        let key = login.key.clone();
-        let api = self.api.clone();
-        let bus = self.bus.clone();
-        let active_source = self.state.config.active_source_kind();
-
-        self.runtime.spawn(async move {
-            let check = match active_source.login_qr_check(&api, &key).await {
-                Ok(check) => check,
-                Err(error) => {
-                    bus.fail("查询扫码状态失败", error);
-                    return;
-                }
-            };
-
-            match check.status {
-                QrStatus::Expired => bus.emit(Loaded::LoginFailed {
-                    message: "二维码已过期，请按 Esc 后重新按 L".to_string(),
-                }),
-                QrStatus::Waiting => bus.emit(Loaded::LoginStatus {
-                    message: "等待扫码…".to_string(),
-                }),
-                QrStatus::Pending => bus.emit(Loaded::LoginStatus {
-                    message: "已扫码，请在手机上确认".to_string(),
-                }),
-                QrStatus::Success => {
-                    // 登录态由服务端持有的音源（如网易云）拿不到 token，
-                    // 成功就是成功，不该报「未拿到 token」。
-                    if !active_source.capability().client_token {
-                        bus.emit(Loaded::LoginSucceeded {
-                            token: None,
-                            userid: None,
-                            cookie: check.cookie.clone(),
-                        })
-                    } else {
-                        match (check.token, check.userid) {
-                            (Some(token), Some(userid)) => bus.emit(Loaded::LoginSucceeded {
-                                token: Some(token),
-                                userid: Some(userid),
-                                cookie: None,
-                            }),
-                            _ => bus.emit(Loaded::LoginFailed {
-                                message: "扫码已授权，但未拿到 token".to_string(),
-                            }),
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    /// 结束登录（成功或失败）。
-    fn finish_login(&mut self, succeeded: bool, message: String) {
-        self.state.login = Some(LoginState {
-            finished: true,
-            succeeded,
-            message,
-            ..Default::default()
-        });
-    }
-
-    /// 兜底：服务端下发的 cookie 为空时（理论上不会，但万一）的收尾路径。
-    ///
-    /// 正常路径走 `apply_server_cookie`——把含 `MUSIC_U` 的 cookie 写进
-    /// 配置，热更新 ApiClient 并存盘。这里**只**在服务端 cookie 为空字符串
-    /// 时被兜住，只更新界面状态，没有任何凭据可存。
-    fn finish_server_side_login(&mut self) {
-        let kind = self.state.config.active_source_kind();
-        self.state.logged_in = true;
-        self.finish_login(
-            true,
-            format!(
-                "「{}」已在服务端完成登录（凭据由 {} 保管，未写入本地配置）",
-                kind.label(),
-                kind.service_name()
-            ),
-        );
-    }
-
-    /// 写入登录凭据并热更新 ApiClient 的 cookie。
-    fn apply_login(&mut self, token: String, userid: String) {
-        let cookie = format!("token={token}; userid={userid}");
-
-        self.state.config.cookie = Some(cookie);
-        // 必须走 `cookie_header()`：它会把 dfid 拼进去。直接用裸 cookie 会把
-        // 已有的 dfid 冲掉，本次会话取播放直链就会报「本次请求需要验证」。
-        self.api.set_cookie(self.state.config.cookie_header());
-
-        let config_path = Config::path();
-        match self.state.config.save() {
-            Ok(()) => {
-                self.state.logged_in = true;
-                // 刻意**不回显 cookie**：它等价于账号密码，显示在界面上会被旁观者看到。
-                // 只告诉用户写到了哪里。
-                self.finish_login(
-                    true,
-                    format!(
-                        "登录成功（userid={userid}），凭据已写入 {}",
-                        config_path.display()
-                    ),
-                );
-                self.state.success("登录成功，按 Esc 关闭");
-                // 顺带取一次会员信息，界面上能直接看到服务端认定的会员形态
-                self.fetch_vip_status();
-                self.fetch_user_info();
-                // 概念版账号刚登录就把当天的 VIP 领了——这就是它的机制，
-                // 「登录就是 VIP」。今天已经领过的话内部会直接返回。
-                self.maybe_claim_daily_vip();
-            }
-            Err(error) => {
-                self.finish_login(false, format!("保存登录凭据失败：{error}"));
-            }
-        }
-    }
-
-    /// 登录凭证由**服务端下发**时的收尾（网易云走这条路）。
-    ///
-    /// 网易云的登录态**就是** `login/qr/check` 响应里那个 cookie（含 `MUSIC_U`）。
-    /// 不接住并写进配置，之后的请求不带任何身份：界面上写着「登录成功」，可
-    /// `/user/playlist` 拿不到 uid、云端歌单照旧报「尚未登录」——成功只是个谎言。
-    ///
-    /// 与 [`Self::apply_login`] 的差别只是凭据从哪来：那边自己拼 `token=; userid=`，
-    /// 这边直接用服务端给的一整串。
-    fn apply_server_cookie(&mut self, cookie: String) {
-        self.state.config.cookie = Some(cookie);
-        self.api.set_cookie(self.state.config.cookie_header());
-
-        let config_path = Config::path();
-        match self.state.config.save() {
-            Ok(()) => {
-                self.state.logged_in = true;
-                // 同样**不回显** cookie：它等价于账号密码。
-                self.finish_login(
-                    true,
-                    format!(
-                        "「{}」登录成功，凭据已写入 {}",
-                        self.state.config.active_source_kind().label(),
-                        config_path.display()
-                    ),
-                );
-                self.state.success("登录成功，按 Esc 关闭");
-                self.fetch_vip_status();
-                self.fetch_user_info();
-                self.maybe_claim_daily_vip();
-            }
-            Err(error) => {
-                self.finish_login(false, format!("保存登录凭据失败：{error}"));
-            }
-        }
-    }
-
-    /// `v`：切换到下一个音源（酷狗 ↔ 酷狗概念版）。
-    ///
-    /// 只换「去哪儿请求 + 带什么身份」，**不碰播放队列、不打断当前曲目**——
-    /// 正在放的音频已经在本地缓存里，换音源没有理由把它停掉。
-    /// 数字键 1-9 与 0：切换到对应的标签页。
-    ///
-    /// 早先这里按焦点区分语义（侧边栏里切页、列表里跳到第 N 项）。但「同一个键
-    /// 两种行为」并不直观——用户按下去之前得先想「现在焦点在哪」。列表内定位
-    /// 有 `g`/`G` 与 `PgUp`/`PgDn` 已经够用，数字键留给导航更清晰。
-    fn handle_digit(&mut self, number: u8) {
-        if let Some(tab) = Tab::from_number(number) {
-            self.switch_tab(tab);
-        }
-    }
-
-    /// `v`：打开音源管理页。
-    ///
-    /// 以前这个键是「循环切到下一个音源」，但音源多了之后循环切很盲目——用户
-    /// 不知道下一个是谁，切错了还得再切一圈回来。改为打开管理页，把选择摆出来。
-    /// 真正的切换动作（`switch_source_to`）由页面里的操作触发。
-    fn open_sources_page(&mut self) {
-        if self.state.tab == Tab::Sources {
-            // 已在音源页，再按一次回到搜索页，省得去找数字键
-            self.switch_tab(Tab::Search);
-            return;
-        }
-        self.switch_tab(Tab::Sources);
-        // 焦点必须落到音源列表上：留在侧边栏的话 j/k 会去切标签页，
-        // 用户按了却像没反应。
-        self.state.focus = Focus::Primary;
-        self.state
-            .info("音源管理：Enter 启用/禁用 · E 设为默认 · K/J 调优先级");
-    }
-
-    /// 当前在音源页选中的是哪个音源。
-    fn selected_source(&self) -> Option<SourceKind> {
-        let kinds = self.state.config.sources.ordered();
-        let index = self.state.sources_cursor.selected().unwrap_or(0);
-        kinds.get(index).copied()
-    }
-
-    /// 启用 / 禁用选中的音源。
-    fn toggle_source_enabled(&mut self) {
-        let Some(kind) = self.selected_source() else {
-            return;
-        };
-        let profile = self.state.config.sources.profile_mut(kind);
-        profile.enabled = !profile.enabled;
-        let enabled = profile.enabled;
-
-        // 不能把当前正在用的音源关掉：那样界面会处于「有音源但没选中」的状态。
-        if !enabled && self.state.config.active_source_kind() == kind {
-            if let Some(fallback) = self.state.config.sources.enabled().first().copied() {
-                self.state.config.sync_active_source();
-                self.state.config.switch_source(fallback);
-                self.state.warn(format!(
-                    "已禁用「{}」，当前音源切到「{}」",
-                    kind.label(),
-                    fallback.label()
-                ));
-            } else {
-                self.state.config.sources.profile_mut(kind).enabled = true;
-                self.state.error("至少要保留一个启用的音源");
-                return;
-            }
-        } else {
-            self.state.success(format!(
-                "「{}」已{}",
-                kind.label(),
-                if enabled { "启用" } else { "禁用" }
-            ));
-        }
-
-        self.persist_source_config();
-    }
-
-    /// 把选中的音源设为默认（即当前音源）。
-    fn set_default_source(&mut self) {
-        let Some(kind) = self.selected_source() else {
-            return;
-        };
-        if self.state.config.active_source_kind() == kind {
-            self.state
-                .info(format!("「{}」已经是当前音源", kind.label()));
-            return;
-        }
-        if !self.state.config.sources.profile(kind).enabled {
-            self.state
-                .warn(format!("「{}」已禁用，先按 Enter 启用", kind.label()));
-            return;
-        }
-        self.switch_source_to(kind);
-    }
-
-    /// 调整选中音源的优先级（`raise = true` 表示往前排）。
-    ///
-    /// 直接交换相邻两项的 priority：比「整体重排」改动小，也更符合直觉。
-    fn shift_source_priority(&mut self, raise: bool) {
-        let Some(kind) = self.selected_source() else {
-            return;
-        };
-        let mut kinds = self.state.config.sources.ordered();
-        let Some(position) = kinds.iter().position(|candidate| *candidate == kind) else {
-            return;
-        };
-        let target = if raise {
-            position.checked_sub(1)
-        } else {
-            (position + 1 < kinds.len()).then_some(position + 1)
-        };
-        let Some(target) = target else {
-            self.state.info(if raise {
-                "已经是第一个"
-            } else {
-                "已经是最后一个"
-            });
-            return;
-        };
-        kinds.swap(position, target);
-
-        // 按新顺序重排 priority，间隔 10 方便以后往中间插
-        for (index, kind) in kinds.iter().enumerate() {
-            self.state.config.sources.profile_mut(*kind).priority = (index as u32 + 1) * 10;
-        }
-        self.state.success(format!(
-            "「{}」优先级已{}（第 {} 位）",
-            kind.label(),
-            if raise { "上调" } else { "下调" },
-            target + 1
-        ));
-        self.persist_source_config();
-    }
-
-    /// 音源配置改动后落盘。失败只提示，不阻断操作。
-    fn persist_source_config(&mut self) {
-        if let Err(error) = self.state.config.save() {
-            self.state.error(format!("保存音源配置失败：{error}"));
-        }
-    }
-
-    /// 切换到指定音源，并重建 HTTP 客户端。
-    pub fn switch_source_to(&mut self, kind: SourceKind) {
-        let previous = self.state.config.active_source_kind();
-        if previous == kind {
-            return;
-        }
-
-        // 先把当前身份存回档案，否则切走再切回来时登录态和 dfid 就丢了
-        self.state.config.sync_active_source();
-        self.state.config.switch_source(kind);
-        // 登录态是按音源分开的：切过去之后要按**新音源**的凭据重新判断，
-        // 否则会沿用上一个音源的 logged_in，把「未登录」误判成「已登录」，
-        // 于是登录流程被「是否覆盖已有凭据」的确认挡住，进不了扫码。
-        self.state.logged_in = self.state.config.is_logged_in();
-
-        if let Err(error) = self.state.config.save() {
-            self.state
-                .warn(format!("音源已切换，但保存配置失败：{error}"));
-        }
-
-        match crate::api::ApiClient::new(
-            &self.state.config.api_base,
-            self.state.config.cookie_header(),
-            self.state.config.proxy.as_deref(),
-        ) {
-            Ok(client) => {
-                self.api = client;
-                self.state.vip_info = None;
-                self.fetch_vip_status();
-                self.fetch_user_info();
-                self.ensure_device_fingerprint();
-                // 切到概念版就把当天 VIP 领了。放在这里而不只在启动时做：
-                // 常用标准版的人切换过来时，启动那次早就过去了，否则永远等不到
-                // 自动领取。今天已经领过的话内部会直接返回，不会重复打接口。
-                self.maybe_claim_daily_vip();
-                let capability = kind.capability();
-                if !capability.catalog {
-                    self.state.warn(format!(
-                        "已切换到「{}」，该音源仅支持搜索与播放（歌单/榜单/云端歌单不可用）",
-                        kind.label()
-                    ));
-                } else if self.state.config.cookie.is_none() {
-                    self.state.warn(format!(
-                        "已切换到「{}」，但该音源还没登录——按 L 重新扫码（两个平台账号不通用）",
-                        kind.label()
-                    ));
-                } else {
-                    self.state.success(format!(
-                        "已切换到「{}」音源，当前播放不受影响",
-                        kind.label()
-                    ));
-                }
-            }
-            Err(error) => {
-                self.state.error(format!(
-                    "切换到「{}」失败：{error}（需要 {} 服务运行在 {}）",
-                    kind.label(),
-                    kind.service_name(),
-                    self.state.config.api_base
-                ));
-            }
-        }
-    }
-
-    /// 拉一次会员信息，把摘要显示在侧边栏。
-    ///
-    /// 这一步是排查「明明有会员却只能试听」的关键：界面上能直接看到服务端认定的
-    /// 会员形态与到期时间，不用去翻日志或 curl。
-    /// 取当前登录用户的资料（昵称 / 头像 / 等级 / 听歌时长）。
-    ///
-    /// 跟会员信息一样，取不到不影响听歌，静默降级。
-    pub fn fetch_user_info(&mut self) {
-        if !self.state.logged_in {
-            self.state.user_info = None;
-            self.state.user_info_load.succeed();
-            return;
-        }
-
-        let api = self.api.clone();
-        let bus = self.bus.clone();
-        // 走音源分派：网易云的资料在 `/user/detail?uid=` 里，而且得先问出 uid；
-        // 酷狗的是同一个端点但不带参数。写死哪一个都会让另一边报错。
-        let source = self.state.config.active_source_kind();
-
-        self.state.user_info_load.begin();
-        self.runtime.spawn(async move {
-            match source.user_detail(&api).await {
-                Ok(info) => bus.emit(Loaded::UserInfo(Box::new(info))),
-                // 早先这里只写日志，于是接口挂掉时首页永远显示「加载中…」——
-                // 用户分不清是失败还是慢。失败也得走事件，面板才有出口。
-                Err(error) => {
-                    bus.fail_loading(LoadingTarget::UserInfo, "获取用户资料失败", error)
-                }
-            }
-        });
-    }
-
-    /// 下载并解码头像。
-    ///
-    /// 走和封面同一条管线，但**不复用** \`state.cover\`——那是当前歌曲的专辑图，
-    /// 会被切歌换掉；头像得单独存一份。
-    fn load_avatar(&mut self, url: String) {
-        if self.state.config.lite_mode {
-            return;
-        }
-        let downloader = self.downloader.clone();
-        let bus = self.bus.clone();
-
-        self.runtime.spawn(async move {
-            let bytes = match downloader.fetch_bytes(&url).await {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    tlog!(crate::logger::LEVEL_WARN, "下载头像失败 {url}：{error}");
-                    return;
-                }
-            };
-            match image::load_from_memory(&bytes) {
-                Ok(image) => bus.emit(Loaded::AvatarReady { image }),
-                Err(error) => tlog!(crate::logger::LEVEL_WARN, "解码头像失败 {url}：{error}"),
-            }
-        });
-    }
-
-    pub fn fetch_vip_status(&mut self) {
-        // 会员接口只有酷狗有。网易云没有对应端点（`/user/vip/detail` 是 404），
-        // 去请求只会白打一次接口，所以先问能力再决定。
-        if !self.state.logged_in
-            || !self.state.config.active_source_kind().capability().vip
-        {
-            self.state.vip_info = None;
-            return;
-        }
-
-        let api = self.api.clone();
-        let bus = self.bus.clone();
-
-        self.runtime.spawn(async move {
-            match api.user_vip_detail().await {
-                Ok(info) => bus.emit(Loaded::VipStatus(Box::new(info))),
-                // 取不到会员信息不影响听歌，静默降级即可
-                Err(error) => tlog!(crate::logger::LEVEL_WARN, "获取会员信息失败：{error}"),
-            }
-        });
-    }
-
-    /// 启动 / 登录 / 切到概念版时**自动**同步当天的概念版 VIP。
-    ///
-    /// 与手动触发（[`Self::claim_daily_vip`]）的唯一区别：本地已经记着今天领过时
-    /// **直接返回，不打网络**。上游文档写着「尽量别频繁调用」，这接口还带风控。
-    pub fn maybe_claim_daily_vip(&mut self) {
-        if !self.state.logged_in
-            || self.state.config.active_source_kind() != SourceKind::KugouConcept
-        {
-            return;
-        }
-        let Some(day) = crate::util::today_local() else {
-            // 取不到本地日期就不自动领；手动按键时会给出明确提示
-            return;
-        };
-        if self.state.vip_claimed_day.as_deref() == Some(day.as_str()) {
-            return;
-        }
-        self.start_vip_sync(day, false);
-    }
-
-    /// 手动同步当天的概念版 VIP（快捷键 `V`，或点「我的资料」里那一行）。
-    ///
-    /// 手动时不看本地日期，一律问服务端——本地那个日期只记「**这台机器**领过」，
-    /// 你在手机上领过它是不知道的。
-    pub fn claim_daily_vip(&mut self) {
-        if self.state.vip_claiming {
-            return;
-        }
-        if !self.state.logged_in {
-            self.state.warn("领取 VIP 需要先登录（按 L 扫码）");
-            return;
-        }
-        if self.state.config.active_source_kind() != SourceKind::KugouConcept {
-            self.state
-                .warn("领取 VIP 是概念版专属功能，先按 v 切到「酷狗概念版」");
-            return;
-        }
-        let Some(day) = crate::util::today_local() else {
-            // 宁可放弃也不猜：猜错就是白领一天已经过去的 VIP
-            self.state
-                .warn("取不到本地日期，无法领取 VIP（可到手机端领取）");
-            return;
-        };
-        self.start_vip_sync(day, true);
-    }
-
-    /// 同步当日 VIP 的实际动作：**先问服务端今天领过没，没领过才去领**。
-    ///
-    /// # 为什么必须先查记录
-    ///
-    /// 领取接口对「今天已经领过」**只回一个 `error_code`、不给描述**（实测如此），
-    /// 界面只能显示「服务端未提供错误描述」，看着像程序坏了；更糟的是原来的文案
-    /// 会补一句「反复失败请到手机端领取」，而事实恰恰相反——手机上领过了才是原因。
-    ///
-    /// 只读的 `/youth/month/vip/record` 能直接回答这个问题，而且比本地记的日期可靠：
-    /// 领取可能发生在手机或另一台机器上。查到已经领过就不打写请求了，既省一次调用
-    /// （接口带风控），也不会报一个与事实相反的错。
-    fn start_vip_sync(&mut self, day: String, manual: bool) {
-        let api = match self.client_for(SourceKind::KugouConcept) {
-            Ok(client) => client,
-            Err(error) => {
-                self.state.error(format!("无法连接概念版接口：{error}"));
-                return;
-            }
-        };
-        let bus = self.bus.clone();
-
-        self.state.vip_claiming = true;
-        self.state.info("正在同步今日 VIP…");
-
-        self.runtime.spawn(async move {
-            // 查不到记录就当没领过，照常尝试——不能因为一个只读接口失败就放弃领取
-            let already = match api.claimed_vip_days().await {
-                Ok(days) => days.iter().any(|claimed| claimed == &day),
-                Err(error) => {
-                    tlog!(crate::logger::LEVEL_WARN, "查询 VIP 领取记录失败：{error}");
-                    false
-                }
-            };
-
-            let outcome = if already {
-                VipClaimOutcome::AlreadyClaimed
-            } else {
-                match claim_and_upgrade(&api, &day).await {
-                    Ok(()) => VipClaimOutcome::Claimed,
-                    Err(error) => {
-                        tlog!(crate::logger::LEVEL_WARN, "领取 VIP 失败：{error}");
-                        VipClaimOutcome::Failed(readable_reason(&error))
-                    }
-                }
-            };
-
-            bus.emit(Loaded::VipClaimed {
-                day,
-                outcome,
-                manual,
-            });
-        });
     }
 
     /// `A`：把当前列表**全部**加入播放队列。
@@ -3113,7 +1623,7 @@ impl App {
         }
 
         let count = self.state.queue.len();
-        self.audio.stop();
+        self.stop_playback();
         self.state.queue.clear();
         self.state.queue_cursor.select(None);
         self.state.current = None;
@@ -3124,225 +1634,7 @@ impl App {
             .info(format!("已清空播放队列（{count} 首），已停止播放"));
     }
 
-    /// `d`：把选中歌曲从当前云端歌单移除。
-    ///
-    /// 用的是歌单条目的 `fileid` 而不是 hash —— 歌单里同一首歌的 fileid 才是它在歌单里的位置标识。
-    pub fn remove_focused_song_from_cloud(&mut self) {
-        // 取 owned 而不是借用：成功后要把它 move 进异步任务里去发刷新事件，
-        // 借用既不能 move 进 `'static` 闭包，也会和下面的 `self.state.warn` 抢借用。
-        let Some(target) = self.state.sync_target.clone() else {
-            self.state.warn("请先在「云端」标签页选中一个歌单");
-            return;
-        };
-
-        let Some(list_id) = target.list_id else {
-            self.state.error("该歌单不可写（缺少 listid）");
-            return;
-        };
-
-        if !self.state.logged_in {
-            self.state.warn("需要登录才能修改云端歌单，按 L 扫码登录");
-            return;
-        }
-
-        let Some(song) = self.state.selected_song() else {
-            self.state.warn("当前没有选中的歌曲");
-            return;
-        };
-
-        // 酷狗靠**歌单条目的 fileid** 定位，网易云靠**歌曲 id**（`Song::hash`），
-        // 所以只有前者需要 fileid——用一个统一的检查把网易云的歌也拦掉是错的。
-        let source = self.state.config.active_source_kind();
-        if !matches!(source, SourceKind::Netease) && song.file_id.is_none() {
-            // 只有歌单接口才给 fileid；搜索结果没有，无法定位酷狗歌单内的条目。
-            self.state
-                .warn("这首歌不在歌单里（缺少 fileid），无法从歌单移除");
-            return;
-        }
-
-        let label = describe_song(&song);
-        let name = target.name.clone();
-        let api = self.api.clone();
-        let bus = self.bus.clone();
-
-        self.state.busy = Some(format!("从《{name}》移除歌曲"));
-
-        self.runtime.spawn(async move {
-            match api
-                .remove_tracks_from_playlist(source, list_id, std::slice::from_ref(&song))
-                .await
-            {
-                Ok(count) => {
-                    bus.emit(Loaded::CloudNotice(format!(
-                        "已从《{name}》移除 {count} 首歌"
-                    )));
-                    // 同上
-                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                    bus.emit(Loaded::CloudPlaylistChanged {
-                        playlist: Box::new(target.clone()),
-                    });
-                }
-                Err(error) => bus.fail(format!("从《{}》移除《{}》失败", name, label), error),
-            }
-        });
-    }
-
-    /// 执行「删除云端歌单」。
-    fn delete_cloud_playlist(&mut self) {
-        let Some(target) = self.state.sync_target.take() else {
-            self.state.warn("没有选中的云端歌单");
-            return;
-        };
-
-        let Some(list_id) = target.list_id else {
-            self.state.error("该歌单不可写（缺少 listid）");
-            return;
-        };
-
-        if !self.state.logged_in {
-            self.state.warn("需要登录才能删除云端歌单，按 L 扫码登录");
-            return;
-        }
-
-        let name = target.name.clone();
-        let source = self.state.config.active_source_kind();
-        let api = self.api.clone();
-        let bus = self.bus.clone();
-
-        self.state.busy = Some(format!("删除歌单《{name}》"));
-
-        self.runtime.spawn(async move {
-            match api.delete_playlist(source, list_id).await {
-                Ok(()) => bus.emit(Loaded::CloudNotice(format!("已删除歌单《{}》", name))),
-                Err(error) => bus.fail(format!("删除歌单《{}》失败", name), error),
-            }
-        });
-    }
-
-    /// 用输入的名字新建云端歌单。
-    fn create_cloud_playlist(&mut self, name: String) {
-        if name.trim().is_empty() {
-            self.state.warn("歌单名称不能为空");
-            return;
-        }
-
-        if !self.state.logged_in {
-            self.state.warn("需要登录才能新建云端歌单，按 L 扫码登录");
-            return;
-        }
-
-        let source = self.state.config.active_source_kind();
-        let api = self.api.clone();
-        let bus = self.bus.clone();
-        self.state.busy = Some("新建云端歌单".to_string());
-
-        self.runtime.spawn(async move {
-            match api.create_playlist(source, &name).await {
-                Ok(list_id) => bus.emit(Loaded::CloudNotice(match list_id {
-                    Some(id) => format!("已新建歌单《{name}》（listid={id}）"),
-                    None => format!("已新建歌单《{name}》"),
-                })),
-                Err(error) => bus.fail(format!("新建歌单《{}》失败", name), error),
-            }
-        });
-    }
-
-    fn add_focused_song_to_cloud(&mut self) {
-        if !self.state.logged_in {
-            self.state.warn("云端歌单需要登录，请配置 cookie");
-            return;
-        }
-        // 优先用**当前打开的**歌单：用户眼前就是这个歌单，加到这里才符合直觉。
-        // 原来只用 sync_target（上次选的那个），它未必等于眼前这个，于是出现
-        // 「在《我喜欢》里按 s，歌加到别的歌单去了，眼前这个不刷新」。
-        let Some(target) = self
-            .state
-            .cloud
-            .open_playlist
-            .clone()
-            .filter(|playlist| playlist.is_writable())
-            .or_else(|| self.state.sync_target.clone())
-        else {
-            self.state.warn("请先在「云端」标签页选中一个歌单作为目标");
-            return;
-        };
-        let Some(list_id) = target.list_id else {
-            self.state.error("该歌单不可写（缺少 listid）");
-            return;
-        };
-        let Some(song) = self.state.selected_song() else {
-            self.state.warn("当前没有选中的歌曲");
-            return;
-        };
-
-        let label = describe_song(&song);
-        let playlist_name = target.name.clone();
-        let source = self.state.config.active_source_kind();
-        let api = self.api.clone();
-        let bus = self.bus.clone();
-
-        self.state.busy = Some(format!("收藏《{label}》"));
-
-        self.runtime.spawn(async move {
-            match api
-                .add_tracks_to_playlist(source, list_id, std::slice::from_ref(&song))
-                .await
-            {
-                Ok(_) => {
-                    bus.emit(Loaded::CloudNotice(format!(
-                        "已把《{label}》收藏到《{playlist_name}》，正在刷新列表"
-                    )));
-                    // 先给提示，稍等一下再拉列表。真正让「刷新看不到新歌」的是服务端
-                    // 2 分钟缓存（已由 fresh=true 绕开），这里只留一点余量给写操作落定。
-                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                    bus.emit(Loaded::CloudPlaylistChanged {
-                        playlist: Box::new(target.clone()),
-                    });
-                }
-                Err(error) => bus.fail(format!("收藏《{label}》失败"), error),
-            }
-        });
-    }
-
-    fn sync_queue_to_cloud(&mut self) {
-        if !self.state.logged_in {
-            self.state.warn("云端歌单需要登录，请配置 cookie");
-            return;
-        }
-        let Some(target) = self.state.sync_target.clone() else {
-            self.state
-                .warn("请先在「云端」标签页选中一个歌单作为同步目标");
-            return;
-        };
-        let Some(list_id) = target.list_id else {
-            self.state.error("该歌单不可写（缺少 listid）");
-            return;
-        };
-        if self.state.queue.is_empty() {
-            self.state.warn("播放队列为空，没有可同步的内容");
-            return;
-        }
-
-        let songs = self.state.queue.items().to_vec();
-        let count = songs.len();
-        let playlist_name = target.name.clone();
-        let source = self.state.config.active_source_kind();
-        let api = self.api.clone();
-        let bus = self.bus.clone();
-
-        self.state.busy = Some(format!("同步 {count} 首到《{playlist_name}》"));
-
-        self.runtime.spawn(async move {
-            match api.add_tracks_to_playlist(source, list_id, &songs).await {
-                Ok(written) => bus.emit(Loaded::CloudNotice(format!(
-                    "已把 {written} 首歌同步到《{playlist_name}》"
-                ))),
-                Err(error) => bus.fail(format!("同步到《{playlist_name}》失败"), error),
-            }
-        });
-    }
-
-    fn sync_queue_cursor(&mut self, index: usize) {
+    pub(super) fn sync_queue_cursor(&mut self, index: usize) {
         if self.state.queue.is_empty() {
             self.state.queue_cursor.select(None);
         } else {
@@ -3373,6 +1665,18 @@ impl App {
                 songs,
                 append,
             } => {
+                // 迟到的结果必须丢掉。用户可能已经搜了别的词：不判这一下的话，
+                // 上一个词的结果会把新结果**整体覆盖**；追加时更糟——把上一个词的歌
+                // 混进新列表，标题却还写着新词，用户没有任何线索能看出来。
+                //
+                // 这一步也要在清 `busy` **之前**：否则一条过期结果会把正在进行中的
+                // 新搜索的「正在搜索…」抹掉，看起来像是已经搜完了。
+                if !accepts_search_result(&self.state.search.submitted, &keyword) {
+                    return;
+                }
+                // 认领之后收掉「加载更多」的标志：无论这一页回来了还是越界（空页），
+                // 都不能让它一直挂着，把后续的 M 全挡掉。
+                self.state.search.loading_more = false;
                 self.state.busy = None;
 
                 if append {
@@ -3416,7 +1720,19 @@ impl App {
                 }
             }
 
-            Loaded::Playlists { title, items } => {
+            Loaded::Playlists {
+                category,
+                title,
+                items,
+            } => {
+                // 用户可能已经切了分类：这条迟到的结果直接替换列表的话，左侧选中的
+                // 是「华语」，右侧却是「全部」的内容。
+                //
+                // 分类是常驻状态（不是 `Option`），所以这里直接比，不走
+                // `accepts_open_item`——那个函数的语义是「当前打开的那个」。
+                if category != self.state.playlists.category {
+                    return;
+                }
                 self.state.busy = None;
                 let count = items.len();
                 self.state.playlists.list.replace(items);
@@ -3432,6 +1748,27 @@ impl App {
                 songs,
                 source,
             } => {
+                // 用户可能已经打开了另一个歌单：这条迟到的结果直接覆盖右侧列表的话，
+                // 会变成「标题写着 B、内容是 A」。只认当前打开的那个歌单的结果。
+                //
+                // 首屏与后台补齐是两次 `PlaylistTracks`，同一个歌单，都放行。
+                let open = match source {
+                    PlaylistSource::Plaza => self
+                        .state
+                        .playlists
+                        .open_playlist
+                        .as_ref()
+                        .map(|open| open.id.as_str()),
+                    PlaylistSource::Cloud => self
+                        .state
+                        .cloud
+                        .open_playlist
+                        .as_ref()
+                        .map(|open| open.id.as_str()),
+                };
+                if !accepts_open_item(open, playlist.id.as_str()) {
+                    return;
+                }
                 self.state.busy = None;
                 let descending = self.state.sort_descending;
                 let count = songs.len();
@@ -3455,7 +1792,11 @@ impl App {
                     .info(format!("《{}》共 {count} 首", playlist.name));
             }
 
-            Loaded::Artists(artists) => {
+            Loaded::Artists { kind, artists } => {
+                // 同歌单广场：切了地区筛选之后，旧筛选的结果不能顶上来
+                if kind != self.state.artists.kind {
+                    return;
+                }
                 self.state.busy = None;
                 let count = artists.len();
                 self.state.artists.list.replace(artists);
@@ -3467,6 +1808,11 @@ impl App {
             }
 
             Loaded::ArtistSongs { artist, songs } => {
+                // 同歌单：用户可能已经点了下一位歌手，只认当前打开的那位
+                let open = self.state.artists.open_artist.as_ref().map(|open| open.id);
+                if !accepts_open_item(open, artist.id) {
+                    return;
+                }
                 self.state.busy = None;
                 let descending = self.state.sort_descending;
                 let count = songs.len();
@@ -3490,6 +1836,11 @@ impl App {
             }
 
             Loaded::RankTracks { board, songs } => {
+                // 同上：只认当前打开的那个榜单
+                let open = self.state.ranks.open_board.as_ref().map(|open| open.id);
+                if !accepts_open_item(open, board.id) {
+                    return;
+                }
                 self.state.busy = None;
                 let descending = self.state.sort_descending;
                 let count = songs.len();
@@ -3518,7 +1869,9 @@ impl App {
                 let empty = lyric.is_empty();
                 self.state.lyric.lyric = lyric;
                 self.state.lyric.load.succeed();
-                self.state.lyric.active_line = None;
+                // 换歌了：过渡状态一并复位，否则新歌的第一句会从上一首的某一行
+                // 淡过来，看着像歌词串了。
+                self.state.lyric.reset_transition();
                 if empty {
                     tlog!(crate::logger::LEVEL_DEBUG, "歌曲 {hash} 没有可用歌词");
                 }
@@ -3531,7 +1884,7 @@ impl App {
                 }
                 self.state.lyric.lyric = crate::api::model::Lyric::default();
                 self.state.lyric.load.fail(reason);
-                self.state.lyric.active_line = None;
+                self.state.lyric.reset_transition();
             }
 
             Loaded::StreamReady {
@@ -3558,26 +1911,24 @@ impl App {
                 self.start_download(*song, url, start_at_ms, is_trial);
             }
 
-            Loaded::StreamOpened {
+            Loaded::StreamPrerolled {
                 song,
-                stream,
+                buffer,
                 start_at_ms,
             } => {
                 if !self.is_current(&song) {
+                    // 用户已经切走了：这次下载没人会听，通知它收工，别再占着
+                    // 带宽和磁盘；缓冲里的窗口和文件句柄也随之释放。
+                    buffer.cancel();
                     return;
                 }
-                // 流建好就开播——不用等整首下完（边下边播）。读到还没下到的
-                // 位置会在 `read()` 里阻塞等数据。
+                // 攒够开头就开播——不用等整首下完（边下边播）
                 self.state.download_progress = None;
                 self.state.busy = None;
-                tlog!(
-                    crate::logger::LEVEL_DEBUG,
-                    "边下边播开播：{}（start_at_ms={}）",
-                    song.name,
-                    start_at_ms
-                );
+                // 留一份句柄：切歌/停止时要靠它通知后台任务别再下了
+                self.active_stream = Some(buffer.clone());
                 self.audio
-                    .load(AudioSource::Stream(stream), start_at_ms, song.duration_ms);
+                    .load(AudioSource::Stream(buffer), start_at_ms, song.duration_ms);
             }
 
             Loaded::DownloadProgress { received, total } => {
@@ -3588,7 +1939,6 @@ impl App {
                 song,
                 path,
                 start_at_ms,
-                needs_load,
             } => {
                 if !self.is_current(&song) {
                     // 用户已切歌，删掉刚下载的孤儿文件，避免缓存被无用数据占满
@@ -3604,53 +1954,30 @@ impl App {
 
                 self.state.download_progress = None;
                 self.state.busy = None;
+                self.audio
+                    .load(AudioSource::File(path), start_at_ms, song.duration_ms);
 
-                // 只在「续播先下完」那条路开播。边下边播完成时解码器读的
-                // 就是同一个文件、已经在放了，再 `load` 一次会把声音掐断
-                // 从 0 重开——「首播一秒后从头重来」就是这个。
-                //
-                // 判据用事件自带的 `needs_load`，**不看 `start_at_ms`**：
-                // 续播的位置完全可能是 0（上次就停在开头），那样会被误判成
-                // 「边下边播完成」而不开播。
-                if needs_load {
-                    tlog!(
-                        crate::logger::LEVEL_DEBUG,
-                        "续播下载完成，开播：{}（start_at_ms={}）",
-                        song.name,
-                        start_at_ms
-                    );
-                    self.audio
-                        .load(AudioSource::File(path), start_at_ms, song.duration_ms);
-                } else {
-                    tlog!(
-                        crate::logger::LEVEL_DEBUG,
-                        "边下边播下载完成，仅记账不重播：{}",
-                        song.name
-                    );
+                self.after_download_landed();
+            }
+
+            Loaded::StreamCompleted { song, path } => {
+                // 不是当前这首就别管：收尾是给"正在听的那首"做的
+                if !self.is_current(&song) {
+                    return;
                 }
-
-                // 当前这首已经在放了——趁这会儿把**下一首**悄悄下下来。
-                //
-                // 高音质（Hi-Res 那档实测 65 MB）首次播放要等完整下载，几十秒起步；
-                // 切歌时再下就是「每首都等一遍」。预取之后切到下一首直接命中缓存，
-                // 体验上的差别是「秒开」和「转圈半分钟」。
-                self.prefetch_next();
-
-                // 缓存回收是同步目录扫描，扔到阻塞线程池，别卡住 UI
-                let cache = self.cache.clone();
-                self.runtime
-                    .spawn_blocking(move || match cache.enforce_limit() {
-                        Ok(report) if report.removed_files > 0 => tlog!(
-                            crate::logger::LEVEL_INFO,
-                            "缓存回收：删除 {} 个文件，释放 {} 字节",
-                            report.removed_files,
-                            report.freed_bytes
-                        ),
-                        Ok(_) => {}
-                        Err(error) => {
-                            tlog!(crate::logger::LEVEL_WARN, "缓存回收失败：{error}")
-                        }
-                    });
+                // **这里绝不能 `audio.load()`**。歌已经在放了，缓冲里（和刚落盘
+                // 的文件里）数据都是全的，重新装载只会把播放位置冲回 0。
+                // 前端那句「放着放着从头开始」就是这条路径造成的。
+                tlog!(
+                    crate::logger::LEVEL_DEBUG,
+                    "《{}》边下边播已下完：{}",
+                    song.name,
+                    path.display()
+                );
+                self.state.download_progress = None;
+                self.state.busy = None;
+                self.active_stream = None;
+                self.after_download_landed();
             }
 
             Loaded::DeviceFingerprint(dfid) => {
@@ -3715,10 +2042,10 @@ impl App {
             }
 
             Loaded::LoginStatus { message } => {
-                if let Some(login) = self.state.login.as_mut() {
-                    if !login.finished {
-                        login.message = message;
-                    }
+                if let Some(login) = self.state.login.as_mut()
+                    && !login.finished
+                {
+                    login.message = message;
                 }
             }
 
@@ -3762,10 +2089,10 @@ impl App {
 
             Loaded::UserInfo(info) => {
                 // 头像地址在资料里，拿到就去取图
-                if let Some(url) = info.pic.clone() {
-                    if !self.state.config.lite_mode {
-                        self.load_avatar(url);
-                    }
+                if let Some(url) = info.pic.clone()
+                    && !self.state.config.lite_mode
+                {
+                    self.load_avatar(url);
                 }
                 self.state.user_info = Some(*info);
                 self.state.user_info_load.succeed();
@@ -3884,7 +2211,11 @@ impl App {
     /// 把一次载入失败落到对应的面板上：收掉「载入中」，留下原因。
     fn mark_load_failed(&mut self, target: LoadingTarget, reason: &str) {
         match target {
-            LoadingTarget::SearchResults => self.state.search.results.load.fail(reason),
+            LoadingTarget::SearchResults => {
+                // 失败的可能是「加载更多」那一页，标志得收掉——否则 M 会被永久挡住
+                self.state.search.loading_more = false;
+                self.state.search.results.load.fail(reason)
+            }
             LoadingTarget::Playlists => self.state.playlists.list.load.fail(reason),
             LoadingTarget::Artists => self.state.artists.list.load.fail(reason),
             LoadingTarget::Ranks => self.state.ranks.list.load.fail(reason),
@@ -3939,52 +2270,157 @@ impl App {
                         song: Box::new(song),
                         path: target,
                         start_at_ms,
-                        // 这条路之前没播（先下完全曲），现在该开播了。
-                        needs_load: true,
                     }),
                     Err(error) => bus.fail(format!("下载《{label}》失败"), error),
                 }
                 return;
             }
 
-            // 边下边播：数据一边从网络读出、一边写进 `target`，解码器读的就是
-            // 这个文件。内存里只有 `BufReader` 的一小段，与文件大小无关。
+            // 边下边播：先起流式下载（立即返回缓冲），攒够开头就开播，
+            // 剩下的在后台继续下并落盘到缓存。
             //
-            // 下载完毕后的 `on_done` **只做落盘记账**：早先的版本在这里又
-            // `load` 了一次刚下好的文件，把已经播着的流掐掉重开，表现为
-            // 「首播一秒后从头重来」。现在不换播放源，那个 bug 就不会发生。
+            // 之前是 `fetch_to` 下完整个文件才 `load`——一首 Hi-Res 几十 MB，
+            // 等待时间全押在下载上。现在只等开头那 128 KB。
             let bus_for_done = bus.clone();
             let song_for_done = song.clone();
             let target_for_done = target.clone();
-            let start_for_done = start_at_ms;
             let label_for_done = label.clone();
 
-            match downloader
-                .start_streaming(&url, target, move |result| match result {
-                    Ok(()) => bus_for_done.emit(Loaded::StreamCached {
+            let buffer =
+                match downloader.start_streaming(&url, target, move |outcome| match outcome {
+                    // 下完了只做收尾。**不能**在这里 `audio.load` 换成本地文件：
+                    // 这首已经在放了，再装载一次会把位置冲回 0——用户听到的就是
+                    // 「放着放着从头开始」（`StreamCompleted` 的注释里写了缘由）。
+                    StreamOutcome::Completed => bus_for_done.emit(Loaded::StreamCompleted {
                         song: Box::new(song_for_done),
                         path: target_for_done,
-                        start_at_ms: start_for_done,
-                        // 边下边播：解码器读的就是这个文件，已经在放了。
-                        // 再 load 一次就会掐断重开。
-                        needs_load: false,
                     }),
-                    Err(message) => bus_for_done.fail(
+                    StreamOutcome::Failed(message) => bus_for_done.fail(
                         format!("下载《{label_for_done}》失败"),
                         AppError::Audio(message),
                     ),
-                })
-                .await
-            {
-                // 建立流不等于拿到数据：`StreamDownload` 已经接好管道，
-                // 但字节是后台边下边给。直接交给播放器，读指针跑在前面时
-                // `read()` 会阻塞等数据。
-                Ok(stream) => bus.emit(Loaded::StreamOpened {
+                    // 用户已经切歌/停止，安静收尾：不报错、不提示
+                    StreamOutcome::Cancelled => {}
+                }) {
+                    Ok(buffer) => buffer,
+                    Err(error) => {
+                        bus.fail(format!("下载《{label}》失败"), error);
+                        return;
+                    }
+                };
+
+            // 等攒够开头再开播。轮询而不是阻塞等——这是 async 任务，
+            // 阻塞会把 runtime 的线程占住。
+            let preroll = buffer.clone();
+            loop {
+                let got = preroll.buffered_bytes();
+                // 流式拿不到总长度，只能报已收到的字节——进度条照常工作
+                progress(got, None);
+                // 用 `is_finished` 而不是 `is_complete`：下载**失败**也是收工，
+                // 失败时再等下去只会白转（而这正是"下不到就不开播"该有的样子）
+                if got >= PREROLL_BYTES || preroll.is_finished() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+
+            // 一点都没下到（比如直链立刻失败）就别发了，等下载完成那条报错
+            if preroll.buffered_bytes() > 0 {
+                bus.emit(Loaded::StreamPrerolled {
                     song: Box::new(song),
-                    stream: Box::new(stream),
+                    buffer,
                     start_at_ms,
+                });
+            }
+        });
+    }
+
+    /// 一首歌下载落盘之后的收尾：预取下一首 + 回收缓存。
+    ///
+    /// 两条下载路径共用它（续播的 `StreamCached`、边下边播的 `StreamCompleted`）
+    /// ——"文件已经在盘上"这件事对两者是一样的，区别只在要不要动播放器。
+    fn after_download_landed(&mut self) {
+        // 当前这首已经在放了——趁这会儿把**下一首**悄悄下下来。
+        //
+        // 高音质（Hi-Res 那档实测 65 MB）首次播放要等完整下载，几十秒起步；
+        // 切歌时再下就是「每首都等一遍」。预取之后切到下一首直接命中缓存，
+        // 体验上的差别是「秒开」和「转圈半分钟」。
+        self.prefetch_next();
+
+        // 缓存回收是同步目录扫描，扔到阻塞线程池，别卡住 UI
+        let cache = self.cache.clone();
+        self.runtime
+            .spawn_blocking(move || match cache.enforce_limit() {
+                Ok(report) if report.removed_files > 0 => tlog!(
+                    crate::logger::LEVEL_INFO,
+                    "缓存回收：删除 {} 个文件，释放 {} 字节",
+                    report.removed_files,
+                    report.freed_bytes
+                ),
+                Ok(_) => {}
+                Err(error) => {
+                    tlog!(crate::logger::LEVEL_WARN, "缓存回收失败：{error}")
+                }
+            });
+    }
+
+    /// 事件里的歌曲是否仍是当前播放的那首。
+    fn is_current(&self, song: &Song) -> bool {
+        self.state
+            .current
+            .as_ref()
+            .map(|current| current.hash == song.hash)
+            .unwrap_or(false)
+    }
+
+    // ==================================================================
+    // 封面与歌词：只负责发起请求，结果在 handle_loaded 里处理
+    // ==================================================================
+
+    pub(super) fn request_lyric(&mut self, song: Song) {
+        // 歌词同样按歌曲自己的来源取：跨音源时 hash 只在该平台的接口里有意义
+        let source = song.source;
+        let bus = self.bus.clone();
+        let api = match self.client_for(source) {
+            Ok(client) => client,
+            Err(error) => {
+                crate::logger::tlog!(
+                    crate::logger::LEVEL_WARN,
+                    "无法连接「{}」取歌词：{error}",
+                    source.label()
+                );
+                // 面板也得知道——不然它会停在上一次的歌词上，或者显示
+                // 「暂无歌词」，两种都不对
+                bus.emit(Loaded::LyricFailed {
+                    hash: song.hash.clone(),
+                    reason: error.user_hint(),
+                });
+                return;
+            }
+        };
+
+        self.state.lyric.load.begin();
+        self.runtime.spawn(async move {
+            match source.fetch_lyric(&api, &song).await {
+                Ok(lyric) => bus.emit(Loaded::Lyric {
+                    hash: song.hash.clone(),
+                    lyric,
                 }),
-                Err(message) => bus.fail(format!("下载《{label}》失败"), AppError::Audio(message)),
+                Err(error) => {
+                    tlog!(
+                        crate::logger::LEVEL_WARN,
+                        "获取《{}》的歌词失败：{error}",
+                        song.name
+                    );
+                    // 走 LyricFailed 而不是塞一份空歌词：空歌词会被面板渲染成
+                    // 「暂无歌词」，等于替这首歌断言「它本来就没有歌词」。
+                    // 也不走 Loaded::Failed——那会往状态栏写错误，而歌词失败
+                    // 不影响播放，每切一首歌闪一条太吵。
+                    bus.emit(Loaded::LyricFailed {
+                        hash: song.hash.clone(),
+                        reason: error.user_hint(),
+                    });
+                }
             }
         });
     }
@@ -3992,7 +2428,7 @@ impl App {
     /// 为当前歌曲取封面（异步）：下载 → 解码 → 生成字符画。
     ///
     /// 失败只记日志：封面是锦上添花，不能因为它让播放流程报错。
-    fn load_cover(&mut self, song: &Song) {
+    pub(super) fn load_cover(&mut self, song: &Song) {
         // 简易模式：封面是最占内存的一块（图片解码 + 图形协议），直接不取。
         // 与其取完再扔，不如从源头省掉这次下载与解码。
         if self.state.config.lite_mode {
@@ -4069,15 +2505,6 @@ impl App {
         });
     }
 
-    /// 事件里的歌曲是否仍是当前播放的那首。
-    fn is_current(&self, song: &Song) -> bool {
-        self.state
-            .current
-            .as_ref()
-            .map(|current| current.hash == song.hash)
-            .unwrap_or(false)
-    }
-
     // ==================================================================
     // 音频事件与心跳
     // ==================================================================
@@ -4091,6 +2518,9 @@ impl App {
                 self.state.busy = None;
                 self.state.download_progress = None;
                 self.state.playback = PlaybackState::Playing;
+                // 曲目真的起来了，之前记的"续播点"已经兑现（或者早就过期了），
+                // 留着只会让下次按 Space 莫名回到某个中间位置
+                self.state.resume = None;
                 let title = self
                     .state
                     .current
@@ -4114,6 +2544,7 @@ impl App {
             }
             AudioEvent::TrackFinished => {
                 self.state.position_ms = 0;
+                self.active_stream = None;
 
                 // 试听片段播完 ≠ 整首播完。这里不能走自动切歌：用户会以为是
                 // 「会员没生效、听了几十秒就跳歌」，而实际是没拿到完整版。
@@ -4129,6 +2560,49 @@ impl App {
                 // 自然播完：顺序模式到底就停，单曲循环原地重播
                 self.next_track(false);
             }
+            // 边下边播时数据没跟上（读超时），歌**没放完**。
+            //
+            // 这里唯一不能做的事就是"当成播完了"：那会触发切歌，单曲循环下
+            // 就是从头再放一遍——用户看到的就是「进度回到开头」。正确做法是
+            // 留住位置，然后从这个位置把这首重新拾起来（`start_at_ms > 0`
+            // 会自动走"整首下完再播"那条路，不再依赖流式缓冲）。
+            AudioEvent::StreamInterrupted { position_ms } => {
+                // 落一条日志：这个现象在界面上只是"卡了一下"，而排查时最需要的
+                // 恰恰是「几点断的、断在哪」，光看现场看不出来
+                tlog!(
+                    crate::logger::LEVEL_INFO,
+                    "边下边播缓冲中断，停在 {} ms，准备从该位置续播",
+                    position_ms
+                );
+                self.state.busy = None;
+                self.state.download_progress = None;
+                self.state.playback = PlaybackState::Stopped;
+                // 位置必须留着：界面停在断流的地方，按 Space 也能从这儿继续
+                self.state.position_ms = position_ms;
+
+                let Some(song) = self.state.current.clone() else {
+                    self.state.warn("缓冲中断");
+                    return;
+                };
+
+                // 每首歌只自动兜一次：网络真断了的话，反复重试只会刷屏
+                if self.stream_retried.as_deref() == Some(song.hash.as_str()) {
+                    self.state.warn(format!(
+                        "《{}》缓冲中断在 {}，按 Space 或 Enter 重试",
+                        song.name,
+                        format_duration_ms(position_ms)
+                    ));
+                    return;
+                }
+
+                self.stream_retried = Some(song.hash.clone());
+                self.state.warn(format!(
+                    "《{}》缓冲中断，正从 {} 继续…",
+                    song.name,
+                    format_duration_ms(position_ms)
+                ));
+                self.start_playback(song, position_ms);
+            }
             // 换设备失败：旧设备照旧在播，只提示，不动播放状态
             AudioEvent::DeviceSwitchFailed(message) => {
                 self.pending_device_resume = None;
@@ -4139,7 +2613,11 @@ impl App {
                 self.state.download_progress = None;
                 // 换设备失败时旧设备还活着，刚才那首也还在播，别再排队续播了
                 self.pending_device_resume = None;
+                // 这次失败可能就来自这条流，句柄留着没用了
+                self.active_stream = None;
                 self.state.playback = PlaybackState::Stopped;
+                // 位置留着：用户按 Space 能从停住的地方再来一次，而不是从头
+                self.mark_resume_point();
                 self.state.error(message);
             }
         }
@@ -4191,20 +2669,27 @@ impl App {
             self.state.spectrum.clear();
         }
         self.state.advance_visualizer(elapsed);
+        // 歌词换行的过渡时钟。放在 `update_active_lyric` **之前**：这样本帧刚换的行
+        // 从 t = 0 开始渲染，不会先闪一帧稳态再开始淡。
+        self.state.lyric.advance_transition(elapsed);
 
-        self.sync_mpris();
-        self.sync_tray();
+        // 桌面集成只在 Unix 上存在（MPRIS / StatusNotifierItem 都是 D-Bus 接口）
+        #[cfg(unix)]
+        {
+            self.sync_mpris();
+            self.sync_tray();
+        }
 
         if self.state.playback == PlaybackState::Playing {
             self.update_active_lyric();
         }
 
         // 登录中：每约 2 秒轮询一次扫码状态（tick 默认 200ms，10 拍 = 2s）
-        if self.state.login.is_some() && self.state.ticks % 10 == 0 {
+        if self.state.login.is_some() && self.state.ticks.is_multiple_of(10) {
             self.poll_login();
         }
 
-        if self.state.ticks % CACHE_MEASURE_TICKS == 0 {
+        if self.state.ticks.is_multiple_of(CACHE_MEASURE_TICKS) {
             self.refresh_cache_usage();
         }
     }
@@ -4222,9 +2707,18 @@ impl App {
         // 正值表示歌词提前，所以要从播放位置里减掉偏移
         let position = (self.state.position_ms as i64 - self.state.config.lyric_offset_ms).max(0);
         let index = self.state.lyric.lyric.index_at(position as u64);
-        if index != self.state.lyric.active_line {
-            self.state.lyric.active_line = index;
+        if index == self.state.lyric.active_line {
+            return;
         }
+        // 换行了：记下旧锚点、算这次该用多长的过渡。
+        //
+        // 时长在这里算而不是在渲染层：它要用到「行距」与「跨了几行」，都是
+        // 状态层的知识；渲染层只管拿一个进度 t 去插值。
+        let total =
+            self.state
+                .lyric
+                .transition_ms_for(&self.state.config, self.state.duration_ms, index);
+        self.state.lyric.retarget(index, total);
     }
 
     /// 取一条事件，最多处理 [`MAX_EVENTS_PER_FRAME`] 条，防止事件洪水饿死渲染。
@@ -4241,21 +2735,17 @@ impl App {
     }
 }
 
-/// `歌手 - 歌名`，用于状态栏与提示。
-/// 把音质档位翻成人话。
-fn quality_label(quality: &str) -> String {
-    match quality {
-        "128" => "标准 128kbps".to_string(),
-        "320" => "较高 320kbps".to_string(),
-        "flac" => "无损 FLAC".to_string(),
-        "high" => "高品".to_string(),
-        "super" => "超高".to_string(),
-        "viper_clear" => "蝰蛇母带".to_string(),
-        other => other.to_string(),
-    }
+/// 点击歌词行时该跳到的播放位置。
+///
+/// 抽成自由函数是为了能直接测：`+ lyric_offset_ms` 这一步漏了**不会报错**，
+/// 只会「跳过去正好差一句」——偏移为 0 时完全看不出来，而调过偏移的人一眼就发现。
+/// 这正是那种只能靠测试兜住的错。
+pub fn lyric_seek_target(line_time_ms: u64, lyric_offset_ms: i64) -> u64 {
+    line_time_ms.saturating_add_signed(lyric_offset_ms)
 }
 
-fn describe_song(song: &Song) -> String {
+/// `歌手 - 歌名`，用于状态栏与提示。
+pub(super) fn describe_song(song: &Song) -> String {
     let singers = song.singer_text();
     if singers == "未知歌手" {
         song.name.clone()
@@ -4300,4 +2790,169 @@ pub fn rank_subtitle(board: &RankBoard) -> String {
         .update_frequency
         .clone()
         .unwrap_or_else(|| format!("#{}", board.id))
+}
+
+/// 打开歌单时，首屏先取哪一页。
+///
+/// 列表**倒序**显示时（默认如此，`o` 键可切），出现在最上面的是歌单的**最后一页**。
+/// 所以首屏也要从末尾取：否则用户一进歌单先看到的是一屏最老的歌，几秒后整表到位、
+/// 画面整体翻一次，才变成他心里的"第一首"。实测就是这么反馈的——进「我喜欢」先看到
+/// 歌单开头的歌，而最上面最终变成的是最后加进去的那首。
+///
+/// 总页数由歌单元数据里的曲数算；曲数拿不到（有的接口不给）就算不出来，只能退回
+/// 第 1 页（老行为）。
+fn first_screen_page(sort_descending: bool, song_count: u32, page_limit: u32) -> u32 {
+    if sort_descending && song_count > page_limit {
+        song_count.div_ceil(page_limit)
+    } else {
+        1
+    }
+}
+
+/// 首屏拿到那一页之后，还要不要继续把整表取回来。
+///
+/// 「这一页不满 ⇒ 这就是全部」**只在第 1 页成立**。首屏改从末尾取之后（见
+/// [`first_screen_page`]），末页不满页是常态——414 首 = 13×30 + 24，末页就是 24 首。
+/// 照搬老判据会让「整表补齐」永不出门，界面从此只显示那 24 首。
+fn needs_full_fetch(fetched_page: u32, received: usize, page_limit: u32) -> bool {
+    fetched_page > 1 || received >= page_limit as usize
+}
+
+// ======================================================================
+// 迟到的异步结果
+//
+// 每个请求都是 `tokio::spawn` 出去的，回来的顺序不保证。用户在这中间完全可以
+// 再搜一次、再开一个歌单、再点一位歌手——那条旧结果如果照单全收，界面就会变成
+// 「输入框写着 B、列表是 A」这类**看起来就是数据错了**的状态。
+//
+// 所以每个结果回来时都要先回答一个问题：**它还是「现在」要的吗？**
+//
+// 这里用「身份比对」而不是给每次请求编号（generation / request id）：
+// 播放那一侧早就这么做（`App::is_current`、歌词按 hash 比对），沿用同一套判据
+// 只需读一个字段，而计数器要一路穿过 event、状态与所有发出点，收益一样、改动面大得多。
+// 判据本身抽成下面的自由函数，好让它们能单独测——`App` 构造需要音频引擎与运行时，
+// 单测里搭不出来。
+// ======================================================================
+
+/// 一条搜索结果该不该采纳。
+///
+/// **只认当前提交的那个关键词**。不判的话：用户搜了 B 之后，A 的结果迟到会把它
+/// 整体覆盖；追加（`M` 加载更多）时更糟——上一个词的歌混进新列表，而标题还是新词。
+fn accepts_search_result(current_keyword: &str, arriving_keyword: &str) -> bool {
+    !arriving_keyword.is_empty() && arriving_keyword == current_keyword
+}
+
+/// 一条列表结果该不该采纳：**只认当前打开的那一个**。
+///
+/// 歌单 / 歌手 / 榜单三处共用这条判据——失败模式完全一样：用户已经打开了 B，
+/// A 的结果迟到，直接覆盖右侧就是「标题写着 B、内容是 A」。
+///
+/// 比较的是 id 而不是整个结构（取 `Option<K>` 而不是 `Option<&T>`）：三个模型的
+/// id 类型不同（歌单是 `String`，歌手与榜单是 `i64`），而且歌名/封面这类字段
+/// 本来就可能随时间变，拿它们当身份反而会误判。
+fn accepts_open_item<K: PartialEq>(open: Option<K>, arriving: K) -> bool {
+    open.is_some_and(|current| current == arriving)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 点歌词行跳转必须**加回歌词偏移**。
+    ///
+    /// 漏掉这一步不会报错，只会「跳过去正好差一句」：偏移为 0 时完全看不出来，
+    /// 调过偏移的人一眼就发现。三档偏移各验一次。
+    #[test]
+    fn lyric_seek_adds_the_offset_back() {
+        // 偏移为 0：跳过去就是这一句
+        assert_eq!(lyric_seek_target(12_000, 0), 12_000);
+        // 正值（歌词提前显示）：这一句实际出现在 12_000 + 300
+        assert_eq!(lyric_seek_target(12_000, 300), 12_300);
+        // 负值（歌词延后）：实际出现在 12_000 - 300
+        assert_eq!(lyric_seek_target(12_000, -300), 11_700);
+    }
+
+    /// 偏移大到把目标压到 0 以下时不能下溢成天文数字。
+    #[test]
+    fn lyric_seek_saturates_at_zero() {
+        assert_eq!(lyric_seek_target(100, -5_000), 0);
+    }
+
+    /// 倒序（默认）时首屏取最后一页——这是「进歌单先看到最老的歌」那个问题的正解。
+    #[test]
+    fn descending_playlist_opens_at_the_last_page() {
+        // 414 首、每页 30：最后一页是第 14 页（391–414）
+        assert_eq!(first_screen_page(true, 414, 30), 14);
+        // 正好整页时不要多取一页
+        assert_eq!(first_screen_page(true, 60, 30), 2);
+    }
+
+    /// 正序显示时首屏仍然是第 1 页（这时它才真的是列表头部）。
+    #[test]
+    fn ascending_playlist_opens_at_the_first_page() {
+        assert_eq!(first_screen_page(false, 414, 30), 1);
+    }
+
+    /// 一页装得下的歌单（以及曲数未知的）照旧取第 1 页：
+    /// 只有一页时"最后一页"就是第 1 页，多绕一步没意义。
+    #[test]
+    fn small_or_unknown_playlists_stay_on_page_one() {
+        assert_eq!(first_screen_page(true, 30, 30), 1);
+        assert_eq!(first_screen_page(true, 4, 30), 1);
+        assert_eq!(first_screen_page(true, 0, 30), 1);
+    }
+
+    /// 首屏取的是末页（不满页）时，**仍然**要把整表取回来。
+    ///
+    /// 这条钉的是一次差点踩进去的坑：老的「不满页 ⇒ 没有更多」判据搬到末页上，
+    /// 会让 414 首的歌单永远只显示最后那 24 首。
+    #[test]
+    fn an_underfull_last_page_still_needs_the_full_fetch() {
+        assert!(needs_full_fetch(14, 24, 30), "末页不满也要补齐整表");
+        assert!(needs_full_fetch(2, 30, 30), "末页正好满也要");
+    }
+
+    /// 第 1 页时的老判据保持不变：不满页就是全部。
+    #[test]
+    fn a_short_first_page_is_the_whole_playlist() {
+        assert!(!needs_full_fetch(1, 12, 30));
+        assert!(needs_full_fetch(1, 30, 30));
+    }
+
+    /// 迟到的搜索结果必须丢掉——这是「搜了 B 却看到 A 的歌」的守卫。
+    ///
+    /// 场景：搜「A」→ 结果还在路上 → 用户改搜「B」→ A 的结果先到。
+    /// 不判这一下的话它会**整体覆盖** B 的结果（`append` 时则把 A 的歌混进 B 的列表，
+    /// 而标题还写着 B）。
+    #[test]
+    fn a_late_search_result_is_dropped() {
+        assert!(
+            accepts_search_result("海阔天空", "海阔天空"),
+            "当前词的该采纳"
+        );
+        assert!(
+            !accepts_search_result("海阔天空", "光辉岁月"),
+            "上一个词的结果必须丢掉"
+        );
+        // `submitted` 为空 = 还没搜过。空关键词的结果不该冒出来抢屏
+        assert!(!accepts_search_result("", ""));
+        assert!(!accepts_search_result("海阔天空", ""));
+    }
+
+    /// 列表结果只认当前打开的那一个。
+    ///
+    /// 场景：打开歌单 A → 还在加载 → 用户打开 B → A 的结果先到。照单全收就是
+    /// 「标题写着 B、内容是 A」，而且没有任何提示。
+    #[test]
+    fn only_the_currently_open_item_is_accepted() {
+        // 什么都没打开时，任何结果都不认（避免启动期的迟到结果抢屏）
+        assert!(!accepts_open_item::<i64>(None, 7), "没打开任何东西时不认");
+        assert!(!accepts_open_item(Some(7), 8), "打开的已经换成别的了");
+        assert!(accepts_open_item(Some(7), 7));
+
+        // 歌单走的是字符串 id（公开歌单是 global_collection_id，自建是 listid）
+        assert!(accepts_open_item(Some("3_abc"), "3_abc"));
+        assert!(!accepts_open_item(Some("3_abc"), "3_def"));
+        assert!(!accepts_open_item::<&str>(None, "3_abc"));
+    }
 }

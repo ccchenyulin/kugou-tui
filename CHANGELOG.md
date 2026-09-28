@@ -4,35 +4,619 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.4.4] - 2026-09-28
+
+### 变更
+
+- **拆 `app/update.rs`**（4728 → 4144 行）。它是全程序唯一改状态的地方，长期膨胀到
+  4700 行，改一处要读的上下文太多。已切出三块，**全部是纯搬移、逻辑零改动**，
+  搬完归一化可见性后逐字节比对过（`search` / `playback` 的 `diff` 输出为空，
+  `navigation` 只差一个尾随空行）：
+
+  | 新模块 | 行数 | 内容 |
+  |---|---|---|
+  | `app/navigation.rs` | 237 | 切页、焦点、选择移动、`go_back` |
+  | `app/playback.rs` | 320 | 起播 / 切歌 / 进度 / 音量 / 静音 / 歌词偏移 |
+  | `app/search.rs` | 142 | 提交搜索、加载更多（含 `SEARCH_MAX_PAGES`） |
+
+  **边界比标题重要。**「播放控制」那一节里挤着五个不属于播放的方法，没有跟着搬走：
+  `sync_mpris` / `sync_tray`（由 `tick()` 每拍调的输出适配器）、`toggle_window`
+  （niri 的 compositor IPC）、`client_for`（全文件共用的客户端构造辅助，6 处调用）、
+  `request_lyric`（结果处理在 `handle_loaded` 里，请求与处理同文件才省上下文）。
+  判断标准是「调用方在哪、结果谁处理」，不是「它写在哪个标题下面」——宁可模块小一点、
+  边界干净，也不为了凑体积把邻居一起搬走。
+
+  **切完之后复查依赖，发现并修掉了一处叶子互依。** `activate()`（Enter 键按
+  `(Tab, Focus)` 决定该搜索、该播放还是该打开）原本跟着「导航」切进了
+  `navigation.rs`，于是 navigation 去调 search 与 playback，`navigation ↔ search`
+  变成双向。`startup_search()`（`--search` 的启动胶水）同理让 search 反向依赖
+  navigation。两者搬回 `update.rs` 的分派层后，依赖变成星形：`update` 单向调用三个
+  模块，`navigation` / `playback` 只回调 `update`，`search` 谁也不调。
+  **搬移等价不代表边界正确——边界错了不报错，只是把耦合从文件里挪到模块之间**，
+  所以每切完一块都要重新数一遍模块调用图。
+
+  代价说明白：Rust 的方法私有性按「写 `impl` 块的模块」算，不是按类型——方法搬走后
+  另一侧调用会报 `E0624`，得逐个改成 `pub(super)`，且**两个方向都要改**。
+  这是拆分的固有成本，不是设计缺陷；编译器会把清单列全。
+
+  剩下的 `cloud.rs` / `settings.rs` 按同样粒度继续，一次一块。规矩与进度记在
+  `docs/MAINTENANCE.md` §1.8。
+
+- **拆 `app/update.rs` 第二轮**（4144 → 2958 行），把上面说的 `cloud.rs` /
+  `settings.rs` 切完了，另加一块 `desktop.rs`。同样是纯搬移：116 个函数逐个比对
+  签名 + 函数体（空白折叠、`pub(super)` 归一化）**全部逐字符存活**，唯一被删的
+  是一份重复的实现（见下面「修复」第一条）。
+
+  | 新模块 | 行数 | 内容 |
+  |---|---|---|
+  | `app/cloud.rs` | 937 | 登录 / 音源切换 / VIP / 云端歌单 / 账号资料 |
+  | `app/settings.rs` | 728 | 设置页：候选值 + 显示文本 + 三个交互 |
+  | `app/desktop.rs` | 106 | MPRIS / 系统托盘 / 窗口控制 |
+  | `app/navigation.rs` | 275 | 另接了数字键与 `v` 键打开音源页 |
+
+  依赖仍是**星形**且没有互相调用的一对：`update` 指向 6 个模块，模块只回指
+  `update` / `mod`。一处**故意接受**的跨模块调用：`navigation` 调 `settings`
+  的 `move_settings`（设置页的光标移动归设置页，理由记在 MAINTENANCE §1.8）。
+
+- **修四处错位的文档注释**。它们的共同症状是「一段注释紧贴在另一个函数的文档
+  前面，被 Rust 并成同一个文档」，于是 `fetch_user_info` 的文档开头讲的是 VIP、
+  `handle_digit` 的文档开头讲的是 `v` 键切换音源、`open_quality_picker` 的开头
+  讲的是下载歌曲、`describe_song` 的开头讲的是音质标签。四处各自归位。
+
+### 新增
+
+- **`scripts/kugou-api.ps1`：Windows 侧的服务管理**（start / stop / restart / status / logs）。
+  此前 Windows 上没有任何办法停掉后台的 node：启动器只做「探活 → 没起就拉起」，
+  想停只能去任务管理器按名字猜着杀，而猜错会把别的 Node 项目一起带走。现在两个平台
+  共用同一套 PID 文件约定（`<PID> <端口>`，空格分隔，落在缓存目录的 `api-<实例>.pid`），
+  启动器拉起的实例，`kugou-api.ps1 stop` 停得掉。
+
+- **`kugou-api logs`**：直接跟随日志（`logs lite` 跟概念版）。此前要看日志得先
+  `status` 拿到路径，再自己 `tail`。
+
+- **启动器补 `--dry-run`**（bash 侧；PowerShell 侧本来就有）：只打印解析到的配置、
+  音源、实例、探测地址、服务目录与二进制路径，不启动任何东西。排查「为什么它说服务
+  没起」时不用再靠猜。
+
+- 启动器在拉起服务前**先查 `node`**。此前没装 Node 要等满 20 秒，再从日志尾部那句
+  `ENOENT` 里推断原因。
+
+- 启动器在 macOS 上会检查二进制的 `com.apple.quarantine` 属性，并给出 `xattr -d`
+  那条命令。签名缺失的二进制被 Gatekeeper 杀掉时终端只显示 `Killed: 9`，看起来像
+  程序自己的 bug。
 
 ### 修复
 
-- **首次播放一首未缓存的歌会「响不到一秒后从头重来」**：`bede5f0` 引入的边下边播
-  在下载完成时又 `load` 了一次刚下好的文件，而 `engine::load` 无条件
-  `player.stop() + clear() + play()`，把**正在放的那条流**掐断、从 0 重开。
-  同一首歌因此被装载两次：`StreamPrerolled`（攒够开头就开播）之后，
-  `StreamCached`（整首下完）又装一次。未命中缓存的歌才走这条路，
-  所以只有首播会重播。现在事件加了 `needs_load`：边下边播完成时
-  **只记账、不碰播放**；只有「续播先下完」（要跳到中间去、不能走流式）
-  才在落盘后开播。用 `start_at_ms > 0` 猜是不行的——续播的位置完全可能是 0。
-- **首播时把整首歌攒在内存里**：旧的 `StreamingBuffer` 用一个只会追加的
-  `Vec<u8>` 装下全部字节并实现 `Seek`，一首无损 20–40 MB 就这么堆在堆上，
-  等下一次 `load` 才释放。现在改用 `stream-download`：数据**直接写进缓存文件**，
-  解码器读的也是那个文件，内存里只剩 `BufReader` 的一小段——
-  **与文件大小无关**。实测一首 25 MB 无损的峰值从 **39.6 MB 降到 15.5 MB**，
-  而且不再随码率增长。顺带把「内存 + 磁盘写两份」也去掉了，落盘的就是缓存条目本身。
-- 预缓冲从 128 KB 调到 256 KB（约 16 秒音频），开播前多等一点、少一次卡顿。
+- **网易云的歌单 / 榜单会被静默截断**（`source/netease.rs`）。`playlist_tracks_all`
+  用「不满一页 ⇒ 结束」停翻页，而 `song_from_json` 会过滤条目（缺 hash、字段类型
+  不对），一页 500 条剩 499 条是常事——只要撞上，整张表就停在那儿，用户看到的是
+  一个短了一截的歌单，没有任何报错。酷狗那侧（`api/catalog.rs::collect_all_pages`）
+  一直是「只有空页才停」，两侧判据不一致本身就是这个 bug 的信号。
 
-- **首播时快退不生效（按了 `h` 歌照常往前走）**：往回 seek 被 Symphonia 拒
-  （`SeekError::RandomAccessNotSupported`，rodio 包成「Symphonia decoder
-  returned an error」），快进 `l` 与已缓存的歌都正常——**往前不需要知道流的
-  总长，往回需要**。上游的内存缓冲没这个问题；换成落盘读取后，流的长度不再
-  由 `Decoder::try_from(文件)` 从元数据自动取得（流式源走的是 `Decoder::new`，
-  它不设 `byte_len`）。现在建流式解码器时显式 `with_byte_len()`，长度取自
-  HTTP 的 Content-Length（`StreamDownload::content_length`）；拿不到就不设，
-  退回「不能往回 seek」而不是拿一个错的长度去算（rodio 警告 `byte_len` 不对
-  会导致时长与 seek 都出错）。
+  改成「只有空页才停」，判据抽成自由函数 `should_continue_paging`（`got > 0`，
+  签名里**故意没有** `page_size`——页大小一旦进判据，截断就回来了）。
+
+  改它的前提是「越界 offset 到底返回空数组还是报错」，这个之前没法实测（本机只跑着
+  酷狗概念版服务 `:3001`）。这次起了 NeteaseCloudMusicApi（`:3002`）实测：
+  `/playlist/track/all?id=3778678&limit=500&offset=500`（该歌单 200 首）与
+  `offset=999999` 都返回 `{"songs":[],"privileges":[],"code":200}`——**空数组、
+  不报错**，也没有把 offset 夹回末页返回重复内容。所以多打一次越界请求是安全的，
+  代价只是整表加载末尾多一个请求（这个接口一次就要几秒）。
+
+  回归测试 `paging_stops_only_on_an_empty_page`：把判据退回 `got >= 500` 时它当场
+  失败（`1 条也该继续翻页`）。另有一条 `an_out_of_range_page_is_empty_and_
+  therefore_ends_paging` 把上面那段**服务端行为的实测结论**钉住——哪天上游改成
+  越界就报非 200，`playlist_tracks_all` 的 `?` 会把错误抛上去，那时要重新实测
+  并改这条。`docs/MAINTENANCE.md` §5、§7 同步。
+
+- **`;`（打开歌曲右键菜单）改不了键位**（`keymap.rs`）。它在 `resolve_normal` 与
+  `CHEATSHEET` 里都有，帮助面板也照常显示，`docs/CONFIGURATION.md` 的键位表里也列着，
+  但 `action_from_name` 的动作名表里**没有 `context_menu`**——用户照文档写
+  `context_menu = "m"` 时得到的是「未知动作 context_menu」，而那个动作明明存在。
+  `CONTRIBUTING.md` 把「记得同步这张表」写成了一条人工步骤，这次就漏了。
+
+  动作名表从 `match` 改成了 `const REBINDABLE`（数据），于是「帮助面板里有默认键位的
+  动作，是否都能绑上名字」可以机械检查：新测试拿 `CHEATSHEET` 与 `REBINDABLE`
+  两份名单对着数，去掉修复后它会精确报出
+  `「;」（打开歌曲右键菜单）→ ContextMenu`。另加一条表本身的自检
+  （不重名、全小写 snake_case）——重名会让 `find` 静默取到先出现的那条。
+  `docs/CONFIGURATION.md` 的清单与计数（60 → 61）一并跟上。
+
+- **歌词译文会整体串位一行**（`api/lyric.rs`）。`parse_lrc` 与 `attach_translations`
+  各写了一份「这一行算不算歌词」的判据：前者看 `parse_krc_words` 的返回值是否为空，
+  后者看 `clean_krc_markup` 是否为空。两者在「`<` 之前有字、却没有配对的 `>`」的行上
+  分道扬镳（歌里写了 `宝贝<3` 这种），于是 `attach_translations` 算出来的行号多出一项，
+  **之后每一行的译文都往后串一位**——用户看到「译文和原文对不上」，没有任何报错。
+
+  现在判据只有一处（`has_lyric_content`），两边都调它。顺带修掉同源的另一个症状：
+  `parse_krc_words` 只输出标记**之后**的字符，所以那一行以前会被整行丢掉——
+  `<` 之前的字也是正文，现在收下（这些字没有逐字时间，于是退回整行高亮）。
+
+  回归测试 `a_line_with_a_stray_angle_bracket_does_not_shift_translations`：
+  去掉修复后它会报 `left: [译1, 译2, 译3]` / `right: [译1, 译3, 译4]`。
+
+- **封面「不变形」模式在一段退化区域上会 panic**（`ui/views/player.rs::fit_box`）。
+  `rows.clamp(1, area.height)` 在 `area.height == 0` 时直接炸——`Ord::clamp` 要求
+  `min <= max`，而 `clamp(1, 0)` 会 `assert!(min <= max)`。
+
+  现在**没有**可复现的触发路径（实测 `render_home` 的布局在 4~24 行之间最低给封面栏
+  4 行，`Min(6)` 优先于 `Length(8)`），但这是布局的巧合而不是这里的保证——
+  封面区的布局本身就改过一次（见那段「之前让封面框按图片比例自己算高度」的注释）。
+  现在退化区域直接返回空矩形：既不 panic，也不会把框撑到区域外面去
+  （硬凑 1×1 会让 `area.width - columns` 当场下溢）。回归测试同时钉住
+  「零尺寸不 panic」与「算出来的框永远不超出区域」。
+
+- **Windows 上的 PowerShell 脚本会满屏乱码**（`scripts/*.ps1`）。四个 `.ps1` 都没有
+  UTF-8 BOM，而 Windows 自带的 Windows PowerShell 5.1 在文件没有 BOM 时**按当前
+  ANSI 代码页解码**——中文 Windows 上是 GBK，于是脚本里那几十条面向用户的中文提示
+  （「找不到 node」「已在运行」……）全变成乱码。
+
+  为什么一直没发现：CI 的 Windows 那栏用的是 `shell: pwsh`，也就是 PowerShell 7，
+  而 7.x 默认按 UTF-8 读——**CI 绿了不代表用户那边正常**。现在四个文件都加上 BOM
+  （只改解码方式，逐字节确认过除开头 3 字节外内容完全没动），并把这条写进
+  `docs/MAINTENANCE.md` §1.7。
+
+- **并发翻页的整表顺序是随机的**（`api/catalog.rs`）。`collect_all_pages` 一批页
+  同时发出去，然后在 `JoinSet::join_next()` 里直接 `all.extend(songs)`——而
+  `join_next()` 给的是**任务完成顺序**，不是页码顺序。于是打开任何超过 6 页
+  （>180 首）的歌单 / 榜单 / 歌手页，整表的页序都是乱的。榜单尤其致命：它的
+  「顺序」就是榜单内容本身，TOP500 被随机排列等于榜单没了。
+
+  现在一批的结果先按页码收进 `collected`，排好序再拼。回归测试用手写的假服务端
+  让页码**必然倒序返回**（第 N 页等 `60ms × (7 - N)`），所以这条不是靠运气过的：
+  去掉排序后它稳定地给出 `h1, h7, h6, h5, h4, h3, h2`。
+
+- **同一首歌上会同时跑两条流式下载**（`audio/download.rs`）。连按两次 Enter 就是
+  两条 `start_streaming` 落在同一个目标上（`App::active_stream` 要等到攒够开头才
+  被握住，中间那段窗口谁也拦不住第二条）。两条流会互相破坏：后开的那次
+  `truncate(true)` 把先写的字节从盘上抹掉（而缓冲窗口之外的数据正是靠 `pread`
+  这个文件读回来，读回空洞就是噪音），失败 / 取消时的 `remove_file` 还会删掉
+  对方的文件，让它改名失败、白下一整首。
+
+  现在 `Downloader` 按临时文件路径登记在跑的流，第二条直接复用第一条的缓冲、
+  不再起任务。顺带把整首下载和流式下载的临时文件分开（`x.mp3.part` 与
+  `x.mp3.stream.part`）——后台预取下一首时，用户完全可能正好切到那一首。
+
+- **音质档位有两种说法**。`app/update.rs` 里另有一份私有的 `quality_label`，只认
+  6 档，比 `app/settings::quality_label` 少了 `viper_atmos` 与 `viper_tape`。于是
+  按快捷键切到那两档时状态栏显示原始串 `viper_atmos`，而设置页同一项显示
+  「蝰蛇全景声」。现在只有一份实现，并加了一条测试：每个可选音质都必须有中文名，
+  不许退回原始串。
+
+- **网易云歌手页的「N 首」是专辑数**。`source/netease.rs` 把 `/top/artists` 的
+  `albumSize` 填进了 `song_count`，而它是专辑数，歌曲数是 `musicSize`。类型正确、
+  语义错误，界面上每个歌手后面都挂着一个错数字且不会有任何异常。改成 `musicSize`，
+  拿不到就不显示（比显示错的强）。
+
+- **分块并发下载会写出内容损坏的缓存文件**（`audio/download.rs`）。分块下载只检查
+  `status.is_success()`，于是服务端（或中间 CDN / 代理）忽略 `Range`、回 `200 OK`
+  加整首内容时也会照写：四个任务各自 `seek(自己的起点)` 再写整首，互相覆盖，得到一个
+  「长度对、内容全错」的文件，还照常改名进缓存——之后每次播放都命中它。
+
+  现在要求三件事同时成立才继续写：状态码必须是 `206`、`Content-Range` 必须能解析、
+  解析出的范围必须**逐字节等于**请求的范围（顺带核对总长度与 HEAD 一致）。任何一条
+  不满足就退回单连接重下——宁可慢一次，不能坏一个缓存文件。
+
+- **不完整的下载会被当成成功**。完成条件此前是「写入的字节数大于 0」，而 `.part`
+  已经 `set_len(total)` 预分配过，文件大小本身就证明不了完整性。现在要求每个块写满
+  自己那一段、总和等于总长度，并在改名之前 `sync_all`；单连接路径在服务端给了
+  `Content-Length` 时也要求收满。
+
+  回归测试用 std 的 `TcpListener` 起了一个最小的 HTTP 服务端（不引新依赖），覆盖
+  正常 206、服务端忽略 Range 回 200、`Content-Range` 与请求不符、传输中断四种情况。
+  把三处防护逐个去掉后，「服务端忽略 Range」那条会返回 4 MiB（真实长度 1 MiB）——
+  也就是修复前那个坏文件。
+
+- **Windows 的发行 zip 里没有 PowerShell 脚本**。`build-windows.ps1` 只拷了三个 bash
+  脚本，而 README 与 `docs/INSTALL.md` 让 Windows 用户跑的正是
+  `.\scripts\kugou-tui.ps1` / `.\scripts\kugou-api-install.ps1`——解压后这些文件不存在，
+  第一步就卡住。现在按「文档提到过的都必须在包里」为准，六份脚本一起带。
+
+- **三个 bash 脚本在 macOS 上跑不起来**。逐条列出，因为每一处都会直接中断脚本：
+
+  - `declare -A`（`kugou-api`、`kugou-api-install`）需要 bash 4，而 macOS 自带的
+    `/bin/bash` 是 3.2——报 `declare: -A: invalid option`，一行都跑不了。改成
+    `case` 分派 + 间接展开。
+  - `readlink -f`（三个脚本）是 GNU 扩展，macOS 的 `readlink` 报
+    `illegal option -- f`。改成逐层解软链（`make-release-tarball` 里早就是这么做的）。
+  - 配置与缓存目录在 macOS 上找错了地方：`dirs` 给的是
+    `~/Library/Application Support` 与 `~/Library/Caches`，而脚本读的是 `~/.config`
+    与 `~/.cache`。后果是启动器永远找不到 `config.toml`，于是永远按默认值（`:3000`、
+    标准版）探活——用概念版音源的人只会看到「服务启动失败」。
+  - `setsid`（util-linux 专有）与 `ss`（iproute2）在 macOS 上不存在，分别退回
+    `nohup` 与 `lsof`。
+  - `seq` 换成 `while` 计数循环。
+
+  > 顺带把「配置根目录」统一到 `KUGOU_TUI_CONFIG_DIR`：PowerShell 侧一直认它，
+  > bash 侧此前只认 XDG 变量。
+
+- 启动器拉起的服务现在会写 PID 文件，`kugou-api stop` / `status` 因此管得到它。
+  此前它是个「孤儿进程」：端口占着，但按 PID 文件停不掉，`status` 只会说
+  「端口有响应，但不是本脚本起的」。
+
+- **迟到的异步结果会污染界面**（`app/update.rs`）。所有请求都是 `tokio::spawn`
+  出去的，回来顺序不保证，而此前只有「播放」那一侧判了身份（`is_current`、
+  歌词/封面比 `hash`）。剩下的路径照单全收，于是：
+
+  - 搜「A」→ 结果还在路上 → 改搜「B」→ A 的结果先到，**把 B 的结果整体覆盖**；
+    点 `M` 加载更多时更糟：A 的歌被追加进 B 的列表，而标题还写着 B。
+  - 打开歌单 A → 用户改开 B → A 的结果先到，右侧变成「标题写着 B、内容是 A」。
+  - 歌手与榜单同理（左列高亮 B、右列是 A 的歌）。
+  - 切歌单广场分类 / 歌手地区筛选时，旧分类的结果会顶掉新分类的列表。
+
+  现在每条结果回来都要先自证身份，不一致直接丢弃；判据抽成 `accepts_search_result`
+  与 `accepts_open_item` 两个自由函数并加了测试（`App` 构造需要音频引擎与运行时，
+  单测里搭不出来，所以判据必须留在能单独测的地方）。
+
+  顺带修掉两个同源的小问题：过期结果不再把正在进行的搜索的「正在搜索…」抹掉
+  （清 `busy` 挪到判据之后）；连按 `M` 不再基于同一个 `page` 各发一次请求
+  （两次结果都追加就是重复的一页，晚到的那条还会让顺序倒过来）。
+
+  身份字段一律在 `spawn` **之前**写进状态（`open_playlist` / `open_artist` /
+  `open_board`），写在结果里就晚了——那条结果永远对不上。判据与清单记在
+  `docs/MAINTENANCE.md` §4 的第 11 条。
+
+### 变更
+
+- **只推 tag 就能发版**。`release.yml` 增加第一个 job `prepare`，由它调用新的
+  `scripts/release-notes` 从 `CHANGELOG.md` 取出该版本正文、建好 Release；三个平台
+  job 都 `needs: prepare`。
+
+  此前 Release 只能由本地 `scripts/release` 创建，工作流只负责**等**它出现——于是
+  「只推 tag」是不成立的：tag 一推 CI 就起来，等满 5 分钟也没有 Release，三个 job
+  一起失败。现在 `git tag … && git push origin <tag>` 一条路走完。
+
+  `scripts/release-notes` 是从 `scripts/release` 里那段 `awk` 抽出来的：这段正文有
+  两个消费方（本地发版与 CI），写成两份必然漂移，而发行说明是发布页的门面。
+
+  > 代价：只推 tag 不会更新 AUR 的 `PKGBUILD` / `.SRCINFO`，也不校验 CHANGELOG
+  > 有对应版本节。要同时发 AUR 仍然得跑 `scripts/release`。
+
+- **Linux 发行包也由 CI 产出**。此前只有 Windows 与 macOS 交给 CI，Linux 那份由本地
+  `scripts/release` 编好上传——那意味着**开发机不在手边就发不出 Linux 包**：换机器、
+  重装，或者只想给一个已经发过的版本补资产，都得先把 Rust 工具链与整棵依赖树重建一遍。
+  现在 `release.yml` 增加 `ubuntu-latest` 一栏，推 `v*` tag 时三个平台统一出包，
+  产物不依赖任何一台具体的机器。
+
+  本地 `scripts/release` 的打包与上传**保持不变**：两边同名，靠
+  `upload-release-asset` 的 `--clobber` 覆盖，谁后到谁生效。因此两边的 sha256
+  **不保证相同**（rustc 小版本、目标机器上的 C 工具链都会影响 `aws-lc-sys` 的编译
+  结果），本地记下的哈希事后对不上是正常的。
+
+- **CI 的 Linux 栏会传一份二进制 artifact**（`kugou-tui-linux-x86_64`，保留 14 天）。
+  此前每次 push 都会 `cargo build --release`，但产物用完即弃——想拿一份能跑的二进制
+  只能等发版，或者在本机重编一次（`lto = "fat"` + `codegen-units = 1`，要好几分钟）。
+
+## [0.4.3] - 2026-09-27
+
+### 新增
+
+- **Windows 与 macOS 的发行包**。此前 Release 里只有 Linux 的 tarball——不是漏了，
+  是开发机是 Linux，而 Windows 的 `.exe` 必须在 Windows 上编（MSVC 工具链）、
+  macOS 的二进制必须在 macOS 上编（Apple SDK）。现在交给 CI：
+
+  - `.github/workflows/release.yml`：推 `v*` tag 时在 `windows-latest` 与
+    `macos-latest` 上各编一份、打好包、挂到 GitHub Release 上；
+    也可以 `workflow_dispatch` 手动指定 tag，给**已经发过**的版本补资产。
+  - `scripts/upload-release-asset`：上传那一步单独抽出来，两个平台共用（Windows
+    runner 上的 `shell: bash` 就是 Git Bash）。它处理两件事：**等 Release 出现**
+    （本地发版流程是「推 tag → 建 Release」，tag 一推 CI 就起来了，直接上传会撞上
+    release not found），以及**幂等**（`--clobber`，补资产/重试时覆盖同名文件）。
+  - 两个 job 都会先核对 `--version` 与 tag 一致，checkout 错 ref 时能拦住。
+
+  > Linux 不在这里重复构建：`scripts/release` 已经在本地编好、验好、传上去了。
+
+- **歌词换行的过渡动画**（仿 Apple Music 的逐行切换）。此前换行是**瞬间跳变**：
+  `active_line` 一变，配色与滚动偏移同时硬切，没有任何时间维度的缓动。
+
+  做法是把「离当前行多远」从整数距离换成**两个锚点距离场的插值**——换行时保留旧锚点，
+  按 `t = ease_out_cubic(已过时长 / 总时长)` 在「到旧行距离」与「到新行距离」之间插值：
+
+  ```text
+  d = lerp(|行 - 旧行|, |行 - 新行|, t)
+  色 = mix(mix(text_dim, lyric_far, fade(d)), 高亮色, heat)
+  ```
+
+  `heat` 一个标量同时表达进入与退出：新行 `0 → 1` 点亮，旧行 `1 → 0` 淡出，其余行
+  的明暗层次也跟着平滑重排。**没有新增任何渲染原语**，全部复用既有的 `mix` /
+  `fade_ratio`，逐字扫光原样叠加在 `heat` 之上。
+
+  > **为什么不做「上滑」和「缩放」**：终端没有子单元格定位——一个字符格就是一行，
+  > `Paragraph` 的滚动偏移是整数（没有小数滚动），字体尺寸也固定。所以位置维度
+  > 动不了，能做过渡的只有颜色维度。硬做整行跳只会显得生硬。
+
+  - 时长按行距自适应：`min(配置值, 该行到下一行的间隔 × 0.55)`。快歌的行只有几百
+    毫秒，按上限走会出现「上一次过渡还没走完就该换下一行」。
+  - 一次跨 3 行以上（拖动进度条、点歌词行跳转）**直接吸附**，不逐行淡过去。
+  - 切歌 / 清空歌词会复位过渡状态，新歌第一句不会从上一首的某一行淡过来。
+  - 复用既有的 30fps 提速逻辑（`lyric_visible`），**没有为动画新增计时器**。
+
+- **点击歌词行跳到这一句**。命中区机制（`HitZone` / `HitTarget`）现成可用，新增
+  `HitTarget::LyricLine` 即可；「显示行 → 歌词行」的映射由渲染层每帧回填，与
+  `hit_zones` 同一套约定（只有渲染层知道行几何——译文/音译会让两者不再一一对应）。
+
+  跳转目标要**加回 `lyric_offset_ms`**：当前行是按 `position − lyric_offset_ms` 算的，
+  直接跳到 `line.time_ms` 会正好差一句。这一步漏了不会报错，所以单独抽成
+  `lyric_seek_target` 并加了测试。
+
+- `lyric_anim_ms` 配置项（默认 `200`，`0` = 关闭），设置页有「歌词动画」一项。
+  三种情况会强制关闭，与取值无关：`lite_mode`、16 色模式（没有中间色阶，淡入会
+  退化成「过半时整块硬翻」）、一次跨 3 行以上。
+
+### 变更
+
+- `scripts/make-release-tarball` 改成**在 macOS 上也能跑**（CI 的 macOS 那一栏要用它
+  产出 `aarch64-apple-darwin` 的包）。两处 GNU 专有的东西换掉了：`readlink -f`
+  （BSD 的 readlink 没有 `-f`，改成自己逐层解软链）与 `sha256sum`
+  （macOS 那边叫 `shasum -a 256`）。顺带确认它只用 bash 3.2 就有的语法
+  ——macOS 自带的 bash 就是 3.2。
+
+- `fade_ratio` 的参数从 `usize` 改成 `f32`（过渡期间距离是插值出来的小数）。
+  稳态下传进去的仍是整数值，结果与改造前**逐位相同**——所以既有的配色断言一行未改，
+  另加了一条「过渡走完后与稳态逐格相同」的护栏测试盯着这件事。
+
+### 验证
+
+- `cargo test` **313 passed / 0 failed**（本次新增 20 条）
+- 新增的测试覆盖：进度端点与 ease-out 单调性、四道否决、行距自适应、最后一行兜底、
+  换行中途重定向、显示行映射越界、**交叉淡化两头都对**（旧行变暗 / 新行变亮）、
+  过渡中途两行都是半亮、过渡走完与稳态逐格相同、占位提示不登记命中区、
+  跳转目标加回偏移（三档偏移 + 下溢）
+- `cargo fmt --all --check`、Linux 与 Windows 两个目标的 `clippy -D warnings` 均 exit 0
+- `scripts/make-release-tarball` 实跑过（含软链场景），
+  `scripts/upload-release-asset` 的「glob 无匹配必须报错」分支实测会退出 1
+  ——这条抓出过一个真 bug：`assets=("$pattern")` 加了引号时 bash 不做路径展开，
+  于是那个检查永远不触发，CI 会一片绿而 Release 上什么都没有
+
+## [0.4.2] - 2026-09-27
+
+### 新增
+
+- **Windows 支持（10/11，x86_64）**。此前 `docs/INSTALL.md` 直接把 Windows 写成
+  「不行」，理由是 `zbus` 在那边要 `async-io`；实际盘下来问题不止那一条，
+  按「编译不过 → 编译过了但行为不对 → 行为对了但用起来别扭」三层各修了一批：
+
+  1. **编译不过的**（三处，都是硬错误）：
+     - `audio/streaming.rs` 用了 `std::os::unix::fs::FileExt::read_at`（`pread`）。
+       Windows 没有 `pread`，包了一层 `read_at`，那边走 `seek_read`
+       （借 `ReadFile` 的 OVERLAPPED 做定位读）。副作用是会挪文件游标，
+       而那个句柄是只读落盘文件、游标没人用，所以无害——注释里写清了。
+     - `logger.rs` 的 stderr 重定向用了 `libc::dup2` + `STDERR_FILENO`，
+       而 `libc` 在 Windows 上**没有** `STDERR_FILENO`，`std::os::fd` 整个模块
+       也不存在。改成平台分支：Unix 照旧 `dup2`，Windows 用 `SetStdHandle`
+       改 `STD_ERROR_HANDLE`。
+     - `mpris.rs` / `tray.rs` 是 D-Bus 集成，Windows 上既没有 session bus
+       也没有认这两个接口的宿主。连同 `zbus` 依赖一起收敛到 `cfg(unix)`，
+       相关字段与同步逻辑同步条件编译。
+
+  2. **编译过了但行为不对的**：
+     - **下载目录的 `~` 展开在 Windows 上失效**。`app/settings.rs` 只读 `HOME`，
+       而那是 Unix 的约定，Windows 上是 `USERPROFILE`——结果是 `~/Music`
+       原样留着，最后落出一个名字就叫 `~` 的目录，用户在自己以为的位置找不到文件。
+       改成 `HOME` 优先、拿不到再问 `dirs::home_dir()`（Windows 上走
+       `SHGetKnownFolderPath`）。顺带认 `~\Music` 这种反斜杠写法。
+     - **配置落盘位置**：`dirs` 在 Windows 上给的是 `%APPDATA%` / `%LOCALAPPDATA%`，
+       无需平台分支，但文档里一直只写 XDG 路径，容易让人找错地方。
+     - **`--print-config` 谎报托盘状态**：Windows 上会显示「系统托盘 : 启用」，
+       而那份代码压根没编进去。现在如实显示「不可用（windows 无 D-Bus）」，
+       `tray` 的默认值也改成按平台取（非 Unix 默认关）。
+
+  3. **依赖调整**：
+     - TLS 后端按平台分叉：非 Windows 仍是 rustls，**Windows 改用系统自带的
+       SChannel**。这不是性能取舍——rustls 会把 `aws-lc-sys` 拖进来，而那是 C 代码，
+       Windows 下除了 MSVC 还要额外装 **CMake + NASM** 才编得过。换掉之后
+       Windows 的构建前置就只剩「Rust + MSVC 工具链」，证书校验还顺带走了系统根证书库。
+     - `zbus`、`libc` 收敛到 `cfg(unix)`；Windows 侧新增 `windows-sys`
+       （本来就在依赖树里，只是显式声明 `SetStdHandle` 用得到的那几个 feature）。
+
+- `scripts/build-windows.ps1`：Windows 的构建 + 打包脚本（对应 Unix 侧的
+  `make-release-tarball`），产出 `dist\kugou-tui-<版本>-<三元组>.zip`。
+  仓库里其余脚本都是 bash，Windows 下默认跑不了，构建本身两条命令就够、
+  真正容易漏的是打包（发行包必须同时带上那三个 bash 脚本与 `docs/`）。
+
+- `scripts/kugou-tui.ps1` 与 `scripts/kugou-api-install.ps1`：Windows 侧的启动器
+  与服务安装器，对应 bash 的同名脚本。装上后日常使用就是两条命令
+  （`kugou-api-install.ps1` 一次 → `kugou-tui.ps1` 开播），不必再手动开一个终端
+  起 `node app.js`。几个刻意的取舍：
+
+  - 启动器**不写 `param()` 块**：一旦声明了参数，PowerShell 会把 `-s 海阔天空`
+    当成写错的参数名直接报错；没有 `param()` 时全部参数进 `$args`，正好能原样透传。
+  - 安装与启动**分开**（bash 侧是安装器顺手把服务拉起来）：这样「怎么起服务」
+    只有启动器一处实现，两边不会各自漂移。
+  - 只依赖 PowerShell **5.1**（Windows 自带的那版），不要求额外装 pwsh 7；
+    平台判断用 `$env:OS` 而不是 `$IsWindows`（后者 6.0 才有）。
+  - 带 `--dry-run`，只打印「当前音源 / 探测地址 / 服务目录 / 服务在不在跑」，
+    排查「为什么它说服务没起」时不用猜。
+
+- **CI**（`.github/workflows/ci.yml`）：**Linux / Windows / macOS 三个平台**各跑一遍
+  `clippy -D warnings + test + build`，Windows 那一栏再跑一次打包脚本。
+  此前仓库里没有 CI，而 `CONTRIBUTING.md` 却写着「CI 会用同样的命令」——
+  现在这句话成立了。Windows 那一栏是这次的重点：路径展开、配置目录、
+  缓存文件命名这些差异只有真跑起来才露出来，光靠 `cargo check` 保证不了。
+
+- **macOS 进入 CI**，于是「macOS 支持吗」有了可验证的答案，而不是一句「理论上可行」。
+  代码层面它和 Linux 共用 `cfg(unix)` 分支，本来就没有 Linux 专属的调用残留；
+  但**共用不等于验证过**——`dirs` 在那边给的是 `~/Library/...` 而不是 XDG 目录、
+  音频走 CoreAudio、字体探测拿不到 `fc-list`，这些只有真跑一遍测试才看得见。
+  已知差异（无 MPRIS/托盘、无最小化窗口、配置路径不同）见 `docs/INSTALL.md`
+  新增的「在 macOS 上构建与运行」。
+
+- `KUGOU_TUI_CONFIG_DIR`：整体覆盖配置根目录。便携安装（程序与配置一起放 U 盘）
+  用得上；也让「配置能活过一次重启」那条测试能在 Windows 上跑——那边 `dirs`
+  走的是 Win32 Known Folder，`XDG_CONFIG_HOME` 对它无效，没有这个开关就只能跳过测试。
+- `KUGOU_TUI_NERD_FONT`：显式指定有没有 Nerd Font。Windows 没有 fontconfig，
+  `fc-list` 探测一律落空，装了 Nerd Font 的用户靠它把图标打开。
+
+### 变更
+
+- **修正失效的 MSRV 声明：`rust-version` 1.86 → 1.90**。声明 1.86 是错的，而且
+  错得有害——用 1.86 编会收到一长串「某依赖要求更高 rustc」，而不是一句「你需要 1.90」。
+  真实下限由**依赖**顶上去（`quantette` 0.6 要 1.90，经 ratatui-image → icy_sixel 引入；
+  ratatui 0.30 要 1.88、rodio 0.22 要 1.87），已用 `cargo +1.90.0 check --locked
+  --all-targets` 实测确认。README 徽章、`docs/INSTALL.md`、`CONTRIBUTING.md` 与
+  三处源码注释里的旧数字一并改掉。
+
+- **清掉 29 处按真实 MSRV 才暴露的 clippy 建议**。这不是「顺手清理」——那条错误的
+  MSRV 声明同时也把 clippy 的 MSRV 感知 lint 全压住了（它按 `rust-version` 判断哪些
+  新 API 可用），所以声明一改成 1.90，`clippy -D warnings` 立刻红了。三类：
+
+  | lint | 处数 | 改法 |
+  |---|---|---|
+  | `collapsible_if` | 23 | `if let Some(x) = a { if b { .. } }` → `if let Some(x) = a && b { .. }`（let-chain，1.88 起可用） |
+  | `manual_is_multiple_of` | 3 | `n % 2 == 0` → `n.is_multiple_of(2)` |
+  | `chunks_exact_to_as_chunks` | 3 | `bytes.chunks_exact(4)` → `bytes.as_chunks::<4>().0`（元素类型由 `&[u8]` 变成 `&[u8; 4]`） |
+
+  都是 `cargo clippy --fix` 的机器可应用建议，语义等价，改完 293 条测试全过。
+
+- **`cargo fmt --all` 拉平了格式基线**，CI 从此可以跑 `cargo fmt --check`。
+  之前仓库有 38 处不是 rustfmt 干净的（多为手写换行与 rustfmt 的取舍不一致），
+  而 `CONTRIBUTING.md` 却要求贡献者跑 `cargo fmt --all`——两边对不上。
+  这次一并拉平（19 个文件，纯空白），于是那句「CI 会用同样的命令」真正成立。
+
+- `~` 展开的逻辑抽成纯函数（主目录由调用方传入），相关测试不再改写进程级
+  `HOME`——测试是并行跑的，那种写法是偶发失败的隐患。
+- 音频设备打开失败的提示按平台给排查线索（Windows 上提 Windows 音频服务，
+  而不是一直说「检查 PipeWire/ALSA」）。
+- `docs/LICENSES.md` 按新的 `Cargo.lock` 重算（依赖 469 → **478** 个包；
+  宽松许可 455 → **464**）。新增的 `native-tls` / `openssl` / `openssl-sys` 等
+  是 `native-tls` 为「非 Windows、非 macOS」目标声明的 OpenSSL 后端——
+  本项目只在 Windows 下用它（走 SChannel），**Linux 构建根本不编译这几个包**，
+  文档里已注明这一点，免得看表的人以为产物里多了个 OpenSSL。
+
+### 文档
+
+- README 从「Linux 项目」改成**多平台叙述**：安装段按平台分列（预编译包 / 源码构建），
+  并补了一张 Linux / Windows / macOS 的能力对照表。徽章同步（`platform` 与 `rust` 版本）。
+- `docs/INSTALL.md`：新增「在 Windows 上构建与运行」（含 PowerShell 脚本用法、
+  `--dry-run`、终端要求、功能差异表、改代码时怎么确认没弄坏 Windows）与
+  「在 macOS 上构建与运行」两节；环境要求表补上 Linux 的 `alsa-lib` / `pkg-config`
+  前置（干净容器上缺了会在 `alsa-sys` 报错，此前没写）与 macOS 一行。
+- `docs/FAQ.md`：新增「平台相关」一节，回答 Windows 的脚本/工具链/托盘/封面/字体
+  与「macOS 支持吗」。
+- `docs/RELEASE.md`：说明 Windows 的 zip 由 `scripts/build-windows.ps1` 产出、
+  **当前不由 `scripts/release` 自动附带**（那脚本是 bash、跑在 Linux 上），
+  以及挂到 Release 上的手动步骤与将来交给 CI 的做法。
+- `docs/CONFIGURATION.md`：**动作名清单漏了 `toggle_window`**（写 59 个，实际 60 个），
+  已补上并说明它是唯一没有默认键位的动作、且仅在 niri 下生效；`tray` 一段补上
+  非 Unix 平台的表现。
+- 修正「最小化窗口 = `m` 键」的写法：`m` 是**静音**，最小化的入口在**托盘菜单**里
+  （README / INSTALL / CHANGELOG 三处）。
+- `docs/MAINTENANCE.md`：§1.6 补 macOS 一栏与三平台 CI 的说明；新增 §1.7
+  记录 Windows 侧三个脚本的坑（`param()` 与 `$args`、`Start-Process` 的
+  重定向限制、只用 5.1 语法）。
+
+### 已知限制
+
+- Windows 上没有系统托盘、MPRIS，也没有「最小化窗口」（触发入口在托盘菜单里）：
+  前两者是 D-Bus 接口，后者走的是 niri 的 compositor IPC。都是**降级**：
+  相关入口不会出现，不会点了没反应。
+- Windows 上封面只能走半块字符画：Windows Terminal 不支持 Kitty / iTerm2 的图形协议。
+- Windows 侧的 `kugou-tui.ps1` / `kugou-api-install.ps1` 是 bash 版的**对应物而非
+  逐行移植**：只覆盖主流程（当前音源 → 服务目录/端口/`platform` → 探活 → 拉起 →
+  等就绪 → 进播放器），`kugou-api`（`start`/`stop`/`restart`/`status` 四个子命令）
+  没有对应物——启动器已经覆盖了它唯一的日常用途。要停服务就关掉播放器后
+  `Stop-Process -Name node`，或用 `Get-NetTCPConnection -LocalPort 3000` 找到 PID。
+- **Windows 的 zip 还没进发版流程**：Release 里目前只有 Linux 的 tarball，
+  Windows 用户按 `docs/INSTALL.md` 从源码构建。要挂上去得在 Windows 上跑一次
+  `build-windows.ps1` 再 `gh release upload`，或让 CI 在打 tag 时上传。
+- **macOS 没有在真机长期使用过**：CI 跑的是 `clippy + test + build`，覆盖不到
+  音频设备枚举、CoreAudio 实际出声、iTerm2 图形协议这些真机行为。
+- **Intel Mac 没有预编译包**：CI 的 `macos-latest` 是 arm64，产出的二进制在 Intel
+  机器上跑不了。Intel 用户目前只能从源码构建（`cargo build --release`）。
+
+## [0.4.1] - 2026-09-26
+
+### 修复
+
+- **程序一运行就独占声卡，麦克风和扬声器全被挤哑；退出后声音也回不来**。
+  这是一条把整个系统音频搞瘫的 bug，根因是「绕过声音服务器直连硬件」：
+
+  1. **设置页里有个叫「Default Audio Device」的设备，名字看着最像"系统默认"，
+     实际是 ALSA 的 `sysdefault`——`plughw:0` 的直连别名**（见
+     `/usr/share/alsa/pcm/default.conf`；而真正的默认设备叫
+     「Default ALSA Output (currently PipeWire Media Server)」）。选中它之后
+     程序直连 USB 声卡，PipeWire 再想打开那张卡就是「设备或资源忙」——
+     麦克风、扬声器、其它应用的声音一起没了。
+  2. 就算没选它，`open_default_sink()` 在默认设备打不开时还会**遍历设备列表
+     抓第一个能开的**——在服务器系统上那同样是抢占硬件。
+
+  现在引擎先探测声音服务器（PipeWire / PulseAudio）是否在场：
+
+  - **在场时，可选设备只剩经服务器路由的三种 PCM**（`default` / `pipewire` /
+    `pulse`），直连硬件的（`sysdefault`、`hw:`、`plughw:`、`front:`、
+    `surround*:`、`iec958:`、`hdmi:` …）一律不进列表——ALSA 硬件设备是独占语义，
+    抓走一个就挤死服务器上的所有其它客户端；
+  - **默认设备只开 PCM `default`**，打不开就如实报错，不再回退到裸硬件；
+  - 没有声音服务器（headless 的裸 ALSA 系统）时行为不变，直连没有
+    「挤死别人」的问题。
+
+  配置里遗留的 `audio_device = "Default Audio Device"` 不会让程序起不来：
+  找不到就记一条日志、回退系统默认（界面会显示实际打开的设备）。
+
+- **音频线程卡住时退出会僵住，设备一直不释放**。收尾对音频线程的 `join` 改成
+  **有界等待**（3 秒）：正常情况它一个轮询周期（200ms）内就退出；万一卡在驱动
+  层面的阻塞操作上，等不到就放弃——进程照常退出，内核回收它持有的全部 fd，
+  设备立即释放。`panic`（release 构建 `panic = "abort"`）与被 `kill -9` 时
+  同样由内核回收，不需要额外处理。
+
+## [0.4.0] - 2026-09-26
+
+### 修复
+
+- **连续播放 / 频繁切歌后常驻内存涨到一百多 MB，而且不回落**。两处叠加：
+
+  1. 边下边播的字节缓冲**只追加、不回收**，一首歌下到多少就常驻多少（实测 1:1，
+     放 64 MiB 的 Hi-Res 就是 66.5 MiB）；
+  2. 切歌时**不取消**上一首的下载任务。用户每按一次 `n`，就多一条还在跑的下载在
+     后台把整首往内存里灌，谁也不回收——实测连切 5 首、每首 64 MiB，RSS 冲到
+     **323.7 MiB**。
+
+  现在缓冲只保留读指针附近 4 MiB 的尾部窗口，窗口之外的字节从落盘文件 `pread`
+  读回来（下载本来就是落盘的，数据就在页缓存里）；切歌/停止/退出时主动取消旧任务。
+  同样负载下：单曲 66.5 → **12.5 MiB**，连切 5 首 323.7 → **3.0 MiB**，
+  同一份对照负载连播 24 首稳定在 12.5 MiB（不再随曲目数增长）。
+
+- **边下边播时播放进度会突然回到开头**。用户看到的是「缓冲一下，然后从头再放一遍」，
+  根因有两层，缺一不可地都要修：
+
+  1. **流一放完就重新装载**。后台下载下完时发的是「音频已落盘，可以放了」，
+     而这个事件的处理函数会 `audio.load()` 一次——可那时候歌**已经在放了**，
+     重新装载等于把播放位置冲回 0。现在这个收尾走独立事件，只清进度、预取、回收缓存，
+     绝不碰播放器。
+  2. **断流被当成了播完**。rodio 的解码器把任何读错误都吞成 EOF，所以「数据没跟上」
+     和「这首放完了」在播放层长得一模一样；按「播完」处理就会触发切歌，单曲循环
+     （或队列里只一首）下就是从 0 再放一遍。现在引擎按住那条流的真实状态分档：
+     取消（静默）、下载失败（报错，不切歌）、读超时（留住位置续播一次）、下完了
+     （才切歌）。
+
+  另外位置要在**曲目结束之前**就记下来：源一结束 `Player::get_pos()` 就报 0，
+  那一帧再读就等于把位置抹掉（用户看到进度条突然回到 00:00）。断流与下载失败之后，
+  按 Space 会从停住的位置接着放，而不是从头。
+
+- **下载中断会把「半首」留在缓存里**。流式下载原先直接写正式缓存文件名，失败或被
+  取消时会留下一个「看起来完整、其实只有前几 MB」的文件；而缓存查找只按「文件在不在」
+  判断，下次播放命中它就会在中间莫名结束。更糟的是它还会**反复重启**：文件放完 →
+  被判为播完 → 单曲循环从头 → 再放完 —— 用户实际听到的就是十几秒一循环。
+  现在先写 `.part`、**下完才改名**，失败/取消时删掉；缓存回收与「清空缓存」也跳过
+  `.part`（它是半成品，不是缓存）。
+
+### 变更
+
+- **打开歌单时，首屏改从**末尾那一页**取**。原先不管列表怎么显示都先取第 1 页，
+  而默认是倒序显示（`o` 键可切），真正出现在最上面的是**最后一页**的内容——
+  于是用户看到的是「先闪一屏歌单中部的歌，几秒后整表到位、画面整体翻一次」。
+  实测反馈就是「每次进歌单，第一眼看到的都不是我心里的第一首」。现在倒序显示时
+  首屏直接取末页，一进去就是最终列表的头部；正序显示时仍取第 1 页。
+
+  顺带修掉一个连带的判据错误：「这一页不满 ⇒ 这就是全部」**只在第 1 页成立**。
+  末页不满是常态（414 首 = 13×30 + 24，末页就 24 首），照搬老判据会让「整表补齐」
+  永远不出门，歌单从此只显示那 24 首。曲数拿不到时（有的接口不给）仍退回第 1 页。
+
+### 文档
+
+- 新增 **[docs/MAINTENANCE.md](docs/MAINTENANCE.md)**：模块地图、数据流、风险点与
+  已知坑、改完怎么跑验证。`docs/DESIGN.md` 的「边下边播」一节补上了窗口回收、
+  断流分档与 `.part` 改名三条设计说明。
 
 ## [0.3.10] - 2026-09-25
 

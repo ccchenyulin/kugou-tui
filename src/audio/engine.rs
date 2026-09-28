@@ -108,6 +108,17 @@ pub enum AudioEvent {
     DeviceOpened { name: String },
     /// 当前曲目自然播放结束，主循环据此切下一首。
     TrackFinished,
+    /// 边下边播的**流断了**：读数据超时（下载跟不上 / 网络抖了一下），
+    /// 播放器因此空掉。
+    ///
+    /// **绝不能当成 [`Self::TrackFinished`]**——歌并没放完。混为一谈的后果很
+    /// 具体：单曲循环（或队列里只有一首）下会"从头再放一遍"，用户看到的就是
+    /// 「播放进度回到开头」。所以单独一个变体，并且带着断流时的位置，
+    /// 让主线程能从这个位置续播，而不是从 0 重来。
+    StreamInterrupted {
+        /// 断流那一刻的播放位置（毫秒）。0 说明还没真正开始播。
+        position_ms: u64,
+    },
     /// 换输出设备没换成。**旧设备还活着、还在播**，所以它不是 [`Self::Failed`]：
     /// 只提示一句，不把播放状态改成「已停止」。
     DeviceSwitchFailed(String),
@@ -120,8 +131,8 @@ pub enum AudioEvent {
 pub enum AudioSource {
     /// 缓存里已经下完的文件。可以随便 seek。
     File(PathBuf),
-    /// 正在下载的流。数据落在缓存文件上，读指针跑在下载前面时会阻塞等数据。
-    Stream(Box<crate::audio::download::AudioStream>),
+    /// 正在下载的缓冲。读指针跑在下载前面时会阻塞等数据。
+    Stream(crate::audio::streaming::StreamingBuffer),
 }
 
 /// 主线程 → 音频线程的命令。
@@ -340,11 +351,29 @@ impl AudioHandle {
     }
 
     /// 停止播放并回收音频线程。
+    ///
+    /// 对 join 是**有界等待**：音频线程正常情况下一个轮询周期（200ms）内就会
+    /// 退出，但万一卡在驱动层面的阻塞操作上（`snd_pcm_*` 系列不受我们控制），
+    /// 无限等 join 会把整个进程拖在「半死」状态——进程活着，设备就一直被占，
+    /// 其它应用全部打不开声音。等不到就放弃：进程照常退出，内核回收音频线程
+    /// 持有的全部 fd，设备立即释放。
     pub fn shutdown(&mut self) {
         // 线程已经退出时 send 会失败，这是预期情况，忽略即可
         let _ = self.command_tx.send(AudioCmd::Shutdown);
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            const JOIN_TIMEOUT: Duration = Duration::from_secs(3);
+            let deadline = std::time::Instant::now() + JOIN_TIMEOUT;
+            while !thread.is_finished() && std::time::Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(20));
+            }
+            if thread.is_finished() {
+                let _ = thread.join();
+            } else {
+                tlog!(
+                    crate::logger::LEVEL_WARN,
+                    "音频线程 {JOIN_TIMEOUT:?} 内未退出，放弃等待（进程退出时由系统回收设备）"
+                );
+            }
         }
     }
 
@@ -412,11 +441,38 @@ impl Output {
 
     /// 系统默认设备。
     ///
-    /// 直接交给 rodio 的 `open_default_sink`：它先试 cpal 认的默认设备（ALSA 的
-    /// `default`），失败才按设备列表回退、并跳过 `null`。**不自己遍历设备列表**——
-    /// 那会先碰上一堆打不开的 ALSA 插件（lavrate / jack / oss …），实测能把后端
-    /// 搅到后面全部打不开（ALSA 在失败的 `snd_pcm_open` 后不保证清理干净）。
+    /// **有声音服务器（PipeWire/PulseAudio）时只开 PCM `default`**——它由
+    /// `/usr/share/alsa/alsa.conf.d/99-*-default.conf` 重定向进服务器，和其它
+    /// 应用共享声卡。**绝不借用 rodio 的 `open_default_sink` 兜底**：那玩意儿
+    /// 在 `default` 打不开时会遍历设备列表、抓第一个能开的——在服务器系统上
+    /// 就是直连硬件（独占声卡，挤死所有人）。打不开就报错，让用户看到原因。
+    ///
+    /// 没有声音服务器（headless 的裸 ALSA 系统）时维持 rodio 原行为：那种
+    /// 环境里 `default` 打不开就该试别的设备，直连也没有「挤死别人」的问题。
     fn open_default() -> Result<Self, String> {
+        if sound_server_present() {
+            return Self::open_server_default();
+        }
+        Self::open_bare_alsa_default()
+    }
+
+    /// 有声音服务器时的默认设备：PCM `default`，经服务器路由。
+    fn open_server_default() -> Result<Self, String> {
+        use rodio::cpal::traits::HostTrait;
+
+        // cpal 在 ALSA host 上返回的就是 PCM `default`（名字被硬编码成
+        // "Default Audio Device"，显示名用 `default_label()` 另取）。
+        let device = rodio::cpal::default_host()
+            .default_output_device()
+            .ok_or_else(|| "找不到系统默认音频设备".to_string())?;
+        Self::from_device(device, default_label())
+    }
+
+    /// 没有声音服务器时的默认设备：交给 rodio 处理（含设备列表回退）。
+    ///
+    /// 它先试 cpal 认的默认设备（ALSA 的 `default`），失败才按设备列表回退、
+    /// 并跳过 `null`。
+    fn open_bare_alsa_default() -> Result<Self, String> {
         let mut stream = rodio::DeviceSinkBuilder::open_default_sink().map_err(open_failed)?;
 
         // rodio 默认会在 DeviceSink 析构时往 stdout 打一行 "Dropping DeviceSink..."，
@@ -452,20 +508,26 @@ impl Output {
 }
 
 fn open_failed(error: rodio::DeviceSinkError) -> String {
-    format!("无法打开音频输出设备：{error}。请确认系统音频服务正常（Linux 下检查 PipeWire/ALSA）。")
+    // 排查线索按平台给：写死「检查 PipeWire/ALSA」在 Windows 上只会让人困惑。
+    let hint = if cfg!(windows) {
+        "请确认 Windows 音频服务（Audiosrv）在运行，且输出设备未被独占"
+    } else {
+        "请确认系统音频服务正常（Linux 下检查 PipeWire/ALSA）"
+    };
+    format!("无法打开音频输出设备：{error}。{hint}。")
 }
 
 /// 可用的输出设备：能打开、能出声、名字不重复。
 ///
 /// ALSA 会把自己定义的**所有 PCM** 都报成设备——实测这台机器上有 52 项，其中
-/// 大多数是插件（`lavrate` / `samplerate` / `jack` / `oss` / `speexrate`…），
-/// 还有被 PipeWire 占着、直连必失败的硬件条目。把它们摆进设置页，用户选中一个
-/// 打不开的就会把播放弄哑。两道过滤：
+/// 大多数是插件（`lavrate` / `samplerate` / `jack` / `oss` / `speexrate`…）。
+/// 把它们摆进设置页，用户选中一个打不开的就会把播放弄哑。三道过滤：
 ///
 /// * **能给出默认输出配置**——这是「真的能播」的判据，插件和已被独占的设备都过不了；
 /// * **排除 `null`**（"Discard all samples"）。它能打开、能「正常播放」，只是把所有
 ///   采样丢掉，从外面看毫无异常——正是「播放中却没声音」的另一种成因。它偏偏还能
-///   给出配置，所以必须单独判掉。
+///   给出配置，所以必须单独判掉；
+/// * **有声音服务器时只留服务器路由的 PCM**（见 [`sound_server_present`]）。
 ///
 /// 最后按名字去重：同一张卡会以 `hw:` / `plughw:` / `front:` / `surround*:` 等
 /// 十几种形态出现，全列出来只会让人没法选。
@@ -483,9 +545,55 @@ fn output_devices() -> Vec<rodio::cpal::Device> {
     let mut seen = std::collections::HashSet::new();
     devices
         .filter(|device| !is_null_device(device))
+        // 直连硬件的 PCM（hw: / plughw: / front: / sysdefault …）是独占语义：
+        // 拿走一个，声音服务器（以及它代理的麦克风、浏览器、通话……）就再也
+        // 打不开那张卡。有服务器在场时全部剔除，只留共享的服务器入口。
+        // **这是真实事故**：设置页里「Default Audio Device」这个名字看着无害，
+        // 实际是 `sysdefault`——`plughw:0` 的别名（见
+        // /usr/share/alsa/pcm/default.conf），选中后程序直连 USB 声卡，
+        // 把麦克风和扬声器一起挤哑，PipeWire 日志里全是
+        // "playback open failed: 设备或资源忙"。
+        //
+        // 没有声音服务器（headless 裸 ALSA）时不滤——那种环境直连没有
+        // 「挤死别人」的问题，维持原有行为。非 Linux 平台拿不到 PCM 名，
+        // `sound_server_present` 恒为 false，同样不受影响。
+        .filter(|device| {
+            !sound_server_present()
+                || driver_of(device).is_some_and(|driver| is_server_routed(&driver))
+        })
         .filter(|device| device.default_output_config().is_ok())
         .filter(|device| seen.insert(device_name(device).unwrap_or_default()))
         .collect()
+}
+
+/// 声音服务器（PipeWire / PulseAudio）是否在场。
+///
+/// 判据：服务器会往 ALSA 里注册自己的 PCM 插件（`pipewire` / `pulse`），
+/// 枚举里出现任意一个就算在场。只看 PCM 名、不查询配置，开销可忽略。
+fn sound_server_present() -> bool {
+    use rodio::cpal::traits::HostTrait;
+
+    rodio::cpal::default_host()
+        .output_devices()
+        .map(|devices| {
+            devices
+                .into_iter()
+                .any(|device| driver_of(&device).is_some_and(|driver| is_sound_server_pcm(&driver)))
+        })
+        .unwrap_or(false)
+}
+
+/// PCM 是否由声音服务器自己提供（服务器的 ALSA 插件）。
+fn is_sound_server_pcm(driver: &str) -> bool {
+    matches!(driver, "pipewire" | "pulse")
+}
+
+/// PCM 是否经声音服务器路由（共享使用硬件，不会独占）。
+///
+/// `default` 在装有 pipewire-alsa / pulseaudio-alsa 的系统上被重定向进
+/// 服务器；`pipewire` / `pulse` 是服务器入口本身。三者都安全。
+fn is_server_routed(driver: &str) -> bool {
+    matches!(driver, "default" | "pipewire" | "pulse")
 }
 
 /// 是不是那个「丢弃所有采样」的空设备。
@@ -568,6 +676,8 @@ fn run(
                 shared,
                 levels,
                 bus,
+                stream: None,
+                last_position_ms: 0,
                 loaded: false,
                 finished_reported: true,
             }
@@ -610,6 +720,17 @@ struct Runtime {
     /// 电平采集。包在解码器外面，采样透传的同时记下峰值。
     levels: AudioLevels,
     bus: EventBus,
+    /// 当前音源如果是边下边播的流，这里留一份句柄。
+    ///
+    /// 播放器"变空"时要用它判断到底是**放完了**还是**数据断了**：
+    /// 前者该切歌，后者该留住位置续播（见 [`Runtime::sync`]）。
+    stream: Option<crate::audio::streaming::StreamingBuffer>,
+    /// 上一次**还在正常播放**时读到的位置（毫秒）。
+    ///
+    /// 曲目结束的那一帧不能读 `Player::get_pos()`：源都没了，rodio 报的是 0。
+    /// 那个 0 一旦写进共享快照，断流时就"没有位置可续"——用户看到进度条突然
+    /// 跳回 00:00，按播放也只能从头听。所以位置只在这一帧之外更新。
+    last_position_ms: u64,
     /// 是否已经装载了音源。
     loaded: bool,
     /// 本曲是否已上报过结束，防止同一首歌反复触发切歌。
@@ -678,6 +799,7 @@ impl Runtime {
                 let name = output.name.clone();
                 self.bus
                     .send(Event::Audio(AudioEvent::DeviceOpened { name }));
+                self.stream = None;
                 self.loaded = false;
                 self.finished_reported = true;
                 self.levels.clear();
@@ -692,6 +814,17 @@ impl Runtime {
     }
 
     fn load(&mut self, source: AudioSource, start_at_ms: u64, expected_duration_ms: u64) {
+        // 先记住这条源是不是流式：它被 move 进解码器之后就问不出来了，
+        // 而"播放器空了"时正是靠它判断该切歌还是该续播。
+        //
+        // 这一步要放在可能提前 return 的路径**之前**：设备不可用时函数会直接返回，
+        // 那也该把上一首的句柄放掉，别攥着它不放。
+        self.stream = match &source {
+            AudioSource::Stream(buffer) => Some(buffer.clone()),
+            AudioSource::File(_) => None,
+        };
+        self.last_position_ms = start_at_ms;
+
         // 解码器先建好：它跟设备无关，且失败时不用去动设备借用
         let decoder = match build_decoder(source) {
             Ok(decoder) => decoder,
@@ -728,13 +861,13 @@ impl Runtime {
             .append(LevelMeter::new(decoder, self.levels.clone()));
         output.player.play();
 
-        if start_at_ms > 0 {
-            if let Err(error) = output.player.try_seek(Duration::from_millis(start_at_ms)) {
-                tlog!(
-                    crate::logger::LEVEL_WARN,
-                    "跳转到 {start_at_ms}ms 失败：{error}"
-                );
-            }
+        if start_at_ms > 0
+            && let Err(error) = output.player.try_seek(Duration::from_millis(start_at_ms))
+        {
+            tlog!(
+                crate::logger::LEVEL_WARN,
+                "跳转到 {start_at_ms}ms 失败：{error}"
+            );
         }
 
         self.loaded = true;
@@ -773,6 +906,8 @@ impl Runtime {
         }
         // 清掉残留的柱子，否则会定格在最后一帧，看着像卡住了
         self.levels.clear();
+        self.stream = None;
+        self.last_position_ms = 0;
         self.loaded = false;
         self.finished_reported = true;
         self.shared.position_ms.store(0, Ordering::Relaxed);
@@ -797,6 +932,7 @@ impl Runtime {
 
         match output.player.try_seek(Duration::from_millis(target)) {
             Ok(()) => {
+                self.last_position_ms = target;
                 self.shared.position_ms.store(target, Ordering::Relaxed);
                 // 跳转后重新允许上报结束
                 self.finished_reported = false;
@@ -814,11 +950,6 @@ impl Runtime {
             return;
         };
 
-        self.shared.position_ms.store(
-            output.player.get_pos().as_millis() as u64,
-            Ordering::Relaxed,
-        );
-
         let paused = output.player.is_paused();
         let drained = output.player.empty();
 
@@ -827,10 +958,43 @@ impl Runtime {
                 self.finished_reported = true;
                 self.loaded = false;
                 self.shared.set_state(PlaybackState::Stopped);
-                self.bus.send(Event::Audio(AudioEvent::TrackFinished));
+
+                // 位置用**上一帧还在播时**记下的那个，绝不在这里读 `get_pos()`：
+                // 源已经结束，rodio 报 0，写进快照就等于把用户听到的位置抹掉。
+                // 断流后要"从断点续播"全靠它。
+                let position_ms = self.last_position_ms;
+
+                // 「播放器空了」不等于「这首放完了」。
+                //
+                // rodio 的解码器把**任何**读错误都吞成 EOF（symphonia 的
+                // `format.next_packet().ok()?`），所以流断了、下载失败了，
+                // 表现出来和自然播完一模一样。照单全收的后果很具体：
+                // 单曲循环（或队列里就一首）会"从头再放一遍"——用户看到的就是
+                // 「播放进度回到开头」；顺序播放则会把这首没听完的歌跳过。
+                let outcome = classify_drain(self.stream.as_ref());
+                self.stream = None;
+                match outcome {
+                    // 用户切歌 / 停止，这是我们自己取消的，安静收场
+                    DrainOutcome::Silent => {}
+                    DrainOutcome::Failed(message) => {
+                        self.bus.send(Event::Audio(AudioEvent::Failed(message)))
+                    }
+                    DrainOutcome::Interrupted => self
+                        .bus
+                        .send(Event::Audio(AudioEvent::StreamInterrupted { position_ms })),
+                    DrainOutcome::Finished => {
+                        self.bus.send(Event::Audio(AudioEvent::TrackFinished))
+                    }
+                }
             }
             return;
         }
+
+        let position_ms = output.player.get_pos().as_millis() as u64;
+        self.last_position_ms = position_ms;
+        self.shared
+            .position_ms
+            .store(position_ms, Ordering::Relaxed);
 
         let state = if paused {
             PlaybackState::Paused
@@ -848,10 +1012,43 @@ impl Runtime {
     /// 坏歌连成片时会瞬间刷掉整个队列。让用户看到错误后自己决定下一步。
     fn report_failure(&mut self, message: String) {
         tlog!(crate::logger::LEVEL_ERROR, "{message}");
+        self.stream = None;
         self.loaded = false;
         self.finished_reported = true;
         self.shared.set_state(PlaybackState::Stopped);
         self.bus.send(Event::Audio(AudioEvent::Failed(message)));
+    }
+}
+
+/// 播放器空掉之后的处置方式。
+///
+/// 抽成「枚举 + 自由函数」是为了**能直接测**：这条分支出错的表现是「网络抖一下
+/// 歌就从头再放」或者「坏文件把整条队列刷掉」，两者都不会让编译失败，只会在
+/// 用户那儿变成一句「怎么又回到开头了」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DrainOutcome {
+    /// 不吭声：这条流是我们自己取消的（用户切歌 / 停止）。
+    Silent,
+    /// 流没能放完，且下载**失败**了——报错，但不切歌、不重播。
+    Failed(String),
+    /// 流只是断了（数据没跟上），歌没放完——留住位置续播。
+    Interrupted,
+    /// 真的放完了：本地文件，或者流已经完整下完。
+    Finished,
+}
+
+/// 播放器空掉之后该上报什么。
+///
+/// 判据全在流自己身上（取消 / 失败 / 完整），不看"播放器空了"这个现象——
+/// 因为 rodio 把读错误和正常结束都表现为"源结束"。
+fn classify_drain(stream: Option<&crate::audio::streaming::StreamingBuffer>) -> DrainOutcome {
+    match stream {
+        Some(stream) if stream.is_cancelled() => DrainOutcome::Silent,
+        Some(stream) if !stream.is_complete() => match stream.error() {
+            Some(message) => DrainOutcome::Failed(message),
+            None => DrainOutcome::Interrupted,
+        },
+        _ => DrainOutcome::Finished,
     }
 }
 
@@ -876,7 +1073,7 @@ fn build_decoder(source: AudioSource) -> Result<Box<dyn Source<Item = f32> + Sen
                     )
                 })
         }
-        AudioSource::Stream(stream) => {
+        AudioSource::Stream(buffer) => {
             // 必须把流的总长度告诉解码器，否则**往回 seek 会被拒**。
             //
             // Symphonia 要先知道容器总长才肯往回跳（它据此定位索引、算时长）；
@@ -887,15 +1084,17 @@ fn build_decoder(source: AudioSource) -> Result<Box<dyn Source<Item = f32> + Sen
             // 文件源没这个问题，因为 `Decoder::try_from(file)` 自己从元数据
             // 填了 `byte_len`（rodio 文档：「auto-sets byte_len from metadata」）。
             //
-            // 长度取自 HTTP 的 Content-Length（`StreamDownload::content_length`）。
-            // 拿不到就不设——那种情况下退回「不能往回 seek」也比瞎设一个错的强
-            // （rodio 明确警告：byte_len 不对会导致时长算错和 seek 出错）。
+            // 长度来自 HTTP 的 `Content-Length`，由下载任务回填进 buffer
+            // （见 `StreamingBuffer::set_total`）。它要等响应头回来才有值，
+            // 而解码器是那一刻之后才建的，所以这里通常已经拿到了。
+            // 拿不到就不设——退回「不能往回 seek」也好过瞎设一个错的
+            // （rodio 警告：`byte_len` 不对会导致时长算错和 seek 出错）。
             let mut builder = rodio::Decoder::builder();
-            if let Some(len) = stream.content_length() {
+            if let Some(len) = buffer.total() {
                 builder = builder.with_byte_len(len);
             }
             builder
-                .with_data(*stream)
+                .with_data(buffer)
                 .build()
                 .map(|decoder| Box::new(decoder) as Box<dyn Source<Item = f32> + Send>)
                 .map_err(|error| {
@@ -908,6 +1107,7 @@ fn build_decoder(source: AudioSource) -> Result<Box<dyn Source<Item = f32> + Sen
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::streaming::StreamingBuffer;
 
     #[test]
     fn playback_state_code_round_trips() {
@@ -933,5 +1133,100 @@ mod tests {
 
         shared.set_volume(-1.0);
         assert!(shared.volume().abs() < f32::EPSILON);
+    }
+
+    /// 本地文件放完 = 真的放完了，照常切歌。
+    #[test]
+    fn file_source_drain_is_a_finished_track() {
+        assert_eq!(classify_drain(None), DrainOutcome::Finished);
+    }
+
+    /// 流**完整**下完再空掉 = 真的放完了。
+    #[test]
+    fn completed_stream_drain_is_a_finished_track() {
+        let stream = StreamingBuffer::new(Some(4));
+        stream.push(b"abcd");
+        stream.finish(None);
+        assert_eq!(classify_drain(Some(&stream)), DrainOutcome::Finished);
+    }
+
+    /// 流还在下、播放器却空了 —— 这是**断流**，不是放完。
+    ///
+    /// 这条是「进度回到开头」那个 bug 的核心：把它当成 `Finished`，主线程就会
+    /// 走切歌流程，单曲循环下等于从头再放一遍。
+    #[test]
+    fn starving_stream_drain_is_an_interruption() {
+        let stream = StreamingBuffer::new(None);
+        stream.push(b"abcd");
+        // 只下了 4 字节，既没 finish 也没取消
+        assert_eq!(classify_drain(Some(&stream)), DrainOutcome::Interrupted);
+    }
+
+    /// 下载失败：如实报错，不当成播完（否则坏文件会连锁切歌）。
+    #[test]
+    fn failed_stream_drain_reports_the_reason() {
+        let stream = StreamingBuffer::new(None);
+        stream.finish(Some("连接被重置".to_string()));
+        assert_eq!(
+            classify_drain(Some(&stream)),
+            DrainOutcome::Failed("连接被重置".to_string())
+        );
+    }
+
+    /// 用户切歌导致的空掉要**安静**：不弹错误、也不切下一首。
+    #[test]
+    fn cancelled_stream_drain_is_silent() {
+        let stream = StreamingBuffer::new(None);
+        stream.push(b"abcd");
+        stream.cancel();
+        assert_eq!(classify_drain(Some(&stream)), DrainOutcome::Silent);
+    }
+
+    /// 取消优先于失败：网络断和用户切歌可能同时发生，那时候该安静收场
+    /// ——用户已经换歌了，再弹一条"下载失败"只会让人以为新歌出了问题。
+    #[test]
+    fn cancellation_takes_precedence_over_error() {
+        let stream = StreamingBuffer::new(None);
+        stream.cancel();
+        assert_eq!(classify_drain(Some(&stream)), DrainOutcome::Silent);
+    }
+
+    /// 服务器 PCM 的判定：`pipewire` / `pulse` 是服务器自己，`default` 只是
+    /// 被重定向进服务器的入口——提供方不是服务器，但路由进去。
+    #[test]
+    fn sound_server_pcm_detection() {
+        assert!(is_sound_server_pcm("pipewire"));
+        assert!(is_sound_server_pcm("pulse"));
+        // default / sysdefault / 直连硬件都不是服务器本体
+        for driver in ["default", "sysdefault", "hw:CARD=Device,DEV=0", "null"] {
+            assert!(
+                !is_sound_server_pcm(driver),
+                "{driver} 不该被认成服务器本体"
+            );
+        }
+    }
+
+    /// 「经服务器路由」的判定：有服务器时**只有**这三个 PCM 允许出现在
+    /// 可选列表里。`sysdefault` 是这条规则存在的理由——它叫
+    /// "Default Audio Device"，实际是 `plughw:0` 的直连别名，选中即独占声卡。
+    #[test]
+    fn server_routed_devices_are_safe_to_share() {
+        for driver in ["default", "pipewire", "pulse"] {
+            assert!(is_server_routed(driver), "{driver} 应当被视为可共享");
+        }
+        // 直连硬件的（含那条骗人的 sysdefault）全部拒绝
+        for driver in [
+            "sysdefault",
+            "sysdefault:CARD=Device,DEV=0",
+            "hw:CARD=Device,DEV=0",
+            "plughw:CARD=0,DEV=0",
+            "front:CARD=Device,DEV=0",
+            "surround51:CARD=Device,DEV=0",
+            "iec958:CARD=Device,DEV=0",
+            "dmix",
+            "null",
+        ] {
+            assert!(!is_server_routed(driver), "{driver} 直连硬件，必须被过滤");
+        }
     }
 }

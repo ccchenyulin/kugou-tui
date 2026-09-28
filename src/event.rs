@@ -19,8 +19,8 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 use ratatui::crossterm::event::{KeyEvent, MouseEvent};
 
 use crate::api::model::{Artist, Lyric, Playlist, RankBoard, Song};
-use crate::audio::download::AudioStream;
 use crate::audio::engine::AudioEvent;
+use crate::audio::streaming::StreamingBuffer;
 use crate::error::AppError;
 
 /// 歌单歌曲请求的发起方。
@@ -94,7 +94,11 @@ pub enum Loaded {
         append: bool,
     },
     /// 歌单广场 / 搜索结果里的歌单列表。
+    ///
+    /// `category` 是这次请求的分类 id。带上它只为了一件事：结果回来时判断它还是
+    /// 不是当前分类要的（用户可能已经切了分类，见 `App::handle_loaded` 里的判据）。
     Playlists {
+        category: i64,
         title: String,
         items: Vec<Playlist>,
     },
@@ -103,7 +107,12 @@ pub enum Loaded {
         songs: Vec<Song>,
         source: PlaylistSource,
     },
-    Artists(Vec<Artist>),
+    /// 歌手列表。`kind` 是这次请求的地区筛选（0 全部 / 1 华语 / 2 欧美 / 3 日韩），
+    /// 用途同 [`Self::Playlists`] 的 `category`。
+    Artists {
+        kind: i64,
+        artists: Vec<Artist>,
+    },
     ArtistSongs {
         artist: Artist,
         songs: Vec<Song>,
@@ -146,20 +155,24 @@ pub enum Loaded {
         received: u64,
         total: Option<u64>,
     },
-    /// 音频已落盘。
+    /// 音频已落盘，可以交给音频线程播放。
     ///
-    /// `needs_load` 区分两条路（**不要**用 `start_at_ms > 0` 去猜：
-    /// 续播时位置完全可能是 0）：
-    ///
-    /// * `false`——**边下边播完成**。解码器读的就是这个文件，已经在放了。
-    ///   再 `load` 一次会把正在放的声音掐断、从 0 重开（「首播一秒后从头
-    ///   重来」），所以只记账、不碰播放。
-    /// * `true`——**续播先下完**。之前没播（要先下完全曲），现在该开播了。
+    /// 只有**续播**那条路会发它：要跳到中间时不能边下边播（缓冲里只有开头那点
+    /// 数据），所以先整首下完，再从这个位置开始放。
     StreamCached {
         song: Box<Song>,
         path: PathBuf,
         start_at_ms: u64,
-        needs_load: bool,
+    },
+    /// 边下边播的那首**已经下完**了（内存缓冲用不上了，数据都在盘上）。
+    ///
+    /// 它和 [`Self::StreamCached`] 必须分开：那条路要 `audio.load()` 才会出声，
+    /// 而这条路上歌**已经在放了**——再 load 一次等于把播放位置冲回 0，
+    /// 用户听到的就是「放着放着突然从头开始」。所以它只做收尾（进度、预取、
+    /// 缓存回收），绝不碰播放器。
+    StreamCompleted {
+        song: Box<Song>,
+        path: PathBuf,
     },
     /// 自动探测到的设备指纹，需要回写配置。
     DeviceFingerprint(String),
@@ -220,14 +233,10 @@ pub enum Loaded {
     AvatarReady {
         image: image::DynamicImage,
     },
-    /// 流式下载已经建好，可以交给音频线程开播（边下边播）。
-    ///
-    /// 装的是 `StreamDownload`：数据落在缓存文件上，后台边下边写。
-    /// 解码器读到还没下到的位置会阻塞等数据，所以这个事件**不需要**等到
-    /// 攒够多少字节——建好就能播。
-    StreamOpened {
+    /// 流式缓冲已经攒够开头，可以开播了（边下边播）。
+    StreamPrerolled {
         song: Box<Song>,
-        stream: Box<AudioStream>,
+        buffer: StreamingBuffer,
         start_at_ms: u64,
     },
     /// 云端写操作（加歌/删歌）的提示信息。
@@ -268,7 +277,7 @@ impl Loaded {
             Self::Search { .. }
                 | Self::Playlists { .. }
                 | Self::PlaylistTracks { .. }
-                | Self::Artists(_)
+                | Self::Artists { .. }
                 | Self::ArtistSongs { .. }
                 | Self::RankBoards(_)
                 | Self::RankTracks { .. }
@@ -311,6 +320,11 @@ pub enum Event {
     ///
     /// 与 [`Event::Key`] 分开：按键要经主循环按当前焦点翻译，而这里传进来的
     /// 已经是明确的语义动作（播放 / 下一首 …），直接执行即可。
+    ///
+    /// 生产者（`mpris.rs` / `tray.rs`）是 Unix 专有的 D-Bus 集成，非 Unix 上
+    /// 没人构造它——留 `allow` 而不是 cfg 掉，是为了让事件枚举在两边形状一致，
+    /// 主循环那个 `match` 不用长出平台分支。
+    #[cfg_attr(not(unix), allow(dead_code))]
     Action(crate::keymap::Action),
 }
 
@@ -348,12 +362,7 @@ impl EventBus {
     }
 
     /// 上报一次**载入类**请求的失败，顺带收掉对应的「载入中」标记。
-    pub fn fail_loading(
-        &self,
-        target: LoadingTarget,
-        context: impl Into<String>,
-        error: AppError,
-    ) {
+    pub fn fail_loading(&self, target: LoadingTarget, context: impl Into<String>, error: AppError) {
         self.fail_with_target(Some(target), context, error);
     }
 

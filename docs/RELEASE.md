@@ -50,6 +50,73 @@
 用 `cargo build --release` 构建，**不能用 makepkg** —— `makepkg` 会带上
 `makepkg.conf` 的 `-march=native`，那样的二进制换台机器就跑不了。
 
+### 三个平台的包由 CI 产出
+
+`scripts/release` 跑在开发机上，能产出 `x86_64-unknown-linux-gnu` 的 tarball；
+另外两个平台**编不出来不是漏了，是物理限制**——Windows 的 `.exe` 要 MSVC 工具链，
+macOS 的二进制要 Apple SDK。
+
+所以三个平台统一交给 `.github/workflows/release.yml`：推 `v*` tag 时在
+`ubuntu-latest` / `windows-latest` / `macos-latest` 上各编一份、打好包、
+挂到同一个 Release 上。这样**开发机不在手边也能发版**，产物不依赖任何一台具体的机器。
+
+| 平台 | 产物 | 打包脚本 |
+|---|---|---|
+| Linux x86_64 | `kugou-tui-<版本>-x86_64-unknown-linux-gnu.tar.gz` | `make-release-tarball`（CI 与本地都跑） |
+| Windows x86_64 | `kugou-tui-<版本>-x86_64-pc-windows-msvc.zip` | `build-windows.ps1`（CI 跑） |
+| macOS arm64 | `kugou-tui-<版本>-aarch64-apple-darwin.tar.gz` | `make-release-tarball`（CI 跑） |
+
+> **Linux 有两个来源。** 本地 `scripts/release` 仍会编一份并上传（它顺带核对资产内容），
+> CI 也会编一份，两边同名，靠 `upload-release-asset` 的 `--clobber` 覆盖，谁后到谁生效。
+> 因此**两边的 sha256 不保证相同**——rustc 小版本、目标机器上的 C 工具链都会影响
+> `aws-lc-sys` 的编译结果。本地发版时记下的哈希，事后从 Release 下载回来对不上是正常的，
+> 不是文件被换了。想让哈希只有一个来源，就把 `scripts/release` 里的 Linux 打包与上传
+> 去掉，完全交给 CI——那属于发版流程的改动，单独做。
+
+> **Intel Mac 不在覆盖范围**：`macos-latest` 是 arm64 机器，产出的二进制在 Intel
+> 机器上跑不了。要补的话得在同一个 runner 上 `--target x86_64-apple-darwin` 交叉编一份
+> ——那是另一个包名（`x86_64-apple-darwin`），加一个 job 即可，目前没做。
+
+时序上有个坑：本地 `scripts/release` 的顺序是「推 tag → 建 Release」，而 tag 一推 CI 就
+起来了——**上传前必须等 Release 出现**。这件事连同幂等（`--clobber`）都收在
+`scripts/upload-release-asset` 里，三个平台共用同一个脚本（Windows runner 上的
+`shell: bash` 就是 Git Bash）。三个 job 都会先核对二进制的 `--version` 与 tag 一致，
+checkout 错 ref 时能拦住。
+
+### 只推 tag 就能发版
+
+**Release 本身现在也是 CI 建的。** `release.yml` 的第一个 job `prepare` 会调用
+`scripts/release-notes` 从 `CHANGELOG.md` 取出该版本的正文，建好 Release；三个平台
+job 都 `needs: prepare`，于是**推一个 tag 就够了**，不需要在本地跑任何东西：
+
+```bash
+git tag -a v0.5.0 -m "…" && git push origin v0.5.0
+```
+
+> 早先 `prepare` 不存在，Release 由本地 `scripts/release` 创建，工作流只负责**等**
+> 它出现。那样「只推 tag」是不成立的：等满 5 分钟也没有 Release，三个 job 会一起失败。
+> 这个 job 就是为补上这一点而加的。
+
+本地 `scripts/release` 仍然可用，它做的事更多（校验 CHANGELOG 有对应版本节、更新并
+推送 AUR、把资产下载回来核对）。它先建 Release，`prepare` 再建会发现已存在而跳过——
+两条路互不干扰，谁先到谁负责创建。
+
+> **只推 tag 的代价**：AUR 的 `PKGBUILD` / `.SRCINFO` 不会更新，`CHANGELOG.md` 也不会
+> 被校验。要同时发 AUR 就得跑 `scripts/release`，或者事后手动更新 `~/aur/kugou-tui`。
+
+**给已经发过的版本补资产**：`workflow_dispatch` 手动指定 tag 即可，例如 0.4.2 发布时
+这个工作流还不存在：
+
+```bash
+gh workflow run release.yml -f tag=v0.4.2
+```
+
+> 手动触发时若 Release 已存在，`prepare` 会跳过创建，三个平台照常往上补资产。
+
+zip 里同时带着三个 **bash** 脚本（Git Bash / WSL 下仍然用得着），macOS 的 tarball
+同理——包里带的是「另一套平台下也用得上的东西」，而不是「本平台的原生脚本」，
+后者由源码仓库提供。
+
 ---
 
 ## 三、推送发布流程的目标仓库

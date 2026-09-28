@@ -3,8 +3,8 @@
 **在终端里听酷狗：逐字歌词、真频谱，常驻 15 MiB。**
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
-![Rust](https://img.shields.io/badge/rust-1.86%2B-orange.svg)
-![Platform](https://img.shields.io/badge/platform-linux-lightgrey.svg)
+![Rust](https://img.shields.io/badge/rust-1.90%2B-orange.svg)
+![Platform](https://img.shields.io/badge/platform-linux%20%7C%20windows-lightgrey.svg)
 
 ### 为什么做这个
 
@@ -32,19 +32,39 @@
 
 ### 安装
 
-从源码构建（AUR 包**计划中，尚未上架**；不想装 Rust 工具链的话，用
-[Release 里的预编译包](https://github.com/sijin-xb/kugou-tui/releases)，它带着脚本与文档，解压即用）：
+支持 **Linux**（主力平台）与 **Windows 10/11 x86_64**；**macOS 理论可用、CI 覆盖但未在真机长期使用**——
+三者的差异见下面的对照表。
+
+**最省事：下预编译包。** [Releases](https://github.com/sijin-xb/kugou-tui/releases) 里
+**三个平台都有**（Linux tarball / Windows zip / macOS tarball），都带着脚本与文档：
+
+```bash
+# Linux
+tar xzf kugou-tui-<版本>-x86_64-unknown-linux-gnu.tar.gz
+cd kugou-tui-<版本>-x86_64-unknown-linux-gnu
+./scripts/kugou-api-install kugou   # 一次性：拉取并配置接口服务
+./scripts/kugou-tui                 # 开播（服务没起会自己拉起来）
+```
+
+```powershell
+# Windows（PowerShell）
+Expand-Archive kugou-tui-<版本>-x86_64-pc-windows-msvc.zip -DestinationPath .
+cd kugou-tui-<版本>-x86_64-pc-windows-msvc
+.\scripts\kugou-api-install.ps1
+.\scripts\kugou-tui.ps1
+```
+
+**或者从源码构建**：
+
+| 平台 | 前置 | 命令 |
+|---|---|---|
+| Linux | Rust 1.90+、`alsa-lib` 开发头文件 + `pkg-config` | `cargo build --release` |
+| Windows | Rust 1.90+、MSVC 工具链（**不需要 CMake / NASM / OpenSSL**） | `cargo build --release` |
+| macOS | Rust 1.90+、Xcode 命令行工具（未验证） | `cargo build --release` |
 
 ```bash
 git clone https://github.com/sijin-xb/kugou-tui.git
 cd kugou-tui && cargo build --release
-```
-
-装完第一次运行：
-
-```bash
-./scripts/kugou-api-install kugou   # 拉取并配置酷狗接口服务（约 1 分钟，只需一次）
-./scripts/kugou-tui                 # 开播
 ```
 
 > **本程序不含任何接口实现**，数据全部来自本机的第三方服务
@@ -53,6 +73,30 @@ cd kugou-tui && cargo build --release
 > 按需把服务拉起来。想手动来一遍、要装启动器到 `~/.local/bin`、或要部署网易云音源，
 > 见 **[docs/INSTALL.md](docs/INSTALL.md)**。
 
+#### 平台差异
+
+| | Linux | Windows | macOS |
+|---|---|---|---|
+| 播放 / 搜索 / 歌词 / 封面 / 缓存 | ✅ | ✅ | ✅（未实测） |
+| 一键脚本 | `scripts/*`（bash） | `scripts/*.ps1` | `scripts/*`（bash） |
+| 音频后端 | ALSA / PipeWire / PulseAudio | WASAPI | CoreAudio |
+| MPRIS + 系统托盘 | ✅ | ❌ 无 D-Bus | ❌ 无 D-Bus |
+| 最小化窗口（托盘菜单里那一项） | ✅ 仅 niri | ❌ | ❌ |
+| 配置文件 | `~/.config/kugou-tui/` | `%APPDATA%\kugou-tui\` | `~/Library/Application Support/kugou-tui/` |
+| 缓存与日志 | `~/.cache/kugou-tui/` | `%LOCALAPPDATA%\kugou-tui\` | `~/Library/Caches/kugou-tui/` |
+| 终端建议 | 任意现代终端 | **Windows Terminal**（别用旧 conhost） | iTerm2 / Terminal.app |
+
+> 三条 ❌ 都是**降级而不是故障**：没有 D-Bus 时相关代码不参与编译，界面上也不会出现
+> 点了没反应的入口。`kugou-tui --print-config` 会如实打印「系统托盘 : 不可用」。
+>
+> 为什么 Windows 上不需要 CMake / NASM：TLS 走系统自带的 SChannel 而不是 rustls，
+> 于是 `aws-lc-sys` 那坨 C 代码根本不参与编译。见 `Cargo.toml` 里 `cfg(windows)` 的注释。
+>
+> **启动器三个平台都是同一套行为**：探活 → 没起就拉起 → 等就绪 → 进播放器，拉起时
+> 记下 PID 与端口，所以 `kugou-api stop` / `kugou-api.ps1 stop` 停得掉它。
+> 排查「为什么它说服务没起」用 `kugou-tui --dry-run`：只打印它解析到的配置、音源、
+> 探测地址与服务目录，不启动任何东西。
+
 ### 功能总览
 
 | 分类 | 能力 |
@@ -60,12 +104,12 @@ cd kugou-tui && cargo build --release
 | 浏览 | 歌单广场、歌手列表（可按地区筛选）、排行榜、个人云端歌单 |
 | 检索 | 单曲搜索，结果按服务端相关性排序，`M` 加载更多 |
 | 播放 | 播放/暂停、上下首、±5 秒跳转、音量、静音；顺序 / 列表循环 / 单曲循环 / 随机 |
-| 歌词 | 逐字高亮（KRC）、译文与音译、卡拉 OK 式居中滚动、±100 ms 偏移微调 |
+| 歌词 | 逐字高亮（KRC）、译文与音译、卡拉 OK 式居中滚动、换行淡入淡出、**点歌词行跳到这一句**、±100 ms 偏移微调 |
 | 可视化 | 真频谱：FFT + 对数分频，贝斯亮左、镲片亮右 |
 | 播放队列 | 追加（`a`）、插播下一首（`i`）、整列表加入（`A`）、移除（`x`）、清空（`X`） |
 | 云端歌单 | 收藏单曲（`s`）、整个队列同步（`S`）、增删歌单（`N` / `D`） |
 | 登录 | 应用内扫码（`L`），二维码直接画在终端里 |
-| 桌面集成 | MPRIS（`playerctl` 可控）+ 系统托盘（右键菜单，Quickshell / waybar / KDE） |
+| 桌面集成 | MPRIS（`playerctl` 可控）+ 系统托盘（右键菜单，Quickshell / waybar / KDE）；**仅 Linux 桌面**——Windows 上不参与编译，macOS 上无 session bus 时自动跳过 |
 | 输入与外观 | 键盘 + 鼠标；6 套主题（真彩 / 16 色各一版）；音频落盘缓存 + LRU 回收 |
 
 完整能力（含网络重试策略、概念版 VIP 自动领取等）见
@@ -87,9 +131,9 @@ cd kugou-tui && cargo build --release
 > 四个场景 14.2–16.9 MiB，方法与明细见 [docs/DESIGN.md](docs/DESIGN.md)）；
 > cmus 与 mpd 两行是**社区常见量级，未在本机实测**，仅供数量级参考。
 >
-> ⚠️ 这几个数是在**播放小体积曲目**时测的。边下边播的字节缓冲只追加不回收，
-> 所以放几十 MB 的 Hi-Res 时内存会按曲目体积线性上涨（实测 1:1，原因见
-> [docs/DESIGN.md](docs/DESIGN.md#边下边播)）。
+> 边下边播的字节缓冲**不保留整首**：下载先落盘，内存里只留一个 4 MiB 的尾部窗口，
+> 窗口之外的字节从落盘文件读回来。所以放几十 MB 的 Hi-Res 也不会让内存按曲目体积涨
+> （实测 64 MiB 的曲子占 12.5 MiB；切歌时还会主动取消上一首的下载）。
 >
 > 一句话：**cmus / mpd 是「放你有的」，kugou-tui 是「放你想听的」。**
 
@@ -97,12 +141,13 @@ cd kugou-tui && cargo build --release
 
 | 文档 | 内容 |
 |---|---|
-| [docs/INSTALL.md](docs/INSTALL.md) | 环境要求、三种安装路径、API 服务部署、启动脚本与环境变量 |
+| [docs/INSTALL.md](docs/INSTALL.md) | 环境要求、安装路径（Linux / Windows）、平台差异、API 服务部署、启动脚本与环境变量 |
 | [KEYBINDINGS.md](KEYBINDINGS.md) | 全部快捷键、鼠标操作、歌曲右键菜单 |
 | [docs/USER_GUIDE.md](docs/USER_GUIDE.md) | 功能一览、界面布局、音源配置、播放队列、登录与云端歌单、桌面集成 |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | 命令行参数、配置文件每一项、会话持久化 |
 | [docs/FAQ.md](docs/FAQ.md) | 常见问题与排查 |
 | [docs/DESIGN.md](docs/DESIGN.md) | 线程模型、边下边播原理、低资源占用、接口适配 |
+| [docs/MAINTENANCE.md](docs/MAINTENANCE.md) | 维护与排障手册：模块地图、风险点、已知坑、改完怎么验 |
 | [docs/LICENSES.md](docs/LICENSES.md) | 第三方依赖许可分析 |
 | [docs/RELEASE.md](docs/RELEASE.md) | 发版流程与依赖顺序、发行版产物清单、版本与标签规则、回收逻辑 |
 | [CHANGELOG.md](CHANGELOG.md) | 更新日志 |
