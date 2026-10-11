@@ -87,18 +87,50 @@ fn render_song_info(frame: &mut Frame, area: Rect, state: &AppState, theme: &The
         None => ("未在播放（在列表里按 Enter 播放）".to_string(), theme.dim()),
     };
 
-    // 右侧：下一首 + 音量 + 循环模式。宽度不够就整段不画，别把歌名挤没了。
+    // 右侧：循环模式 + 音量 + 下一首。**按优先级分段**，放不下的整段丢掉，
+    // 而不是把拼好的整串一刀截断——那样被切掉的总是排在最后的那段。
+    //
+    // 模式排在最后（最右）也最重要：它**只在这里显示**，别处（队列标题、状态栏）
+    // 都看不到；音量次之；「下一首」最次——队列面板本来就列着它。于是无论终端多
+    // 窄，循环模式都一定留在播放条上，这正是「窄终端里模式凭空消失」的修复。
     //
     // 宽度必须按**显示宽度**算，不能按字符数：`下一首 <歌名>` 里歌名常是中文，
-    // 一个字符占两列，按字符数算出来的宽度会明显偏小——明明有空间，
-    // 右侧那段却被 `truncate_to_width` 截成「下一首 WE GO · 播放中 · …」。
-    let right_text = next_up_text(state);
-    let right_width = (display_width(&right_text) as u16).min(area.width / 2);
-    let show_right = !right_text.is_empty() && area.width >= 60;
+    // 一个字符占两列，按字符数算出来的宽度会明显偏小。
+    let mode = state.queue.mode().label().to_string();
+    let volume = if state.is_muted() {
+        "静音".to_string()
+    } else {
+        format!("音量 {:.0}%", state.volume * 100.0)
+    };
+    let next = state
+        .queue
+        .peek_next()
+        .map(|song| format!("{} 下一首 {}", crate::ui::icons::next_up(), song.name));
 
-    let (left_area, right_area) = if show_right {
+    // 右侧最多占一半宽，但至少放得下模式——模式是这一行唯一别处看不到的信息。
+    let mode_width = display_width(&mode) as u16;
+    let max_right = (area.width / 2).max(mode_width);
+
+    // 从低优先级往高优先级逐段尝试：先带上「下一首」，放不下就丢它；再放不下就
+    // 丢音量。模式永不丢。整段取舍而不是截半句，所以不会出现「音量 80…」这种
+    // 两半都被切坏的残句。
+    let with_next = match next.as_deref() {
+        Some(next) => format!("{next} · {volume} · {mode}"),
+        None => format!("{volume} · {mode}"),
+    };
+    let right_text = if display_width(&with_next) as u16 <= max_right {
+        with_next
+    } else if display_width(&volume) as u16 + 3 + mode_width <= max_right {
+        format!("{volume} · {mode}")
+    } else {
+        mode
+    };
+
+    let right_width = (display_width(&right_text) as u16).min(area.width);
+    let (left_area, right_area) = if right_width > 0 {
+        // 左段给一个下限而不是按比例：歌名再长也要留几个字，不然一行全是右段。
         let [left, right] =
-            Layout::horizontal([Constraint::Min(20), Constraint::Length(right_width)])
+            Layout::horizontal([Constraint::Min(12), Constraint::Length(right_width)])
                 .spacing(1)
                 .areas(area);
         (left, Some(right))
@@ -127,31 +159,6 @@ fn render_song_info(frame: &mut Frame, area: Rect, state: &AppState, theme: &The
             right_area,
         );
     }
-}
-
-/// 播放条右侧那一小段：「下一首 X · 播放中 · 音量 80% · 顺序」。
-///
-/// 拼一整串再整体截断，而不是各段分别截——分别截会出现「下一首 稻… · 播」这种
-/// 两半都被切坏的残句。
-fn next_up_text(state: &AppState) -> String {
-    let mut parts: Vec<String> = Vec::new();
-
-    if let Some(next) = state.queue.peek_next() {
-        parts.push(format!(
-            "{} 下一首 {}",
-            crate::ui::icons::next_up(),
-            next.name
-        ));
-    }
-    parts.push(state.playback.label().to_string());
-    parts.push(if state.is_muted() {
-        "静音".to_string()
-    } else {
-        format!("音量 {:.0}%", state.volume * 100.0)
-    });
-    parts.push(state.queue.mode().label().to_string());
-
-    parts.join(" · ")
 }
 
 /// 第 3 行：进度条。自带居中标签，把时间放在条上。
@@ -249,7 +256,11 @@ pub fn render_lyric(frame: &mut Frame, area: Rect, state: &mut AppState, theme: 
         return;
     }
     if state.lyric.lyric.is_empty() {
-        let hint = if state.current.is_some() {
+        // 三种「没有歌词」要分开说：纯音乐（接口明确回没有）/ 这首歌确实没词 /
+        // 还没开始播。混成一句会让用户以为放错了歌，或者以为面板坏了。
+        let hint = if state.lyric.instrumental {
+            "纯音乐，请欣赏"
+        } else if state.current.is_some() {
             "暂无歌词"
         } else {
             "播放歌曲后显示歌词"
@@ -485,7 +496,8 @@ pub fn render_queue(
         return;
     }
 
-    let title = format!("播放队列 · {} 首 · {}", queue.len(), queue.mode().label());
+    // 标题只写「队列 · N 首」：循环模式在播放条右侧常驻，这里再写一遍是重复。
+    let title = format!("播放队列 · {} 首", queue.len());
     let block = panel(title, view.focused, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -559,14 +571,26 @@ enum CoverPlace {
 ///
 /// 字符宽高比约 1:2，所以方形区域的列数取行数的两倍；最多占一半高，
 /// 剩下的留给下方内容。区域太小时返回 `None`，调用方把整块都留给内容。
+///
+/// **封面永远给下方内容留够行数**：缩略图是锦上添花，歌词才是这块面板的主体。
+/// 矮终端里若让封面按「一半高」硬占，剩下的歌词会退化成一条读不了的窄缝——
+/// 那种时候宁可整块不画封面（返回 `None`），把空间全给歌词。
 fn thumbnail_layout(inner: Rect, aspect: f32, cell_aspect: f32) -> Option<(Rect, Rect)> {
-    if inner.width < 12 || inner.height < 8 {
+    /// 封面下方至少留给内容（歌词）的行数。3 是面板能画出一块内容的最小高度。
+    const MIN_REST_ROWS: u16 = 3;
+
+    // 连「最小封面 + 间距 + 最小内容」都放不下，就别画封面了。
+    if inner.width < 12 || inner.height < COVER_MIN_ROWS + MIN_REST_ROWS + 1 {
         return None;
     }
 
     // 图被压成 0 宽会让下面的除法炸掉；宽高比拿不到时按方图算
     let aspect = aspect.max(0.05);
-    let rows = (inner.height / 2).clamp(COVER_MIN_ROWS, COVER_MAX_ROWS);
+    // 封面行数的硬上限：再高就会把下方内容挤到 `MIN_REST_ROWS` 以下。
+    let max_rows = inner.height - MIN_REST_ROWS - 1;
+    let rows = (inner.height / 2)
+        .clamp(COVER_MIN_ROWS, COVER_MAX_ROWS)
+        .min(max_rows);
 
     // 按真实比例算列数（横图列数大于行数）。缩略图**不追求填满**——它本来就只占
     // 上半部分，左右留白反而显得居中。真要填满的是首页那块，走 `prepare_cover`
@@ -576,7 +600,9 @@ fn thumbnail_layout(inner: Rect, aspect: f32, cell_aspect: f32) -> Option<(Rect,
     // 太宽就按 inner.width 反算（缩略图不能横向溢出）
     let rows = if columns >= inner.width {
         let rows = (f32::from(inner.width) / (aspect * cell_aspect)).round() as u16;
-        rows.clamp(COVER_MIN_ROWS, inner.height.saturating_sub(1))
+        // 反算出来的行数同样不能越过 `max_rows`（`max_rows >= COVER_MIN_ROWS`
+        // 由上面的守卫保证，clamp 不会 panic）。
+        rows.clamp(COVER_MIN_ROWS, max_rows)
     } else {
         rows
     };
@@ -1000,17 +1026,20 @@ pub fn render_home(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &
 
     // 宽屏左右分栏（封面 | 歌词），窄屏上下堆叠
     if inner.width >= 60 {
-        let [left, right] =
-            Layout::horizontal([Constraint::Percentage(45), Constraint::Min(24)]).areas(inner);
+        let [left, right] = Layout::horizontal([Constraint::Percentage(45), Constraint::Min(24)])
+            .spacing(1)
+            .areas(inner);
 
         // 左栏竖着切：上方封面（铺满整块）、下方账号信息（固定 8 行，不能被挤掉）。
         //
         // 之前让封面框按图片比例自己算高度，结果框能把整个左栏吃掉，
         // 账号区高度变成 0 —— 用户看到「个人信息被挤掉了」。
         // 现在账号区固定，封面用剩下的全部空间，按 `cover_fill` 铺满
-        // （见 `prepare_cover`）。
+        // （见 `prepare_cover`）。栏与栏之间同样留一空行/一列，与整屏一致。
         let [cover_col, account_col] =
-            Layout::vertical([Constraint::Min(6), Constraint::Length(ACCOUNT_HEIGHT)]).areas(left);
+            Layout::vertical([Constraint::Min(6), Constraint::Length(ACCOUNT_HEIGHT)])
+                .spacing(1)
+                .areas(left);
         let left_block = panel("封面", false, theme);
         let left_inner = left_block.inner(cover_col);
         frame.render_widget(left_block, cover_col);
@@ -1134,6 +1163,89 @@ mod tests {
         assert!(!text.contains("载入失败"), "这不是失败：{text}");
     }
 
+    /// 纯音乐（接口明确回「找不到歌词」）要说「纯音乐，请欣赏」——既不是
+    /// 「暂无歌词」（那是在替这首歌断言「它本来就没词」），也不是一次失败。
+    #[test]
+    fn an_instrumental_track_reads_as_pure_music() {
+        let mut state = AppState::new(crate::config::Config::default());
+        state.current = Some(crate::api::model::Song::default());
+        state.lyric.hash = Some("h".to_string());
+        state.lyric.load.succeed();
+        state.lyric.instrumental = true;
+        state.lyric.lyric = crate::api::model::Lyric::default();
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).expect("建测试终端");
+        let theme = Theme::for_config(ThemeName::Default, false);
+        terminal
+            .draw(|frame| render_lyric(frame, Rect::new(0, 0, 40, 8), &mut state, &theme))
+            .expect("渲染歌词面板");
+
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("纯音乐"),
+            "纯音乐应说「纯音乐，请欣赏」：{text}"
+        );
+        assert!(!text.contains("暂无歌词"), "纯音乐不是「没有歌词」：{text}");
+        assert!(!text.contains("载入失败"), "纯音乐不是失败：{text}");
+    }
+
+    /// 窄终端下循环模式也必须显示在播放条上——它是这一行唯一别处看不到的状态。
+    ///
+    /// 早先右侧整段在宽度 <60 时**整块不画**，模式（和音量）于是凭空消失；即便
+    /// 画出来，也是把「下一首 · 音量 · 模式」拼成一串再整体截断，被切掉的恰好是
+    /// 排在末尾的模式。现在按优先级整段取舍，模式永远保留。
+    #[test]
+    fn player_bar_shows_the_loop_mode_even_when_narrow() {
+        let mut state = AppState::new(crate::config::Config::default());
+        state.current = Some(crate::api::model::Song::default());
+        state
+            .queue
+            .set_mode(crate::app::queue::PlaybackMode::RepeatOne);
+
+        let mut terminal = Terminal::new(TestBackend::new(30, 4)).expect("建测试终端");
+        let theme = Theme::for_config(ThemeName::Default, false);
+        terminal
+            .draw(|frame| render_player(frame, Rect::new(0, 0, 30, 4), &mut state, &theme))
+            .expect("渲染播放条");
+
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("单曲循环"),
+            "窄终端下循环模式不能被挤掉：{text}"
+        );
+    }
+
+    /// 够宽时右侧三段（下一首 · 音量 · 模式）都在。
+    #[test]
+    fn player_bar_shows_next_up_volume_and_mode_when_wide() {
+        let mut state = AppState::new(crate::config::Config::default());
+        state.current = Some(crate::api::model::Song::default());
+        state.queue.replace_with(
+            vec![
+                crate::api::model::Song::default(),
+                crate::api::model::Song {
+                    name: "下一首".to_string(),
+                    ..Default::default()
+                },
+            ],
+            0,
+        );
+        state
+            .queue
+            .set_mode(crate::app::queue::PlaybackMode::RepeatAll);
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 4)).expect("建测试终端");
+        let theme = Theme::for_config(ThemeName::Default, false);
+        terminal
+            .draw(|frame| render_player(frame, Rect::new(0, 0, 120, 4), &mut state, &theme))
+            .expect("渲染播放条");
+
+        let text = buffer_text(&terminal);
+        for needle in ["下一首", "音量", "列表循环"] {
+            assert!(text.contains(needle), "宽终端下应显示「{needle}」：{text}");
+        }
+    }
+
     /// 缩略图区是「列 = 行 × 2」的方形（字符宽高比 1:2），并水平居中。
     #[test]
     fn thumbnail_is_twice_as_wide_as_tall_and_centered() {
@@ -1156,12 +1268,32 @@ mod tests {
     /// 行数被夹在 [6, 32]：矮区域不至于缩成一条，高区域也不会把内容挤没。
     #[test]
     fn thumbnail_rows_are_clamped() {
-        let (short, _) = thumbnail_layout(Rect::new(0, 0, 40, 8), 1.0, 2.0).expect("8 行够放");
+        let (short, _) = thumbnail_layout(Rect::new(0, 0, 40, 10), 1.0, 2.0).expect("10 行够放");
         assert_eq!(short.height, COVER_MIN_ROWS);
 
         let (tall, _) = thumbnail_layout(Rect::new(0, 0, 80, 100), 1.0, 2.0).expect("100 行够放");
         assert_eq!(tall.height, COVER_MAX_ROWS);
         assert_eq!(tall.width, 64, "32 行 × 2（方图 + 字符 2:1）");
+    }
+
+    /// 矮区域里封面要给歌词留够行数，宁可整块不画。
+    ///
+    /// 早先封面按「一半高」硬占：8 行区域里封面占 6 行 + 1 行间距，只剩 1 行给
+    /// 歌词——那是一块读不了的窄缝。现在留不下 3 行就直接不画封面。
+    #[test]
+    fn thumbnail_yields_when_it_would_starve_the_content() {
+        // 放不下「最小封面(6) + 间距 + 最小内容(3)」→ 整块让位
+        assert!(thumbnail_layout(Rect::new(0, 0, 40, 8), 1.0, 2.0).is_none());
+        assert!(thumbnail_layout(Rect::new(0, 0, 40, 9), 1.0, 2.0).is_none());
+
+        // 刚好够：封面 6 行，剩余正好 3 行
+        let (cover, rest) = thumbnail_layout(Rect::new(0, 0, 40, 10), 1.0, 2.0).expect("10 行够放");
+        assert_eq!(cover.height, COVER_MIN_ROWS);
+        assert!(
+            rest.height >= 3,
+            "下方内容至少留 3 行，实际 {}",
+            rest.height
+        );
     }
 
     /// 非正方形封面按真实比例算列数——16:9 的头图不该被压成方的。

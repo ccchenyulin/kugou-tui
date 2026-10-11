@@ -1920,6 +1920,8 @@ impl App {
                 let empty = lyric.is_empty();
                 self.state.lyric.lyric = lyric;
                 self.state.lyric.load.succeed();
+                // 拿到真歌词：不管空不空，都清掉上一次「纯音乐」的结论。
+                self.state.lyric.instrumental = false;
                 // 换歌了：过渡状态一并复位，否则新歌的第一句会从上一首的某一行
                 // 淡过来，看着像歌词串了。
                 self.state.lyric.reset_transition();
@@ -1935,7 +1937,26 @@ impl App {
                 }
                 self.state.lyric.lyric = crate::api::model::Lyric::default();
                 self.state.lyric.load.fail(reason);
+                // 失败不是「纯音乐」——别让上一次的结论在这里复活。
+                self.state.lyric.instrumental = false;
                 self.state.lyric.reset_transition();
+            }
+
+            Loaded::LyricUnavailable { hash } => {
+                // 「找不到歌词」：接口通了，只是这首歌确实没有歌词（纯音乐）。
+                // 与失败区分开——面板说「纯音乐，请欣赏」，不是一条错误。
+                if self.state.lyric.hash.as_deref() != Some(hash.as_str()) {
+                    return;
+                }
+                self.state.lyric.lyric = crate::api::model::Lyric::default();
+                // 标记成成功：这不是「载入中」，也不是「载入失败」。
+                self.state.lyric.load.succeed();
+                self.state.lyric.instrumental = true;
+                self.state.lyric.reset_transition();
+                tlog!(
+                    crate::logger::LEVEL_DEBUG,
+                    "歌曲 {hash} 没有匹配到歌词（纯音乐）"
+                );
             }
 
             Loaded::StreamFailed { song, error } => {
@@ -2547,6 +2568,9 @@ impl App {
         };
 
         self.state.lyric.load.begin();
+        // 新一次取词开始：清掉上一次「纯音乐」的结论，否则切到一首有歌词的歌时
+        // 标记会残留（成功分支也会清，但这里先清能保证请求在飞期间不显示旧结论）。
+        self.state.lyric.instrumental = false;
         self.runtime.spawn(async move {
             match source.fetch_lyric(&api, &song).await {
                 Ok(lyric) => bus.emit(Loaded::Lyric {
@@ -2559,10 +2583,18 @@ impl App {
                         "获取《{}》的歌词失败：{error}",
                         song.name
                     );
-                    // 走 LyricFailed 而不是塞一份空歌词：空歌词会被面板渲染成
-                    // 「暂无歌词」，等于替这首歌断言「它本来就没有歌词」。
-                    // 也不走 Loaded::Failed——那会往状态栏写错误，而歌词失败
-                    // 不影响播放，每切一首歌闪一条太吵。
+                    // 「找不到歌词」是歌本身的正常状态（纯音乐），不是错误：面板
+                    // 应当说「纯音乐，请欣赏」，而不是报一次取词失败。
+                    if matches!(error, crate::error::AppError::NotFound(_)) {
+                        bus.emit(Loaded::LyricUnavailable {
+                            hash: song.hash.clone(),
+                        });
+                        return;
+                    }
+                    // 其余（网络 / 服务端）才是真失败。走 LyricFailed 而不是塞一份
+                    // 空歌词：空歌词会被面板渲染成「暂无歌词」，等于替这首歌断言
+                    // 「它本来就没有歌词」。也不走 Loaded::Failed——那会往状态栏写
+                    // 错误，而歌词失败不影响播放，每切一首歌闪一条太吵。
                     bus.emit(Loaded::LyricFailed {
                         hash: song.hash.clone(),
                         reason: error.user_hint(),
@@ -3381,6 +3413,67 @@ mod tests {
             hash: hash.to_string(),
             ..Song::default()
         }
+    }
+
+    /// 取词回「找不到」时按纯音乐处理：标记立起来、载入算成功、不报错。
+    #[test]
+    fn lyric_not_found_marks_the_track_as_instrumental() {
+        let mut app = App::for_test();
+        app.state.current = Some(song_from(crate::source::SourceKind::Kugou, "a"));
+        app.state.lyric.hash = Some("a".to_string());
+        app.state.lyric.load.begin();
+
+        app.handle_loaded(Loaded::LyricUnavailable {
+            hash: "a".to_string(),
+        });
+
+        assert!(app.state.lyric.instrumental, "应标记为纯音乐");
+        assert!(app.state.lyric.load.error().is_none(), "纯音乐不是失败");
+        assert!(!app.state.lyric.load.is_loading(), "载入要收尾");
+        assert!(app.state.lyric.lyric.is_empty());
+    }
+
+    /// 真失败不能被当成纯音乐——面板要照旧报「取失败」。
+    #[test]
+    fn lyric_failure_is_not_marked_instrumental() {
+        let mut app = App::for_test();
+        app.state.lyric.hash = Some("a".to_string());
+
+        app.handle_loaded(Loaded::LyricFailed {
+            hash: "a".to_string(),
+            reason: "网络请求失败".to_string(),
+        });
+
+        assert!(!app.state.lyric.instrumental, "失败不是纯音乐");
+        assert!(app.state.lyric.load.error().is_some(), "失败原因要留下");
+    }
+
+    /// 切到有歌词的歌时，上一次「纯音乐」的标记要清掉，不能残留到下一首。
+    #[test]
+    fn a_real_lyric_clears_a_stale_instrumental_flag() {
+        let mut app = App::for_test();
+        app.state.lyric.hash = Some("a".to_string());
+        app.state.lyric.instrumental = true;
+
+        app.handle_loaded(Loaded::Lyric {
+            hash: "a".to_string(),
+            lyric: crate::api::model::Lyric::default(),
+        });
+
+        assert!(!app.state.lyric.instrumental, "拿到真结果后标记要复位");
+    }
+
+    /// 迟到的「纯音乐」结果（已切歌）要丢弃，不能把当前歌标成纯音乐。
+    #[test]
+    fn a_stale_instrumental_result_is_ignored() {
+        let mut app = App::for_test();
+        app.state.lyric.hash = Some("b".to_string());
+
+        app.handle_loaded(Loaded::LyricUnavailable {
+            hash: "a".to_string(),
+        });
+
+        assert!(!app.state.lyric.instrumental, "旧歌的结果不能盖住当前歌");
     }
 
     /// 中间那首的源不可用时，跳到后面第一个源可用的歌。

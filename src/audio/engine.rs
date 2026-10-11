@@ -85,15 +85,6 @@ impl PlaybackState {
             _ => Self::Stopped,
         }
     }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Stopped => "已停止",
-            Self::Loading => "缓冲中",
-            Self::Playing => "播放中",
-            Self::Paused => "已暂停",
-        }
-    }
 }
 
 /// 音频线程上报的离散事件。

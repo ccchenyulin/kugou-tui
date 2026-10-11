@@ -31,7 +31,9 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Clear, Paragraph, Row, Table, Wrap};
 
-use crate::app::state::{AppState, ConfirmAction, Focus, LoginState, PromptState, Tab};
+use crate::app::state::{
+    AppState, ConfirmAction, Connection, Focus, LoginState, PromptState, StatusLevel, Tab,
+};
 use crate::keymap::{CHEATSHEET, display_keys_with_custom};
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{display_width, human_bytes, panel, placeholder, truncate_to_width};
@@ -44,98 +46,83 @@ pub fn sidebar_width(total_width: u16) -> u16 {
     (total_width / 5).clamp(24, 32)
 }
 
-/// 左侧导航栏：标签页切换 + 连接/播放/缓存概览。
-/// 把播放电平画成一排竖条。
+/// 侧边栏导航区的一行：分组标题，或一个标签项。
 ///
-/// 用的是 `▁▂▃▄▅▆▇█` 这组八级块字符：不依赖真彩，在没有 256 色的终端上也能看；
-/// 而且只占一行，比用 Gauge 省地方。数据是音频线程算出的真实峰值，静音会掉到底、
-/// 鼓点会顶到头，不是随机动画。
-fn level_line(levels: &[f32], width: u16, theme: &Theme) -> Line<'static> {
-    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-
-    let width = width as usize;
-    if width == 0 {
-        return Line::default();
-    }
-
-    if levels.is_empty() {
-        return Line::from(Span::styled("  未播放", theme.dim()));
-    }
-
-    // 电平格子数（LEVEL_BUCKETS）和侧边栏能显示的列数不一定相等。若直接按格子数铺，
-    // 超宽就会折行，把下面整个「连接」区顶下去——所以这里按可用宽度重采样。
-    let text: String = (0..width)
-        .map(|column| {
-            let index = (column * levels.len() / width).min(levels.len() - 1);
-            let level = levels[index].clamp(0.0, 1.0);
-            let bar = (level * (BARS.len() - 1) as f32).round() as usize;
-            BARS[bar.min(BARS.len() - 1)]
-        })
-        .collect();
-
-    Line::from(Span::styled(text, theme.now_playing()))
+/// 渲染（[`render_sidebar`]）与鼠标命中区（`ui::render`）**共用**同一份行计划，
+/// 行号因此不会各算各的。历史上命中区是照着渲染函数手动重放行号的，改一行内容
+/// 就可能让点「搜索」跳到别的页，而且没有任何提示。
+#[derive(Debug, Clone, Copy)]
+pub enum SidebarRow {
+    /// 分组标题行，不可点击。
+    Group(&'static str),
+    /// 一个标签项；`index` 是它在 [`Tab::SIDEBAR_ORDER`] 里的位置。
+    Tab { index: usize, tab: Tab },
 }
 
-pub fn render_sidebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+/// 按 [`Tab::SIDEBAR_ORDER`] 生成导航区的逐行计划（每个新分组前插一行标题）。
+pub fn sidebar_nav_rows() -> Vec<SidebarRow> {
+    let mut rows = Vec::new();
+    let mut current: Option<&'static str> = None;
+    for (index, tab) in Tab::SIDEBAR_ORDER.iter().enumerate() {
+        if Some(tab.group()) != current {
+            current = Some(tab.group());
+            rows.push(SidebarRow::Group(tab.group()));
+        }
+        rows.push(SidebarRow::Tab { index, tab: *tab });
+    }
+    rows
+}
+
+/// 左侧导航栏：标签页切换 + 连接/缓存概览。
+///
+/// 返回内容区矩形（已扣掉边框），供调用方按**同一套行号**登记鼠标命中区。
+pub fn render_sidebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) -> Rect {
     let focused = state.focus == Focus::Sidebar;
     let block = panel("kugou-tui", focused, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     if inner.height == 0 || inner.width == 0 {
-        return;
+        return inner;
     }
     let width = inner.width;
 
     let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(Span::styled(
-        format!("kugou-tui {}", state.tab.position_text()),
-        theme.dim(),
-    )));
-
-    // 按分组渲染：10 个标签平铺会像一堵文字墙，分组后才扫得动。
-    // 每个标签前标出数字键——显示顺序与 `Tab::ALL`（数字键落点）不同，
-    // 不标出来的话用户按 1 却跳到别的页。
-    let mut current_group: Option<&'static str> = None;
-    for tab in Tab::SIDEBAR_ORDER {
-        if Some(tab.group()) != current_group {
-            current_group = Some(tab.group());
-            lines.push(Line::from(Span::styled(
-                format!("── {} ──", tab.group()),
-                theme.dim(),
-            )));
+    // 导航：分组标题 + 标签项。按分组渲染——10 个标签平铺会像一堵文字墙，分组后
+    // 才扫得动。标签项格式统一为「指针 数字键 标题」，不再放逐项图标：图标挤掉
+    // 了标题的位置，而且同一排图标里没有哪一个是「一眼认得出」的。
+    //
+    // 数字键必须留着——显示顺序与 `Tab::ALL`（数字键落点）不同，不标出来的话
+    // 用户按 1 却跳到别的页。
+    for row in sidebar_nav_rows() {
+        match row {
+            SidebarRow::Group(name) => lines.push(section(name, theme)),
+            SidebarRow::Tab { tab, .. } => {
+                let selected = tab == state.tab;
+                let pointer = if selected { ">" } else { " " };
+                let style = if selected {
+                    theme.now_playing()
+                } else {
+                    theme.body()
+                };
+                let key = match tab.number_key() {
+                    Some(key) => key.to_string(),
+                    None => " ".to_string(),
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("{pointer} {key} {}", tab.title()),
+                    style,
+                )));
+            }
         }
-
-        let selected = tab == state.tab;
-        let pointer = if selected { ">" } else { " " };
-        let style = if selected {
-            theme.now_playing()
-        } else {
-            theme.body()
-        };
-        let key = match tab.number_key() {
-            Some(key) => key.to_string(),
-            None => " ".to_string(),
-        };
-        lines.push(Line::from(Span::styled(
-            format!("{pointer} {key} {} {}", tab.icon(), tab.title()),
-            style,
-        )));
     }
 
-    // 播放电平放在导航下方：它是「现在在放什么」最直观的反馈。
-    // 传入可用宽度，避免条数超出后折行、把下面的区块顶下去。
-    lines.push(level_line(&state.levels, width, theme));
-
-    // ---- 状态块：按优先级排，装不下就**整块**略过并留一行说明 ----
+    // ---- 状态块：按优先级排，整块放不下就压成一行小结 ----
     //
-    // 34 行的终端里侧边栏只有 25 行可用，而全部内容要 34 行。早先的做法是直接
-    // 画出去、让 ratatui 裁掉——「播放」「缓存」两块就这么无声无息地消失了，
-    // 用户既不知道下面还有东西，也不知道去哪儿看。
-    //
-    // 优先级：连接 > 播放 > 缓存。连接块是排查用的（服务端认成了哪种会员、
-    // 指纹有没有拿到），别处看不到；播放块的内容在播放条上都有（音量、循环模式），
-    // 缓存块在设置页里有。
+    // 这里只剩两块。「播放」块（模式、队列、音量）在播放条与队列标题里都有，是
+    // 纯粹的重复，删掉后腾出的行正好让「连接」「缓存」在常见尺寸下都放得下。
+    // 剩下两块各自都是别处看不到的：连接是排查用的（服务端认成了哪种会员、
+    // 指纹有没有拿到、接口是不是内嵌），缓存是已用 / 上限 / 清理入口。
     let mut connect: Vec<Line> = vec![
         kv("API", &api_endpoint_label(state), width, theme),
         kv(
@@ -177,27 +164,12 @@ pub fn render_sidebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &T
         connect.push(kv("会员", &label, width, theme));
     }
 
-    let playback: Vec<Line> = vec![
-        kv("模式", state.queue.mode().label(), width, theme),
-        kv("队列", &format!("{} 首", state.queue.len()), width, theme),
-        kv(
-            "音量",
-            &if state.is_muted() {
-                "静音".to_string()
-            } else {
-                format!("{:.0}%", state.volume * 100.0)
-            },
-            width,
-            theme,
-        ),
-    ];
-
     let limit = if state.config.cache_limit_mib == 0 {
         "不限".to_string()
     } else {
         format!("{} MiB", state.config.cache_limit_mib)
     };
-    let cache: Vec<Line> = vec![
+    let mut cache: Vec<Line> = vec![
         kv("已用", &human_bytes(state.cache_bytes), width, theme),
         kv("上限", &limit, width, theme),
         // 缓存目录与清理按键挤在一行：侧边栏很窄，完整路径用 `--print-config` 看。
@@ -224,51 +196,72 @@ pub fn render_sidebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &T
     } else {
         format!("连接 · {}", state.connection.label())
     };
-    let blocks: [(&str, Vec<Line>); 3] = [
-        (&connect_title, connect),
-        ("播放", playback),
-        ("缓存", cache),
-    ];
 
-    // 每块占「1 行空行 + 1 行标题 + 内容行数」
-    let needed: usize = blocks.iter().map(|(_, body)| 2 + body.len()).sum();
-    // 装不下时要留一行写「还有哪些没显示」，否则那一行自己也会被裁掉
-    let budget = if lines.len() + needed > inner.height as usize {
-        (inner.height as usize).saturating_sub(1)
-    } else {
-        inner.height as usize
-    };
-
-    // **能放几行放几行**，不要「一块放不下就整块丢掉」——那会在 30 行的终端里
-    // 把「连接」整块吞掉，屏幕上一条状态都没有，比只显示前几行还糟。
+    // 矮终端下的**一行小结**。整块（标题 + 四五行）放不下时，宁可给它这一行能读
+    // 的摘要，也不要整块丢掉、只剩一句「… 另有 …」让人猜里面到底是什么。
     //
-    // 只有**标题都没放下的**那些块才列进提示：标题出现了就说明用户知道这一块
-    // 存在，提示再说一遍只会让人以为它完全没显示。
-    let mut dropped: Vec<&str> = Vec::new();
-    for (title, body) in &blocks {
-        if lines.len() + 2 > budget {
-            dropped.push(title);
-            continue;
-        }
-        lines.push(Line::default());
-        lines.push(section(title, theme));
-        for line in body {
-            if lines.len() >= budget {
-                break;
-            }
-            lines.push(line.clone());
-        }
-    }
-    if !dropped.is_empty() {
-        lines.push(Line::from(Span::styled(
-            truncate_to_width(&format!("… 另有 {}", dropped.join(" / ")), width as usize),
+    // 连接那行把「通不通」和「当前音源」并在一起——这两项是排查时最先要看的。
+    let source_label = state.config.active_source_kind().label();
+    let connect_compact: Line = if is_native(state) {
+        Line::from(Span::styled(
+            format!("● 接口内嵌 · {source_label}"),
             theme.dim(),
-        )));
+        ))
+    } else {
+        let (word, style) = match state.connection {
+            Connection::Connected => ("已连通", theme.status(StatusLevel::Success)),
+            Connection::Unreachable => ("未连通", theme.status(StatusLevel::Error)),
+            Connection::Unknown => ("未验证", theme.dim()),
+        };
+        Line::from(vec![
+            Span::styled(format!("● {word}"), style),
+            Span::styled(format!(" · {source_label}"), theme.dim()),
+        ])
+    };
+    // 缓存那行给出「已用 / 上限」，清理入口留给键盘 C（状态栏另有提示）。
+    let cache_compact: Line = Line::from(vec![
+        Span::styled("缓存 ", theme.dim()),
+        Span::styled(
+            truncate_to_width(
+                &format!("{} / {limit}", human_bytes(state.cache_bytes)),
+                (width as usize).saturating_sub(display_width("缓存 ")),
+            ),
+            theme.body(),
+        ),
+    ]);
+
+    let connect_len = connect.len();
+    let cache_len = cache.len();
+    let mut block_lines: Vec<Line> = Vec::new();
+    // 导航已经占掉一部分，剩多少行可以给状态块。
+    let mut room = (inner.height as usize).saturating_sub(lines.len());
+
+    // 连接优先：放得下整块（空行 + 标题 + 内容）就放整块，否则压成一行。
+    if room >= connect_len + 2 {
+        block_lines.push(Line::default());
+        block_lines.push(section(&connect_title, theme));
+        block_lines.append(&mut connect);
+        room -= connect_len + 2;
+    } else if room >= 1 {
+        block_lines.push(connect_compact);
+        room -= 1;
     }
+
+    // 缓存次之，同样的取舍。
+    if room >= cache_len + 2 {
+        block_lines.push(Line::default());
+        block_lines.push(section("缓存", theme));
+        block_lines.append(&mut cache);
+    } else if room >= 1 {
+        block_lines.push(cache_compact);
+    }
+
+    lines.extend(block_lines);
 
     // 不套 `Wrap`：值在 `kv` 里已经按宽度截断，行数是算好的。留一个会折行的
     // 段落只会让「算好的行数」失效，把下面的块重新顶出去。
     frame.render_widget(Paragraph::new(lines), inner);
+    inner
 }
 
 /// 取路径的最后一段（目录名），用于在窄侧边栏里指代缓存目录。
@@ -877,7 +870,9 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("建测试终端");
         let theme = Theme::for_config(ThemeName::Default, false);
         terminal
-            .draw(|frame| render_sidebar(frame, Rect::new(0, 0, width, height), state, &theme))
+            .draw(|frame| {
+                render_sidebar(frame, Rect::new(0, 0, width, height), state, &theme);
+            })
             .expect("渲染侧边栏");
         terminal
     }
@@ -1223,29 +1218,45 @@ mod tests {
         );
     }
 
-    /// 侧边栏装不下时要「**能放几行放几行**」，并在末尾说明还有什么没显示。
+    /// 侧边栏装不下时，连接状态要**压成一行摘要**保留，而不是丢进「… 另有 …」。
     ///
-    /// 早先是「一块放不下就整块丢掉」：108×30 的终端里第一块（当时的标题是
-    /// 「连接」）整块被吞掉，屏幕上一条状态都没有——比只显示前几行还糟。而且丢掉时
-    /// 没有任何提示，用户不知道下面还有东西。
+    /// 早先是「整块放不下就丢掉、末尾留一句『… 另有 连接 / 缓存』」：矮终端里
+    /// 用户只看到一句含糊的提示，连「接口通没通、当前是什么音源」都看不到。
+    /// 现在把连接压成一行 `● …`，信息仍然留在屏幕上。
     ///
-    /// 现在默认后端是 native，第一块的标题成了「接口 · 内嵌」；这条测的是**裁块
-    /// 逻辑**，与后端无关，所以跟着默认标题走。
+    /// 取 108×18：导航占 14 行，剩下的行连连接的整块（6 行）都放不下，正好走
+    /// 压缩分支。
     #[test]
-    fn sidebar_fills_what_it_can_and_names_what_it_dropped() {
+    fn sidebar_keeps_a_compact_connection_line_when_short() {
         let state = AppState::new(Config::default());
 
-        // 108×30 是 README 用的参考尺寸，也是这个 bug 最容易露出来的地方
-        let text = screen_text(&draw_sidebar(&state, 108, 30));
+        let text = screen_text(&draw_sidebar(&state, 108, 18));
         assert!(
-            text.contains("接口"),
-            "第一块的标题必须放得下——放不下就等于一条状态都不显示：{text}"
+            text.contains('●'),
+            "矮终端要保留一行连接状态，而不是只剩一句含糊提示：{text}"
         );
-        assert!(text.contains("API"), "第一块的前几行应当照常显示：{text}");
+        // 默认后端是 native：这行是「● 接口内嵌 · 酷狗」
+        assert!(text.contains("接口"), "应说清接口形态：{text}");
+        assert!(text.contains("酷狗"), "应带上当前音源：{text}");
         assert!(
-            text.contains("另有"),
-            "有内容没显示时必须说明，不能静默裁掉：{text}"
+            !text.contains("另有"),
+            "给了具体摘要就不该再有「另有」这种让人猜的提示：{text}"
         );
+    }
+
+    /// 中等高度：连接放得下整块就放整块，缓存放不下就压成一行——两块都给出具体
+    /// 内容，不该退回「另有」。
+    #[test]
+    fn sidebar_mixes_a_full_block_with_a_compact_one() {
+        let state = AppState::new(Config::default());
+
+        let text = screen_text(&draw_sidebar(&state, 108, 24));
+        assert!(text.contains("API"), "连接块放得下时应显示完整内容：{text}");
+        assert!(
+            text.contains("缓存"),
+            "缓存放不下整块时也要有一行摘要：{text}"
+        );
+        assert!(!text.contains("另有"), "不该再出现含糊提示：{text}");
     }
 
     /// 「清理缓存」的键位不能和目录名粘成一个词。
@@ -1265,6 +1276,9 @@ mod tests {
     }
 
     /// 高度够时不该出现「另有…」——那时内容已经全在屏幕上了。
+    ///
+    /// 「另有」这种含糊提示现在已经被具体的一行摘要取代；这条留作回归守卫，
+    /// 防止以后又在信息齐全时画出一句多余的省略提示。
     #[test]
     fn sidebar_has_no_dropped_marker_when_everything_fits() {
         let state = AppState::new(Config::default());
@@ -1275,8 +1289,8 @@ mod tests {
             "内容全放得下时不该提示有省略：{text}"
         );
         // 第一块的标题随后端变（native 是「接口 · 内嵌」，node 是「连接 · …」），
-        // 这里断言的是「三块都画出来了」，所以用各自稳定的字眼。
-        for block in ["接口", "播放", "缓存"] {
+        // 这里断言的是「两块都画出来了」，所以用各自稳定的字眼。
+        for block in ["接口", "缓存"] {
             assert!(text.contains(block), "60 行终端应显示完整的「{block}」块");
         }
     }

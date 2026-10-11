@@ -253,18 +253,49 @@ pub fn song_row(
     context: RowContext,
     theme: &Theme,
 ) -> ListItem<'static> {
+    let (name_width, singer_width, album_width) = song_columns(context.width);
+    let line = Line::from(song_spans(
+        number,
+        song,
+        context,
+        name_width,
+        singer_width,
+        album_width,
+        theme,
+    ));
+    ListItem::new(line)
+}
+
+/// 歌名 / 歌手 / 专辑三列各占多少列（放不下的列返回 0，调用方整列省略）。
+///
+/// 三列合计不得超过可用宽度，否则整行会溢出，把右侧时长挤成 `03:2` 这种半截——
+/// 80×24 下歌词并排后歌曲栏只剩 ~25 列时就会发生。所以各列的下限（歌名 8、
+/// 歌手 6）先被 `flexible` 夹住；窄终端里「少一列」远比「截断时长」可读。
+fn song_columns(width: usize) -> (usize, usize, usize) {
     // 序号 4 列 + 时长 6 列 + 4 个空格分隔
     const NUMBER_WIDTH: usize = 4;
     const DURATION_WIDTH: usize = 6;
     const GAPS: usize = 4;
 
-    let flexible = context
-        .width
-        .saturating_sub(NUMBER_WIDTH + DURATION_WIDTH + GAPS);
-    let name_width = (flexible * 45 / 100).max(8);
-    let singer_width = (flexible * 25 / 100).max(6);
-    let album_width = flexible.saturating_sub(name_width + singer_width + 2);
+    let flexible = width.saturating_sub(NUMBER_WIDTH + DURATION_WIDTH + GAPS);
+    let name = (flexible * 45 / 100).max(8).min(flexible);
+    let singer = (flexible * 25 / 100)
+        .max(6)
+        .min(flexible.saturating_sub(name));
+    let album = flexible.saturating_sub(name + singer + 2);
+    (name, singer, album)
+}
 
+/// 组装歌曲行的各段。宽度为 0 的列直接省略，保证整行不溢出。
+fn song_spans(
+    number: usize,
+    song: &Song,
+    context: RowContext,
+    name_width: usize,
+    singer_width: usize,
+    album_width: usize,
+    theme: &Theme,
+) -> Vec<Span<'static>> {
     // ASCII 标记，避免字体缺字。
     //
     // 播放中刻意**不用** `>`：列表的选中标记已经占用了 `> `，两个 `>` 并排
@@ -295,28 +326,31 @@ pub fn song_row(
         theme.body()
     };
 
-    let line = Line::from(vec![
-        // 序号从 1 开始：用户看的是「第几首」，不是数组下标
-        Span::styled(format!("{marker}{:>3} ", number + 1), number_style),
-        Span::styled(
+    // 序号从 1 开始：用户看的是「第几首」，不是数组下标
+    let mut spans = vec![Span::styled(
+        format!("{marker}{:>3} ", number + 1),
+        number_style,
+    )];
+    if name_width > 0 {
+        spans.push(Span::styled(
             format!("{} ", truncate_to_width(&song.name, name_width)),
             name_style,
-        ),
-        Span::styled(
+        ));
+    }
+    if singer_width > 0 {
+        spans.push(Span::styled(
             format!("{} ", truncate_to_width(&song.singer_text(), singer_width)),
             theme.dim(),
-        ),
-        Span::styled(
-            format!(
-                "{} ",
-                truncate_to_width(display_album(song), album_width.max(1))
-            ),
+        ));
+    }
+    if album_width > 0 {
+        spans.push(Span::styled(
+            format!("{} ", truncate_to_width(display_album(song), album_width)),
             theme.dim(),
-        ),
-        Span::styled(song.duration_text(), theme.dim()),
-    ]);
-
-    ListItem::new(line)
+        ));
+    }
+    spans.push(Span::styled(song.duration_text(), theme.dim()));
+    spans
 }
 
 /// 专辑名缺失时给个占位，避免列塌陷。
@@ -462,6 +496,48 @@ mod tests {
         assert_eq!(human_bytes(512), "512 B");
         assert_eq!(human_bytes(2048), "2.0 KiB");
         assert_eq!(human_bytes(5 * 1024 * 1024), "5.0 MiB");
+    }
+
+    /// 歌曲行在任何可用宽度下都不能溢出：80×24 时歌曲面板只剩 ~25 列，
+    /// 老的三列 floor（歌名 8 / 歌手 6 / 专辑 1）会把时长挤成 `03:2`。
+    #[test]
+    fn song_row_never_overflows_the_available_width() {
+        let song = Song {
+            name: "龙卷风".to_string(),
+            singers: vec![crate::api::model::Singer {
+                id: 0,
+                name: "周杰伦".to_string(),
+            }],
+            album_name: "Jay".to_string(),
+            duration_ms: 200_000,
+            ..Default::default()
+        };
+        let theme = Theme::for_config(crate::ui::theme::ThemeName::Default, false);
+
+        // 面板自身的最小宽度是 10（见 `too_small`）：序号 4 列 + 时长 6 列是硬开销。
+        for width in 10..=80 {
+            let (name, singer, album) = song_columns(width);
+            let context = RowContext {
+                width,
+                is_current: true,
+                playback: PlaybackState::Playing,
+                hover: false,
+            };
+            let spans = song_spans(1, &song, context, name, singer, album, &theme);
+            let total: usize = spans.iter().map(|span| display_width(&span.content)).sum();
+            assert!(
+                total <= width,
+                "宽度 {width} 溢出：占 {total} 列（name={name} singer={singer} album={album}）"
+            );
+        }
+    }
+
+    /// 窄宽度下专辑列整列省略，而不是压成 1 列把时长挤出界。
+    #[test]
+    fn song_columns_drop_the_album_when_there_is_no_room() {
+        assert_eq!(song_columns(25), (8, 3, 0));
+        let (_, _, wide_album) = song_columns(120);
+        assert!(wide_album > 0, "宽终端应保留专辑列");
     }
 
     #[test]

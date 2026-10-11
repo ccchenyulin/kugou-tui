@@ -140,6 +140,14 @@ pub enum Loaded {
         hash: String,
         reason: String,
     },
+    /// 这首歌**没有匹配到歌词**（接口明确回「找不到」）。
+    ///
+    /// 与 [`Self::LyricFailed`] 分开：找不到通常意味着纯音乐 / 无歌词，那是歌本身
+    /// 的正常状态，面板应当说「纯音乐，请欣赏」，而不是把它渲染成一次取词失败。
+    /// 真正的失败（网络 / 服务端）仍走 `LyricFailed`。
+    LyricUnavailable {
+        hash: String,
+    },
     /// 已经拿到播放直链。
     StreamReady {
         song: Box<Song>,
