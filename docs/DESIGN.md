@@ -1,214 +1,165 @@
-# 设计要点
+# Design Notes
 
-## 设计要点
-
-### 线程模型
+## Thread Model
 
 ```
 input thread ──┐
-               ├─→ EventBus ─→ main loop ─→ draw (60 fps 上限，实际事件驱动)
+               ├─→ EventBus ─→ main loop ─→ draw (60 fps cap, event-driven in practice)
 async tasks ───┘                    │
-                                    └─→ 更新 AppState
-audio thread ───────────────────────→ 原子量（位置/时长/音量）
+                                    └─→ update AppState
+audio thread ───────────────────────→ atomics (position/duration/volume)
 ```
 
-- **输入线程**只做 `event::read()`，把按键与鼠标事件塞进通道，不做任何业务判断。
-- **主线程**是唯一修改状态的地方，因此不需要锁。
-- **播放位置、时长、音量**用原子量共享：主线程直接读，零分配、零锁。
-- **Tokio 只开 2 个 worker**：并发上限就是"搜索 + 歌词 + 取链 + 下载"这几条链。
+- **Input thread** only does `event::read()`, pushes key and mouse events into a channel, and makes no business decisions.
+- **Main thread** is the only place that mutates state, so no locks are needed.
+- **Playback position, duration, volume** are shared via atomics: the main thread reads them directly, zero allocation, zero locks.
+- **Tokio spawns only 2 workers**: the concurrency ceiling is exactly the "search + lyrics + fetch URL + download" chains.
 
-### 低资源占用
+## Low Resource Footprint
 
-实测（release 构建，CachyOS / Linux 7.2 x86_64，**112×34 终端**，`--no-tray`，读
-`/proc/<pid>/status` 的 `VmRSS`；`--api native`，即接口在进程内、机器上没有 Node）：
+Measured (release build, CachyOS / Linux 7.2 x86_64, **112×34 terminal**, `--no-tray`, reading `VmRSS` from `/proc/<pid>/status`; `--api native`, i.e. the interface runs in-process with no Node on the machine):
 
-| 场景 | 常驻内存 |
+| Scenario | Resident memory |
 |---|---|
-| 启动后空闲（未登录配置） | 19.1 MiB |
-| 搜索后 | 19.1 MiB |
-| 播放中 | 19.1 MiB |
-| 已登录（头像、会员信息、封面都已加载） | 21.5 MiB |
+| Idle after startup (not logged in) | 19.1 MiB |
+| After search | 19.1 MiB |
+| During playback | 19.1 MiB |
+| Logged in (avatar, membership info, cover all loaded) | 21.5 MiB |
 
-> 未登录与已登录的差别（19.1 vs 21.5）来自**账号数据本身**：头像是一张解码后的位图，
-> 会员摘要与听歌时长也要占位。所以"空闲"到底多少，取决于你登录了没有、有没有封面。
+> The difference between logged out and logged in (19.1 vs 21.5) comes from **account data itself**: the avatar is a decoded bitmap, and the membership summary and listening time also take space. So what "idle" costs depends on whether you are logged in and whether a cover is loaded.
 >
-> 三次重复测量（未登录、空闲）：18.98 / 19.02 / 19.07 MiB，抖动约 0.1 MiB。
+> Three repeated measurements (logged out, idle): 18.98 / 19.02 / 19.07 MiB, jitter about 0.1 MiB.
 
-**与迁移前（`origin/main`，Node 后端）的对照**——同一台机器、同一份配置、同样的
-112×34 与 `--no-tray`，只换二进制：
+**Comparison with before the migration (`origin/main`, Node backend)**—same machine, same config, same 112×34 and `--no-tray`, only the binary changed:
 
-| | 未登录空闲 | 已登录空闲 | 线程数 |
+| | Logged-out idle | Logged-in idle | Threads |
 |---|---|---|---|
-| 迁移前（`origin/main`，走本机 Node 服务） | 18.6 MiB | 20.2 MiB | 11 |
-| 现在（`--api native`） | 19.1 MiB | 21.5 MiB | 12 |
+| Before (`origin/main`, via local Node service) | 18.6 MiB | 20.2 MiB | 11 |
+| Now (`--api native`) | 19.1 MiB | 21.5 MiB | 12 |
 
-**程序自身只多了约 0.3–0.4 MiB**（多出的是一个 12 线程 vs 11 线程的差别，加上内嵌
-HTTP/TLS 客户端与 KRC 解密的那点常驻）。真正的收益在**进程之外**：迁移前必须常驻一个
-Node 服务进程，那一个进程自己就占——
+**The program itself grows by only about 0.3–0.4 MiB** (a 12-vs-11 thread difference plus the resident cost of the embedded HTTP/TLS client and KRC decryption). The real gain is **outside the process**: before the migration a Node service process had to stay resident, and that process alone takes—
 
-| 本机服务 | RSS |
+| Local service | RSS |
 |---|---|
-| `node app.js --port=3000`（标准版音源） | 42.5 MiB |
-| `node app.js --port=3001`（概念版音源） | 66.9 MiB |
+| `node app.js --port=3000` (standard source) | 42.5 MiB |
+| `node app.js --port=3001` (concept source) | 66.9 MiB |
 
-`--api native` 把这一整个进程去掉了：`ps` 里不再有 node，程序也不再 spawn 任何子进程
-（实测子进程列表为空、`node app.js` 进程数前后不变）。所以按「整个播放器占多少」算，
-从 **60–86 MiB 降到约 19–21.5 MiB**；按「TUI 进程自己占多少」算，则比迁移前多 0.3–0.4 MiB。
+`--api native` removes that entire process: no more node in `ps`, and the program no longer spawns any child processes (measured: empty child process list, `node app.js` process count unchanged before and after). So counting "how much the whole player takes", it drops from **60–86 MiB to about 19–21.5 MiB**; counting "how much the TUI process itself takes", it is 0.3–0.4 MiB more than before the migration.
 
-> **口径说明**：这里报的是 RSS（`VmRSS`），即进程映射的常驻物理页总量，包含与其他进程
-> 共享的只读页（同一二进制多开时这部分会重复计数）。按 Pss（共享页按比例摊分）算，
-> 未登录空闲时迁移前 12.5 MiB、现在 12.9 MiB；已登录时现在 14.6 MiB。**两种口径下结论
-> 一致：程序自身变化不到 0.5 MiB，收益来自去掉 Node 进程。**
+> **Measurement note**: these are RSS (`VmRSS`) figures—the total resident physical pages mapped by the process, including read-only pages shared with other processes (double-counted when the same binary runs multiple times). By Pss (shared pages apportioned), logged-out idle is 12.5 MiB before and 12.9 MiB now; logged-in now is 14.6 MiB. **Both measures agree: the program itself changes by less than 0.5 MiB, and the gain comes from removing the Node process.**
 
-**上面这张表只在「播放小体积曲目」时成立。** 边下边播的字节缓冲**不保留整首**：
-下载的每个字节先落盘，内存里只留读指针附近的一个尾部窗口（4 MiB 上限，见下节
-「边下边播」）。所以常驻内存与曲目体积无关——放一首 65 MiB 的 Hi-Res，内存代价
-仍是那几 MiB。实测：
+**The table above only holds when "playing small tracks".** The streaming byte buffer **does not keep the whole track**: every downloaded byte is written to disk first, and memory keeps only a tail window near the read pointer (4 MiB cap, see "Streaming Playback" below). So resident memory is independent of track size—playing a 65 MiB Hi-Res track still costs those few MiB. Measured:
 
-| 场景 | 常驻内存 |
+| Scenario | Resident memory |
 |---|---|
-| 播 64 MiB 的曲目（修复前，缓冲全留内存） | 66.5 MiB |
-| 同上（现在） | 12.5 MiB |
-| 连切 5 首、每首 64 MiB 且都不取消下载（修复前） | 323.7 MiB |
-| 同上（现在，切歌即取消） | 3.0 MiB |
+| Playing a 64 MiB track (before the fix, whole buffer kept in memory) | 66.5 MiB |
+| Same (now) | 12.5 MiB |
+| Switching through 5 tracks, each 64 MiB, none of the downloads cancelled (before the fix) | 323.7 MiB |
+| Same (now, switching cancels the download) | 3.0 MiB |
 
-数值来自 `streaming.rs` 的同一份负载在**新旧两版实现**上的对照测量（单曲/连切两种
-场景，读 `/proc/<pid>/status` 的 `VmRSS`/`VmHWM`）。
+The numbers come from comparing the same workload in `streaming.rs` across **the old and new implementations** (single-track and track-switching scenarios, reading `VmRSS`/`VmHWM` from `/proc/<pid>/status`).
 
-**二进制体积**（release、strip、`lto = "fat"`、`codegen-units = 1`）：
+**Binary size** (release, strip, `lto = "fat"`, `codegen-units = 1`):
 
-| 构建 | 体积 |
+| Build | Size |
 |---|---|
-| 迁移前（`origin/main`） | 11,836,312 字节（11.29 MiB） |
-| 现在，默认 features | 12,261,728 字节（11.69 MiB） |
-| 现在，`--no-default-features`（不含 Node 引导代码） | 12,195,608 字节（11.63 MiB） |
+| Before the migration (`origin/main`) | 11,836,312 bytes (11.29 MiB) |
+| Now, default features | 12,261,728 bytes (11.69 MiB) |
+| Now, `--no-default-features` (without Node bootstrap code) | 12,195,608 bytes (11.63 MiB) |
 
-迁移带来的净增约 **0.41 MiB**，来自内嵌的签名/加密/KRC/HTTP 那一套；关掉
-`node-bootstrap` 只省 0.06 MiB，因为引导代码本身很小（大头是字符串常量与几段
-`Command` 调用）。
+The migration adds a net of about **0.41 MiB**, from the embedded signing/encryption/KRC/HTTP stack; turning off `node-bootstrap` saves only 0.06 MiB, because the bootstrap code is small (mostly string constants and a few `Command` calls).
 
-主要取舍：事件驱动而非忙轮询（主循环 `recv_timeout(tick)`，默认 200 ms）；
-音频完全落盘；下载进度每 256 KiB 才上报一次；不引入 `tracing` / `chrono` / `rand`，
-用几十行代码替代它们各自的依赖树。
+Main trade-offs: event-driven rather than busy polling (main loop `recv_timeout(tick)`, 200 ms default); audio fully written to disk; download progress reported only every 256 KiB; no `tracing` / `chrono` / `rand`, replacing their respective dependency trees with a few dozen lines of code.
 
-### 边下边播
+## Streaming Playback
 
-取到播放直链后，**先攒够开头就开播**，剩下的在后台继续下，同时落盘缓存。所以首次播放的
-等待是「攒开头」而不是「下完整首」；同一首第二次播放直接命中磁盘缓存，零等待。
+After fetching the playback direct URL, **it starts playing once the beginning has been buffered**, and the rest keeps downloading in the background while being cached to disk. So the wait for first playback is "buffer the beginning" rather than "download the whole track"; a second play of the same track hits the disk cache directly, with zero wait.
 
-开播门槛是 `PREROLL_BYTES = 128 KB`（`src/audio/download.rs`）。这个数是从等待时间
-倒推的：按常见码率 128 kbps ≈ 16 KB/s 算，128 KB 约等于 8 秒音频——够解码器稳定跑起来，
-等待又不明显。太小会反复卡顿，太大就退回「下完才播」。
+The start threshold is `PREROLL_BYTES = 128 KB` (`src/audio/download.rs`). This number is derived backward from the wait time: at a common bitrate of 128 kbps ≈ 16 KB/s, 128 KB is about 8 seconds of audio—enough for the decoder to run stably, while the wait stays unnoticeable. Too small and it stutters repeatedly; too large and it falls back to "play only after downloading everything".
 
-#### 为什么得自己写一个缓冲
+### Why a Custom Buffer
 
-`rodio::Decoder<R>` 要求 `R: Read + Seek`（rodio 0.22 没有 `new_stream`），而网络流
-只能 `Read` 不能 `Seek`，所以不能直接喂给它。
+`rodio::Decoder<R>` requires `R: Read + Seek` (rodio 0.22 has no `new_stream`), while a network stream can only `Read`, not `Seek`, so it cannot be fed in directly.
 
-`StreamingBuffer`（`src/audio/streaming.rs`）在内存里攒一段**会增长**的字节缓冲区
-（但只留尾部窗口，见下节），并让它实现 `Seek`：读指针跑到还没下载到的地方就
-**阻塞等待**后台下载线程补数据。Decoder 因此以为自己在读一个「很大的本地文件」，
-实际数据还在路上。表现是——声音停一下，而不是提前结束。
+`StreamingBuffer` (`src/audio/streaming.rs`) accumulates a **growing** byte buffer in memory (but keeps only a tail window, see below) and implements `Seek` on it: when the read pointer runs past what has been downloaded, it **blocks and waits** for the background download thread to supply more data. The decoder therefore thinks it is reading a "very large local file" while the data is still in flight. The behavior is—the sound pauses, rather than ending early.
 
-阻塞是有代价的：`read()` 阻塞时 rodio 的播放线程就停在那儿。所以每个等待都带
-**15 秒超时**——网络真的断了要能报错退出，不能永远卡死。
+Blocking has a cost: while `read()` blocks, rodio's playback thread stops there. So every wait carries a **15-second timeout**—a genuinely dead network must be able to error out and exit, not hang forever.
 
-#### 内存代价：只留窗口，其余从盘上读回来
+### Memory Cost: Keep a Window, Read the Rest Back from Disk
 
-缓冲**只保留尾部窗口**（`MAX_KEPT_BYTES = 4 MiB`，回收到 1 MiB）。每段数据都由下载
-线程**先写进 `.part` 文件再 push 进缓冲**，所以窗口之外的字节随时能从那个文件 `pread`
-读回来（数据刚落盘，就在页缓存里，开销接近一次 memcpy）。于是：
+The buffer **keeps only a tail window** (`MAX_KEPT_BYTES = 4 MiB`, recycled down to 1 MiB). The download thread **writes each chunk to the `.part` file first, then pushes it into the buffer**, so bytes outside the window can be `pread` back from that file at any time (the data has just hit disk, so it is in the page cache, costing close to a memcpy). Thus:
 
-* 常驻内存与曲目体积脱钩（见上表：64 MiB 的曲子占 12.5 MiB 而不是 66.5 MiB）；
-* 往回 `seek` 到已经被回收的区域依然可行——那部分在盘上，不报错误。
+* resident memory is decoupled from track size (see the table above: a 64 MiB track takes 12.5 MiB, not 66.5 MiB);
+* seeking backward into an already reclaimed region still works—that part is on disk, no error is reported.
 
-为什么敢回收：**数据已经落盘了**，回收丢掉的只是内存里的副本。不回收也能跑，但那样
-放 Hi-Res 时 RSS 会按曲目体积线性上涨（实测 1:1），跟「常驻 20 MiB 以内」的定位直接冲突。
+Why reclaiming is safe: **the data is already on disk**; reclaiming discards only the in-memory copy. Not reclaiming also works, but then playing Hi-Res would make RSS grow linearly with track size (measured 1:1), directly conflicting with the "stay within 20 MiB resident" positioning.
 
-落盘的这份文件用一个**已经打开的文件句柄**读，而不是按路径读：下载完成后文件会被
-改名成正式缓存文件，缓存回收也可能把它删掉，但只要句柄还在，inode 就还在，数据读得到。
+The on-disk file is read through an **already-open file handle**, not by path: after the download completes the file is renamed to the official cache file, and cache eviction may delete it, but as long as the handle is alive the inode is alive and the data remains readable.
 
-#### 断了怎么办
+### When the Stream Breaks
 
-读超时、下载失败、被取消，三者都会让数据供不上。缓冲只如实记下状态
-（`is_finished` / `error` / `is_cancelled`），**不自己判断"这首放完了"**——那是播放
-引擎的事：rodio 把任何读错误都吞成 EOF（symphonia 的 `format.next_packet().ok()?`），
-「源结束」既可能是真播完，也可能是流断了。混为一谈的后果很具体：单曲循环（或队列里
-只有一首）会**从头再放一遍**，用户看到的就是「进度回到开头」。
+A read timeout, a download failure, or a cancellation—all three starve the data supply. The buffer only records the state faithfully (`is_finished` / `error` / `is_cancelled`) and **does not itself decide "this track is finished"**—that is the playback engine's job: rodio swallows any read error as EOF (symphonia's `format.next_packet().ok()?`), and "end of source" may be either a real finish or a broken stream. The concrete consequence of conflating them: single-track repeat (or a queue with only one track) **plays it again from the start**, and what the user sees is "the progress jumped back to the beginning".
 
-所以引擎在播放器变空时按流的状态分四种收场：
+So when the player goes empty, the engine settles in four ways depending on the stream state:
 
-| 流的状态 | 收场 |
+| Stream state | Outcome |
 |---|---|
-| 被主动取消（用户切歌 / 停止） | 静默，什么都不报 |
-| 下完了 | `TrackFinished`，主线程正常切歌 |
-| 没下完、有错 | `Failed(原因)`：如实报错，**不切歌、不重播** |
-| 没下完、没出错（读超时） | `StreamInterrupted { 位置 }`：**留住位置**，主线程从该位置续播一次 |
+| Actively cancelled (user switches track / stops) | Silent, nothing reported |
+| Fully downloaded | `TrackFinished`, the main thread advances normally |
+| Not finished, has an error | `Failed(reason)`: report the error faithfully, **do not switch track, do not replay** |
+| Not finished, no error (read timeout) | `StreamInterrupted { position }`: **retain the position**, the main thread resumes once from that position |
 
-位置必须**在曲目结束之前**就记下来：源一结束 `Player::get_pos()` 就报 0，那一帧再读
-就等于把用户听到的位置抹掉（`Runtime::last_position_ms` 就是为此存在的）。
+The position must be recorded **before the track ends**: once the source ends, `Player::get_pos()` reports 0, and reading it on that frame erases the position the user heard (`Runtime::last_position_ms` exists for this).
 
-#### 写的是 `.part`，不是最终文件名
+### Write to `.part`, Not the Final Name
 
-两条下载路径都先写同目录下的 `.part`，**全部写完才改名**。边下边播尤其需要这样：
-它一边下一边播，中途失败/被取消是常态。直接写最终文件名的话，磁盘上会留下一个
-「看起来完整、其实只有半首」的文件，而 `cache.find` 只按「文件在不在」判断——
-下次播放命中它就会在中间莫名其妙地结束，单曲循环下还会反复从头开始。
+Both download paths write to a `.part` in the same directory first and **rename only after everything is written**. Streaming playback needs this especially: it plays while downloading, and failure/cancellation mid-way is the norm. Writing directly to the final name would leave a file on disk that "looks complete but is only half a track", while `cache.find` decides purely by "does the file exist"—the next play would hit it and end inexplicably in the middle, and under single-track repeat it would restart from the beginning over and over.
 
-缓存回收与「清空缓存」都跳过 `.part`（它不是缓存，是半成品）；崩溃留下的 `.part`
-会在那首歌下次播放时被 `truncate` 重用。
+Cache eviction and "clear cache" both skip `.part` (it is not a cache, it is a half-finished product); a `.part` left by a crash is `truncate`d and reused the next time that track is played.
 
-### 接口适配
+## Interface Adaptation
 
-KuGouMusicApi 是逆向封装，响应结构会漂移，而且**上游文档与实测不一致**的地方不少。
-本项目的做法是"多候选键名 + 类型宽容 + 单条失败不连累整页"。以下是拿真实服务核对后
-确认与文档不一致的地方：
+KuGouMusicApi is a reverse-engineered wrapper, its response structure drifts, and **the upstream docs disagree with actual behavior** in quite a few places. This project's approach is "multiple candidate key names + tolerant types + a single failure does not take down the whole page". The following are places confirmed against the real service to differ from the docs:
 
-| 上游文档说 | 实际是 |
+| Upstream docs say | Actual |
 |---|---|
-| `/login/qr/create` 返回 `qrcode` / `qrimg` | 返回 `data.url` / `data.base64` |
-| 歌单广场在 `data.info` | 在 `data.special_list` |
-| 歌手列表元素含 `songcount` | 该字段恒为 `0`，不可用于展示 |
-| 歌手列表是扁平数组 | 实际嵌套在 `data.info[].singer[]` |
-| `/song/url` 返回 `data.url` | 实际在**顶层** `url` / `backupUrl`（数组），`data` 不存在 |
-| 建议 `npm run dev` | `npm start` 才是 `node app.js` |
+| `/login/qr/create` returns `qrcode` / `qrimg` | returns `data.url` / `data.base64` |
+| Playlist plaza is in `data.info` | in `data.special_list` |
+| Singer list elements contain `songcount` | that field is always `0`, unusable for display |
+| Singer list is a flat array | actually nested in `data.info[].singer[]` |
+| `/song/url` returns `data.url` | actually at the **top level** `url` / `backupUrl` (arrays), `data` does not exist |
+| Docs suggest `npm run dev` | `npm start` is what runs `node app.js` |
 
-同一首歌在搜索、歌单、排行榜三个接口里用**三套完全不同的字段名**，这是解析层最花功夫
-的地方，也因此写了较多单元测试：
+The same track uses **three completely different field names** across the search, playlist, and rank interfaces—the most labor-intensive part of the parsing layer, which is why there are more unit tests:
 
-| | 搜索 `/search` | 歌单 `/playlist/track/all` | 排行榜 `/rank/audio` |
+| | Search `/search` | Playlist `/playlist/track/all` | Rank `/rank/audio` |
 |---|---|---|---|
-| 歌名 | `SongName` | `name`（含"歌手 - "前缀） | `songname` |
-| hash | `FileHash` | `hash` | 顶层没有，在 `audio_info.hash_128` |
-| 时长 | `Duration`（秒） | `timelen`（毫秒） | `audio_info.duration_128` |
-| 专辑 | `AlbumName` | `albuminfo.name` | `album_info.album_name` |
-| 歌手 | `Singer[]` | `singerinfo[]` | `authors[]` / `author_name` |
+| Title | `SongName` | `name` (with "Singer - " prefix) | `songname` |
+| hash | `FileHash` | `hash` | none at top level, in `audio_info.hash_128` |
+| Duration | `Duration` (seconds) | `timelen` (milliseconds) | `audio_info.duration_128` |
+| Album | `AlbumName` | `albuminfo.name` | `album_info.album_name` |
+| Singer | `Singer[]` | `singerinfo[]` | `authors[]` / `author_name` |
 
 ```bash
-cargo test     # 覆盖上述解析路径，以及队列 / 缓存 / 按键的边界情况
+cargo test     # covers the parsing paths above, plus edge cases for queue / cache / key handling
 ```
 
-### 重试
+## Retry
 
-读接口的瞬时故障会自动重试，写接口不重试。判据只有一条：**同样的请求重发一次，
-结果是否可能不同**（`AppError::is_transient`）。
+Transient failures on read interfaces are retried automatically; write interfaces are not retried. The sole criterion is: **could the same request produce a different result if sent again** (`AppError::is_transient`).
 
-| 失败 | 重试 | 为什么 |
+| Failure | Retry | Why |
 |---|---|---|
-| 连接被拒 / 连接被重置 / 响应体读到一半断了 | 是 | 毫秒级返回，正是「有网但恰好抖了一下」的样子 |
-| HTTP 408 / 429 / 5xx | 是 | 对端明确表示「现在不行，等会儿再来」 |
-| **超时** | 否 | 已经等满 15 秒（连接超时 8 秒），说明对端是卡住而不是抖了一下；再等两轮是拿用户的时间换一个大概率相同的结果 |
-| 业务错误码（`error_code`） | 否 | 服务回了话，只是拒绝了这次请求，重发还是这个答复 |
-| 其它 4xx | 否 | 请求本身有问题（参数 / 鉴权），与时刻无关 |
-| 200 却返回非 JSON | 否 | 内容问题；真正的截断会走传输层错误，那条算可重试 |
-| 写操作（收藏 / 移出 / 删歌单 / 新建歌单 / 领 VIP） | 否 | 重发可能改变结果：`/playlist/del` 第一次其实成功了、只是响应丢了的话，重发会得到「歌单不存在」 |
+| Connection refused / connection reset / response body truncated mid-read | Yes | Returns in milliseconds, exactly the "network works but hiccuped" shape |
+| HTTP 408 / 429 / 5xx | Yes | The peer explicitly says "not now, come back later" |
+| **Timeout** | No | Already waited the full 15 seconds (8-second connect timeout), meaning the peer is stuck, not hiccuping; two more rounds trade the user's time for a most likely identical result |
+| Business error code (`error_code`) | No | The service responded, it just rejected this request; resending gets the same answer |
+| Other 4xx | No | The request itself is wrong (parameters / auth), unrelated to timing |
+| 200 but non-JSON body | No | A content problem; a real truncation goes through a transport error, which is retryable |
+| Write operations (favorite / remove / delete playlist / create playlist / claim VIP) | No | Resending may change the result: if `/playlist/del` actually succeeded the first time and only the response was lost, resending yields "playlist does not exist" |
 
-次数与间隔：**总 3 次尝试（首次 + 2 次重试），间隔 300ms → 900ms**（×3 递增，
-不加抖动——单用户本地客户端不存在「一群客户端同时重试」的问题）。所以一次抖动
-最多让用户多等 1.2 秒；再多就不是「扛抖动」而是「拖着不报错」了。
+Count and interval: **3 attempts total (first + 2 retries), interval 300ms → 900ms** (×3 increase, no jitter—a single-user local client has no "many clients retrying at once" problem). So one hiccup costs the user at most 1.2 extra seconds; more than that is not "riding out a hiccup" but "stalling instead of reporting an error".
 
-> 为什么值得做：取播放地址那条路会逐个试多个候选 (hash, 音质)，某个候选因为一次
-> 抖动失败就被跳过；全抖过去之后用户看到的是「没有可用的播放地址（可能需要 VIP
-> 或已下架）」——**一个和真实原因完全无关的结论**。
+> Why it is worth doing: the path that fetches the playback URL tries multiple candidate (hash, quality) pairs one by one; a candidate skipped because of a single hiccup—after all of them hiccup—leaves the user seeing "no available playback URL (may require VIP or has been removed)", **a conclusion entirely unrelated to the real cause**.
 
 ---

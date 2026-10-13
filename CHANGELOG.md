@@ -1,1732 +1,1361 @@
-# 更新日志
+# Changelog
 
-本项目所有值得记录的变更都会写在这里。
-格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
-版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
+All notable changes to this project are recorded here.
+Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [0.6.2] - 2026-10-11
 
-### 变更
+### Changed
 
-- **终端布局重构**：侧边栏去掉每项前面的图标，导航改为「指针 快捷键 标题」的紧凑排布；删掉与标题重复的 `kugou-tui N/N` 行、与播放条重复的「播放」状态块，以及导航下方的电平竖条；统一各面板间距；侧边栏过矮时改用一行精简状态（如 `● 接口内嵌 · 酷狗`），不再留下 `… 另有 …` 的占位。
-- **可视化页重做**：八分之一格精度的柱顶、柱内渐变、独立的峰值标记、地面线，以及居中的曲目信息行；空闲与缓冲状态各有明确版式。
-- **播放条**：右侧按优先级（循环模式 > 音量 > 下一首）逐段显示，窄终端下循环模式不再消失。
+- **Terminal layout rework**: the sidebar drops the icon in front of each item, and navigation becomes a compact "pointer / shortcut / title" layout; removed the `kugou-tui N/N` line that duplicated the title, the "playback" status block that duplicated the playback bar, and the level meter under the navigation; unified panel spacing; when the sidebar is too short it collapses to a single condensed status line (e.g. `● embedded · kugou`) instead of leaving a `… N more …` placeholder.
+- **Visualizer page reworked**: eighth-cell-precision bar tops, in-bar gradients, an independent peak marker, a ground line, and a centered track-info row; idle and buffering states each have a defined layout.
+- **Playback bar**: the right side shows segments by priority (loop mode > volume > next), so loop mode no longer disappears on narrow terminals.
 
-### 修复
+### Fixed
 
-- **歌词取错**：校验歌词候选的时长与歌手/曲名，拒绝「取到的是另一首歌」的候选；找不到匹配歌词时显示「纯音乐，请欣赏」，而不是别的歌的歌词。同时过滤掉被当作歌词渲染的制作人员名单（作词/作曲/编曲…）与「歌名 - 歌手」标题行。
-- 窄终端下歌曲列表的歌名/歌手/专辑三列按可用宽度收缩，必要时整列省略，时长不再被挤成 `03:2`。
+- **Wrong lyrics fetched**: validate the duration and artist/title of lyric candidates and reject candidates that are "a different song"; when no matching lyric is found, show "instrumental, enjoy" instead of another song's lyrics. Also filter out credits lists (lyricist/composer/arranger…) and "Title - Artist" header lines that were being rendered as lyrics.
+- On narrow terminals the title/artist/album columns of the track list shrink to available width, dropping whole columns when necessary, so the duration is no longer squeezed into `03:2`.
 
 ## [0.6.1] - 2026-10-09
 
-### 修复
+### Fixed
 
-- 登录弹窗在不足 7 行的终端里不再崩溃（`clamp(7, area.height)` 在 `min > max` 时 panic）。
-- 日志重定向失败时不再启动死锁（持 `SINK` 锁期间重复上锁）。
-- VIP 到期日遇到非 ASCII 的 `end_time` 不再切片 panic。
-- 系统托盘 D-Bus 信号连续发送失败时判定断连并自动重连，不再静默冻结。
-- 流式下载任务异常终止时收尾写入端并摘除登记，读者不再永久阻塞。
-- 从播放队列移除歌曲后，高亮不再错位或越界丢失。
-- 网易云服务使用独立实例名（`api-netease.pid`），不再与酷狗标准版争用 PID 文件。
-- 若干静默吞错补上日志（KRC 解码、汽水封面/会员查询），`clienttime` 解析失败改为显式报错。
-- 读取 PID 文件时容忍 UTF-8 BOM（PowerShell 5.1 的 `Set-Content` 可能带 BOM，否则解析失败）；Rust 与 `kugou-api`（bash）侧都已处理。
-- 音频缓存键带上来源（`<源>-<hash>-<音质>`），不同音源的歌不再串用同一份缓存；旧的纯 `hash-音质` 缓存文件不再命中，会重新下载一次。
-- 取流地址解析失败（连不上目标音源、网络中断）时不再卡在「缓冲中」：收掉加载态并让 Space 恢复可用（此前播放状态永远停在 `Loading`，连按 Space 都毫无反应）。
+- The login dialog no longer crashes on terminals shorter than 7 rows (`clamp(7, area.height)` panics when `min > max`).
+- No more startup deadlock when log redirection fails (re-locking while holding the `SINK` lock).
+- No more slice panic when the VIP expiry date hits a non-ASCII `end_time`.
+- The system tray now detects a broken D-Bus connection and reconnects instead of silently freezing when signal sends fail repeatedly.
+- When a streaming download task terminates abnormally it finalizes the write side and deregisters, so readers no longer block forever.
+- After removing a track from the playback queue the highlight no longer shifts or goes out of bounds.
+- The NetEase service uses its own instance name (`api-netease.pid`) and no longer contends for a PID file with Kugou standard edition.
+- Several silently swallowed errors now log (KRC decode, Soda cover/membership queries), and a `clienttime` parse failure is now an explicit error.
+- Reading a PID file tolerates a UTF-8 BOM (PowerShell 5.1's `Set-Content` may add one, which otherwise breaks parsing); handled on both the Rust and `kugou-api` (bash) sides.
+- Audio cache keys now include the source (`<source>-<hash>-<quality>`), so tracks from different sources no longer share one cache file; old plain `hash-quality` cache files no longer match and are re-downloaded once.
+- Stream URL resolution failures (cannot reach the target source, network interrupted) no longer get stuck on "buffering": the loading state is cleared and Space works again (previously playback stayed at `Loading` forever and even repeated Space presses did nothing).
 
-### 变更
+### Changed
 
-- 服务日志文件名统一为 `api-<name>.log`（启动器与 `kugou-api` 一致）。
-- 网易云端口 `NETEASE_PORT` 现在也能写进配置文件（与其它端口一致）。
-- Windows 交叉编译的平台门控收紧为 `all(target_os = "linux", target_env = "gnu")`，不再误伤 `*-pc-windows-gnu`。
-- Windows 下 npm 安装超时会结束整棵进程树（`taskkill /T /F`）。
-- 目标音源不可用（连不上、未登录、服务未启动）时自动跳到队列里下一首可播放的歌：同一轮里跳过已确认失败的源、最多跳 `min(队列长度, 5)` 次、单曲循环不跳；用户手动切歌会清零计数，全部失败时停在停止态并给一条汇总提示。单曲级失败（版权受限、VIP 试听无权限等）仍只报错、不跳歌。
-- 云歌单的增删/同步只接受与歌单同源的歌：跨源操作被拒并给出提示，不再把异源歌喂给错误的客户端（批量同步逐首跳过，提示里写明跳过数量）。
+- Service log filenames are unified as `api-<name>.log` (launcher and `kugou-api` agree).
+- The NetEase port `NETEASE_PORT` can now be written to the config file (like the other ports).
+- The Windows cross-compile platform gate is tightened to `all(target_os = "linux", target_env = "gnu")`, no longer mis-affecting `*-pc-windows-gnu`.
+- On Windows, an npm install timeout now kills the whole process tree (`taskkill /T /F`).
+- When the target source is unavailable (unreachable, not logged in, service not started), the player automatically skips to the next playable track in the queue: within one round it skips sources already confirmed failed, skips at most `min(queue length, 5)` times, and does not skip under repeat-one; a manual track change clears the counter, and when all fail it stops in the stopped state with a single summary message. Per-track failures (region-locked, no VIP preview permission, etc.) still only report an error and do not skip.
+- Cloud playlist add/remove/sync accept only tracks from the same source as the playlist: cross-source operations are refused with a message, and foreign-source tracks are no longer fed to the wrong client (bulk sync skips per track and states the skip count in the message).
 
-### 性能
+### Performance
 
-- 歌曲列表与播放队列每帧只构造可见窗口内的行。
-- 桌面集成（WebSocket / MPRIS / 托盘）每拍先比对再克隆，不再无条件深拷贝当前曲目与歌词。
-- 登录二维码复用已渲染好的行，不再每帧重新编码（实测每帧省下约 0.9ms）。
-- 条目列表（歌单广场、歌手列表等）每帧只构造可见窗口内的行（2000 条实测 577µs→251µs/帧）。
+- The track list and playback queue build only the rows in the visible window each frame.
+- Desktop integration (WebSocket / MPRIS / tray) compares before cloning each tick, no longer deep-copying the current track and lyrics unconditionally.
+- The login QR code reuses already-rendered rows instead of re-encoding every frame (measured: ~0.9 ms saved per frame).
+- Item lists (playlist plaza, artist list, etc.) build only the rows in the visible window each frame (2000 items measured: 577 µs → 251 µs per frame).
 
 ## [0.6.0] - 2026-10-09
 
-### 新增
+### Added
 
-- **内嵌的纯 Rust 接口层**。此前搜索、取流、歌词、登录这些接口都由一个本机的
-  Node.js 服务（KuGouMusicApi）提供，本程序只负责把它拉起来；现在客户端实际调用
-  的 26 条路由都在进程内实现，**不再需要 Node.js**。签名、设备指纹、KRC 解密这类
-  「算错也不报错」的部分照上游逐函数移植，每个函数在注释里标明来源文件与函数名，
-  并用同一组固定输入与上游 JS 逐字节对拍（KAT）。
+- **Embedded pure-Rust interface layer.** Previously search, stream resolution, lyrics, and login were provided by a local Node.js service (KuGouMusicApi) and this program only launched it; now the 26 routes the client actually calls are implemented in-process, **no Node.js required**. The parts where "a mistake is silent" — signing, device fingerprint, KRC decryption — are ported function by function from upstream, each with its source file and function name in a comment, and verified byte-for-byte against the upstream JS on the same fixed inputs (KAT).
 
-  这解决的是安装门槛：`cargo install` 只放一个二进制到 `~/.cargo/bin`，此前用户
-  还得自己准备 Node 运行时，否则「装完了却不能用」。
+  This removes the install barrier: `cargo install` only places one binary in `~/.cargo/bin`, and previously users still had to prepare a Node runtime, otherwise "installed but unusable".
 
-- **内嵌 WebSocket 服务**。推送 `lyrics`（当前歌词与播放位置）与 `playerState`
-  （播放状态），接收 `control` 命令（`toggle` / `next` / `prev`）。默认开启，只监听
-  `127.0.0.1:6520`——**不接受非本机连接**，并校验 `Origin`、限制单条消息大小。
-  `--no-ws` 关闭，`--ws-port` 改端口。
+- **Embedded WebSocket service.** Pushes `lyrics` (current lyrics and playback position) and `playerState` (playback state), and accepts `control` commands (`toggle` / `next` / `prev`). On by default, listening only on `127.0.0.1:6520` — **no non-local connections accepted** — and it validates `Origin` and limits per-message size. `--no-ws` disables it; `--ws-port` changes the port.
 
-- **`node-bootstrap` feature**（默认开启）。关掉后引导代码（探测端口、下载
-  KuGouMusicApi、`npm install`、spawn `node app.js`）整段不参与编译，
-  `cargo build --release --no-default-features` 编出的二进制里不存在这段代码，
-  体积小约 0.06 MiB。此时 `--api node` 会明确报错说构建时关掉了这个 feature，
-  而不是含糊地连不上。
+- **`node-bootstrap` feature** (on by default). When off, the bootstrap code (port probing, downloading KuGouMusicApi, `npm install`, spawning `node app.js`) is excluded from compilation, so a binary built with `cargo build --release --no-default-features` does not contain it and is about 0.06 MiB smaller. `--api node` then fails with an explicit "this feature was disabled at build time" error instead of an ambiguous connection failure.
 
-### 变更
+### Changed
 
-- **`--api` 默认值由 `node` 改为 `native`**。启动后不再拉起 Node 服务，`ps` 里也
-  不会多出一个 `node app.js` 进程。Node 后端**保留**为回退路径，`--api node` 可
-  切回（环境变量 `KUGOU_API_BACKEND`），用于对比排查。
+- **The `--api` default changed from `node` to `native`.** Startup no longer launches a Node service and `ps` no longer shows an extra `node app.js` process. The Node backend is **kept** as a fallback and can be switched back with `--api node` (env var `KUGOU_API_BACKEND`) for comparison and troubleshooting.
 
-- **WebSocket 默认开启**。不配置任何东西就会在本机 `127.0.0.1:6520` 多出一个监听
-  端口。这是有意为之，但它确实是行为改变：不想要的话用 `--no-ws` 关掉。
+- **WebSocket is on by default.** With no configuration at all, an extra listener appears on local `127.0.0.1:6520`. This is intentional, but it is a behavior change: disable it with `--no-ws` if unwanted.
 
-- **`--api-start` 在 native 下改为提示 + 退出码 0**。native 没有「常驻服务」这个
-  东西，此前它往 stdout 打印一句说明，而 stdout 上那句「接口服务已就绪：<地址>」是
-  给脚本抓地址用的——格式类似却没有地址，按地址解析的脚本会拿到垃圾。现在改走
-  stderr，退出码仍是 0（这不是错误，只是无事可做）。
+- **`--api-start` now prints a notice and exits 0 under native.** Native has no such thing as a "resident service"; it used to print a line to stdout, but that `interface service ready: <address>` line on stdout is what scripts scrape the address from — a similar-looking format without an address means scripts parsing it get garbage. It now goes to stderr and the exit code is still 0 (this is not an error, just nothing to do).
 
-### 修复
+### Fixed
 
-- **新建云端歌单不再恒报失败**。服务端把新歌单的 `listid` 放在 `data.info.listid`，
-  而解析只扫了 `data` 顶层，于是「歌单建出来了，程序却说没建出来」。native 与 Node
-  两条路径都有这个问题，一并修掉。
+- **Creating a cloud playlist no longer always reports failure.** The server puts the new playlist's `listid` in `data.info.listid`, while the parser only scanned the top level of `data`, so "the playlist was created but the program says it wasn't". Both the native and Node paths had this problem; fixed together.
 
-- **日志里的凭据一律脱敏**。`token` / `userid` / `dfid` / `mid` 写进日志前替换成
-  `<redacted>`，覆盖三种此前会漏的形态：出站请求的完整 URL、`reqwest::Error` 的
-  Display（它会把 URL 拼进去）、以及非 JSON 响应体的前若干字符。
+- **Credentials in logs are always redacted.** `token` / `userid` / `dfid` / `mid` are replaced with `<redacted>` before being logged, covering three forms that previously leaked: the full URL of an outbound request, the Display of a `reqwest::Error` (which splices the URL in), and the first few characters of a non-JSON response body.
 
-- **移除主包未使用的 `ctr` 依赖**。唯一使用点是 `crates/libresoda` 的
-  `src/soda/crypto.rs`，而那个 crate 自己已经声明了 `ctr`——主包这一行是汽水实现
-  搬走时留下的。
+- **Removed the unused `ctr` dependency from the main package.** Its only use is `crates/libresoda`'s `src/soda/crypto.rs`, and that crate already declares `ctr` — the line in the main package was left over from when the Soda implementation was moved out.
 
 ## [0.5.0] - 2026-10-03
 
-### 新增
+### Added
 
-- **汽水音乐（Soda Music）音源**，数据面由
-  [libresoda](https://github.com/sodahub-org/libresoda) 提供——汽水官方客户端
-  [SodaM](https://github.com/sodahub-org/sodam) 用的同一套库。登录、搜索、取流、
-  解密、歌词全部委托给它，行为与官方客户端一致，上游修好的问题也跟着修好。
-  新增 git 依赖 `libresoda`（未发布到 crates.io，按 `rev` 锁定）。
+- **Soda Music source**, with its data plane provided by
+  [libresoda](https://github.com/sodahub-org/libresoda) — the same library the official Soda client
+  [SodaM](https://github.com/sodahub-org/sodam) uses. Login, search, stream resolution, decryption, and lyrics are all delegated to it, so behavior matches the official client and upstream fixes carry over. Adds the git dependency `libresoda` (not published to crates.io, pinned by `rev`).
 
-  与前三个音源有两处根本不同：
+  Two fundamental differences from the other three sources:
 
-  - **直连公网**（`api.qishui.com`），本机不跑接口服务。`bootstrap` 不为它准备
-    服务，首次使用不需要 `--api-start`，也不需要 Node.js；
-  - **下发的音频是加密的**（MP4/CENC）。取链要把「整首下载 → 解密 → 落盘」做完
-    才能交给播放器，所以汽水的歌**不能边下边播**，首播要多等一个完整下载。
-    这是加密方案决定的，不是实现取巧。
+  - **Direct public-network connection** (`api.qishui.com`); no local service. `bootstrap` prepares nothing for it, first use needs no `--api-start`, and no Node.js;
+  - **The delivered audio is encrypted** (MP4/CENC). Resolving a stream must complete "download the whole track → decrypt → write to disk" before handing it to the player, so Soda tracks **cannot be played while downloading**; first play waits for one full download. This is dictated by the encryption scheme, not an implementation shortcut.
 
-- **VIP 整曲与无损开箱即用**。汽水的取流分两层：Web 端点只回 30/60 秒试听，
-  App 端点要应用级签名才回整曲，且**缺签名时返回「HTTP 200 + 空 body」**——
-  现象很像「会员没生效」，其实差的是签名。默认启用上游 SodaM 内置的公共签名
-  服务，所以不必抓包、不必自己部署；也可用 `[sources.sodam_app].signer_url`
-  换自建的，或填 `none` 显式关掉（只留试听与免费曲目）。
+- **VIP full tracks and lossless work out of the box.** Soda's stream resolution has two layers: the Web endpoint returns only 30/60 s previews, and the App endpoint requires an app-level signature to return the full track, and **without a signature it returns "HTTP 200 + empty body"** — which looks a lot like "membership not active" but is actually a missing signature. The upstream SodaM built-in public signing service is enabled by default, so no packet capture or self-hosting is needed; you can also use `[sources.sodam_app].signer_url` to switch to your own, or set it to `none` to disable explicitly (leaving only previews and free tracks).
 
-- **扫码登录**（按 `L` 选汽水）。走 libresoda 内置的 **CDP 签名页**，直控本机
-  Chromium，**不需要 Node**——这也是必须借道浏览器的原因：护照接口要
-  `a_bogus`，且确认后的登录态只存在于那个浏览器会话的 cookie jar 里。
-  登录成功后拿到的是**会话 cookie**，写进 `[sources.sodam].cookie`。
+- **QR login** (press `L` and select Soda). It uses libresoda's built-in **CDP signing page** and drives the local Chromium directly, **no Node** — which is also why it must go through a browser: the passport interface needs `a_bogus`, and the confirmed login state exists only in that browser session's cookie jar. On success you get a **session cookie**, written to `[sources.sodam].cookie`.
 
-  设备指纹**可以留空**（走签名服务时签名侧有自己的设备身份），
-  手填 cookie 也仍然可用。
+  The device fingerprint **may be left empty** (when going through the signing service, the signer has its own device identity), and manually filling in a cookie still works.
 
-- **降级如实说明**：取流按「先完整、后音质」择优——要无损但只拿得到 128k
-  整曲时选整曲，并在状态栏说明「实际音质 standard」；只有试听时明确提示
-  是否因为会员。不会出现界面标着 flac、耳朵听 128k 却查不出原因的情况。
+- **Downgrade reported honestly**: stream resolution picks by "completeness first, then quality" — if you want lossless but only a 128k full track is available, it picks the full track and states "actual quality standard" in the status bar; preview-only tracks explicitly state whether membership is the reason. There is no case where the UI shows flac while 128k plays with no way to find out why.
 
-- **CLI**：`--sodam-cookie` / `--sodam-device-id` / `--sodam-iid` /
+- **CLI**: `--sodam-cookie` / `--sodam-device-id` / `--sodam-iid` /
   `--sodam-signer-url` / `--sodam-signer-token` / `--sodam-x-helios` /
-  `--sodam-x-medusa`，各带 `SODAM_*` / `QISHUI_SIGNER_*` 环境变量。
-  逐项覆盖而非整块替换（只想临时补一项不会把已配的抹掉），空串与纯空白按
-  「没传」处理。
+  `--sodam-x-medusa`, each with `SODAM_*` / `QISHUI_SIGNER_*` environment variables.
+  Per-item override rather than whole-block replacement (so temporarily adding one item doesn't wipe the configured ones); empty and whitespace-only strings are treated as "not passed".
 
-- **下载器支持 `file://`**：汽水解密后的产物走本地复制进音频缓存，于是缓存
-  查找、容量回收、下一首预取全都照常生效，不必为汽水单开一套缓存逻辑。
+- **The downloader supports `file://`**: Soda's decrypted output is copied locally into the audio cache, so cache lookup, capacity reclamation, and next-track prefetch all work as usual, with no separate cache logic for Soda.
 
-### 变更
+### Changed
 
-- `SourceKind` 新增 `Sodam`；`SourceSet` 新增 `sodam` 与 `sodam_app` 两个字段。
-  老配置里没有这些段时走 `Default`，`normalize()` 补上公网地址并**置为启用**。
-- 音源管理页对直连公网的音源标注「公网直连」，避免用户以为本机该有个服务在跑。
-- 启动脚本（bash 与 PowerShell 两份）新增 `sodam` 分支并引入 `NEEDS_SERVICE`：
-  选中汽水时整套探活/拉起/等就绪全部跳过。此前它落进兜底分支，会去拉
-  KuGouMusicApi 并提示「未运行，正在启动…（端口 3000）」。
-- **云端歌单、歌单详情、用户资料、会员状态全部接上**。此前它们对汽水一律返回
-  「不支持」，表现出来就是「登录上了但所有功能都没生效」。真因是分派层没接，
-  不是汽水没有这些接口。现在都走 libresoda 的公开实现（get_user_playlists /
-  get_playlist_songs / fetch_pc_me / is_vip_account），Capability 的
-  catalog / cloud / vip 一并改为真。
+- `SourceKind` gains `Sodam`; `SourceSet` gains the `sodam` and `sodam_app` fields. Old configs without these sections fall back to `Default`, and `normalize()` fills in the public-network address and **sets it enabled**.
+- The source management page labels public-network sources as "direct public connection", so users don't think a local service should be running.
+- The launcher scripts (both bash and PowerShell) gain a `sodam` branch and introduce `NEEDS_SERVICE`: when Soda is selected, the whole probe/launch/wait-ready flow is skipped. Previously it fell into the fallback branch and tried to launch KuGouMusicApi with "not running, starting… (port 3000)".
+- **Cloud playlists, playlist detail, user profile, and membership status are all wired up.** Previously they returned "unsupported" for Soda, so the symptom was "logged in but nothing works". The real cause was that the dispatch layer wasn't wired, not that Soda lacks these interfaces. They now go through libresoda's public implementations (get_user_playlists / get_playlist_songs / fetch_pc_me / is_vip_account), and Capability's catalog / cloud / vip are all set to true.
 
-  **三项确实没有对应接口，保持明确报错**（核过 libresoda 代码，不是漏接）：
-  歌单广场（get_recommended_playlists 与 get_playlist_categories 在上游就是
-  Unsupported，只有歌单搜索可用）、歌手列表（只有按 id 查，没有热门歌手列表）、
-  排行榜（无等价端点）。报错文案里写清了原因与替代做法。
+  **Three features genuinely have no corresponding endpoint and keep explicit errors** (verified against the libresoda code, not omissions): playlist plaza (get_recommended_playlists and get_playlist_categories are `Unsupported` upstream, only playlist search works), artist list (only lookup by id, no hot-artists list), and rankings (no equivalent endpoint). The error text states the reason and the alternative.
 
-### 修复
+### Fixed
 
-- **保存配置不再覆盖汽水的登录凭据**。`Config::save()` 第一件事是调
-  \`sync_active_source()\`，而它会用顶层 \`cookie\`（酷狗的地盘，汽水时恒为
-  \`None\`）覆盖该音源档案里的 cookie——于是「登录成功 → 立刻保存 → 被覆盖」，
-  表现出来就是**登录上了、一重启却说没登录**，配置文件里也找不到 cookie 这个键。
-  汽水现在不参与镜像；酷狗/网易云的老路径保持原样，两侧都有测试钉住。
+- **Saving the config no longer overwrites Soda's login credentials.** `Config::save()`'s first action is to call `sync_active_source()`, which overwrites the source profile's cookie with the top-level `cookie` (Kugou's territory, always `None` for Soda) — so "login succeeds → save immediately → overwritten", showing up as **logged in, but after a restart it says not logged in**, and the cookie key is nowhere in the config file. Soda now does not take part in the mirroring; the old Kugou/NetEase paths are unchanged, and both sides have pinning tests.
 
-- **登录后立刻查会员/资料不再失败**。\`apply_server_cookie\` 此前写的是
-  \`self.client_for(Sodam)\` 再 \`set_cookie\`，但音源已激活时 \`client_for\`
-  返回的是 \`self.api.clone()\`——改副本对 \`self.api\` 毫无影响，于是紧接着的
-  请求仍用没有 cookie 的客户端，服务端回 \`1000016 登录状态已失效\`。
+- **Querying membership/profile right after login no longer fails.** `apply_server_cookie` used to write to `self.client_for(Sodam)` and then `set_cookie`, but when the source is already active, `client_for` returns `self.api.clone()` — modifying the copy has no effect on `self.api`, so the following request still used a client without the cookie and the server replied `1000016 login state expired`.
 
-- **二维码改成纯黑白**。样式原本用 ANSI 调色板的 0/15 号（\`Color::Black\` /
-  \`Color::White\`），而**终端可以重映射它们**（kitty 就允许改 ANSI 0-15），
-  于是「黑模块」可能被画成灰色，二维码很淡、手机扫不上——看着像终端或字体的
-  问题，其实是能修的。改成写死的 RGB 纯黑纯白。二维码只有两个颜色，
-  而这两个必须是纯黑纯白，不跟随主题是有意的。
+- **The QR code is now pure black and white.** The style used ANSI palette entries 0/15 (`Color::Black` / `Color::White`), and **terminals can remap those** (kitty allows changing ANSI 0-15), so "black modules" could be drawn gray, making the QR code faint and unscannable — looking like a terminal or font problem when it was actually fixable. Changed to hardcoded pure-black and pure-white RGB. The QR code has only two colors, and those two must be pure black and white; not following the theme is intentional.
 
-- **二维码压小**。模块数只由「内容长度 + 纠错级别」决定，内容（服务端下发的
-  扫码地址）改不了，所以降纠错级别是唯一杠杆：M（~15%）→ L（~7%），
-  屏幕显示是理想条件，L 足够；静默区同时从 2 个模块收到 1 个。
-  实测汽水（193 字符地址）从约 59×30 降到 51×26。汽水的地址是酷狗的 5 倍长，
-  所以它本来就比酷狗大——不是渲染问题。
+- **QR code shrunk.** The module count is determined only by "content length + error-correction level", and the content (the scan address issued by the server) can't be changed, so lowering the error-correction level is the only lever: M (~15%) → L (~7%); screen display is the ideal condition, so L suffices; the quiet zone is also reduced from 2 modules to 1. Measured: Soda (193-character address) drops from about 59×30 to 51×26. Soda's address is 5× longer than Kugou's, so it was always bigger than Kugou's — not a rendering problem.
 
-- **二维码按终端尺寸自适应**。汽水的扫码地址比酷狗长得多，编出来的二维码
-  版本更高，而弹窗尺寸是由二维码算出来的——于是它撑满了整个终端。
-  二维码不能缩放（行数由内容长度决定，再密就只能扭曲比例、扫不出来），
-  所以改成判断装不装得下：装不下就不画，换成一句写明「需要约 N 列 × M 行」的
-  提示，并给出两条出路（放大终端重试，或直接手填 cookie）。
-  画一个被裁掉的二维码比不画更糟——那个码扫不出来，用户只会反复试。
+- **QR code adapts to terminal size.** Soda's scan address is much longer than Kugou's, producing a higher QR version, and the dialog size is computed from the QR code — so it filled the whole terminal. A QR code can't be scaled (its row count is determined by content length; denser would just distort the aspect ratio and make it unscannable), so it now checks whether it fits: if not, it draws nothing and shows a message stating "about N columns × M rows needed", with two ways out (enlarge the terminal and retry, or fill in the cookie by hand). Drawing a clipped QR code is worse than none — that code can't be scanned and the user just retries.
 
-- `ApiClient` 新增 `cookie()` 取值方法。音源模块需要用它拿登录态重建自己的
-  客户端——「有哪些身份凭据」是通用信息，不该被 HTTP 层藏起来。
+- `ApiClient` gains a `cookie()` accessor. The source modules need it to rebuild their own client with the login state — "what identity credentials exist" is general information and shouldn't be hidden by the HTTP layer.
 
 ## [0.4.8] - 2026-10-02
 
-### 文档
+### Docs
 
-本轮**只动文档**，代码与 0.4.7 完全一致。之所以要单独发一版，是因为 crates.io 页面渲染的是
-**包里那份 README**——文档改了不发版，页面就不会变。
+This round **only touches docs**; the code is identical to 0.4.7. A separate release is needed because the crates.io page renders **the README in the package** — change the docs without a release and the page doesn't change.
 
-- **全部文档按「这份是给谁看的」重写了一遍**，合计 1844 → 1473 行：
+- **All docs rewritten around "who is this for"**, totaling 1844 → 1473 lines:
 
-  - README 192 → 162：删掉塞进来的实现论证（Windows 为何不用 CMake / NASM、边下边播的
-    4 MiB 窗口、内存测量方法），安装一节改成 cargo 优先；
-  - INSTALL 590 → 425：删掉与程序内建功能重复的 fish workflow（探活 / 拉起 / 退出收摊现在
-    程序自己做，只差一个 `git pull`），压缩 Windows 与 macOS 段的解释性段落；
-  - CONFIGURATION 318 → 256：配置项里展开的「为什么」压成一句，论证留给 DESIGN.md；
-  - USER_GUIDE 335 → 230：合并界面布局、桌面集成两节的重复描述；
-  - FAQ：补上 0.4.7 引入的四个真实问题——找不到 node、首次启动为什么要等半分钟、服务起不来
-    / 端口被占、内存只涨不落怎么查；
-  - CONTRIBUTING：代码结构树补齐（`bootstrap.rs` / `mpris.rs` / `tray.rs` / `window.rs` /
-    `source/` 等），发版一节补上 crates.io 这一步（`scripts/release` 不含它）；
-  - `DESIGN.md` 与 `MAINTENANCE.md` **刻意不动**：它们是「为什么」的归档，详细本身就是价值。
+  - README 192 → 162: removed the implementation arguments that had been stuffed in (why Windows doesn't use CMake / NASM, the 4 MiB window of streaming playback, the memory measurement method); the install section now leads with cargo;
+  - INSTALL 590 → 425: removed the fish workflow that duplicated built-in features (probe / launch / teardown are now done by the program itself, all that's missing is a `git pull`), and compressed the explanatory passages in the Windows and macOS sections;
+  - CONFIGURATION 318 → 256: the expanded "why" under each config item is compressed to one sentence, with the argument left to DESIGN.md;
+  - USER_GUIDE 335 → 230: merged the duplicated descriptions in the interface layout and desktop integration sections;
+  - FAQ: added four real questions introduced by 0.4.7 — node not found, why the first start waits half a minute, the service won't start / port taken, and how to investigate memory that only grows;
+  - CONTRIBUTING: completed the code structure tree (`bootstrap.rs` / `mpris.rs` / `tray.rs` / `window.rs` / `source/` etc.), and added the crates.io step to the release section (`scripts/release` does not include it);
+  - `DESIGN.md` and `MAINTENANCE.md` are **deliberately untouched**: they are the archive of "why", and their detail is the value.
 
-- 文档里的事实做了一轮机器核验：43 条内部链接与锚点、14 处 `kugou-tui --xxx` 用法（对齐
-  `cli.rs` 的 17 个长参数）、全部 `KUGOU_*` 环境变量与配置项名，均与代码一致。
+- The facts in the docs got a round of machine verification: 43 internal links and anchors, 14 `kugou-tui --xxx` usages (aligned with `cli.rs`'s 17 long flags), and all `KUGOU_*` environment variables and config key names match the code.
 
 ## [0.4.7] - 2026-10-02
 
-### 新增
+### Added
 
-- **接口服务的自动引导**（新增 `src/bootstrap.rs`）。第一次启动会自己把 KuGouMusicApi
-  准备好并拉起，用户全程只敲 `kugou-tui`——这也是本版本发布到 crates.io 的前提。
+- **Automatic bootstrap of the interface service** (new `src/bootstrap.rs`). The first start prepares and launches KuGouMusicApi itself; the user only types `kugou-tui` throughout — this is also the prerequisite for publishing to crates.io.
 
-  为什么需要它：`cargo install` 只放一个二进制到 `~/.cargo/bin`，既不带那个 Node.js
-  服务，也没有 post-install 钩子可用。此前「装完了却不能用」：用户还得自己 clone
-  仓库、装依赖、按平台起两个实例。
+  Why it's needed: `cargo install` only places one binary in `~/.cargo/bin`, carrying neither that Node.js service nor a usable post-install hook. Previously "installed but unusable": users had to clone the repo, install dependencies, and start two instances per platform themselves.
 
-  - **探活优先**：端口上已经有服务就**直接复用，退出时不碰它**——它可能是用户自己
-    起的，也可能是另一个 kugou-tui 实例起的；
-  - 缺服务时才动手，按「配置的 `api_dir` → `/usr/share/kugou-tui/api/kugou`（发行包）
-    → `~/.local/share/kugou-tui/api/kugou` → `~/KuGouMusicApi`」找，都没有才下载钉住
-    的提交（`a5a9801`）并 `npm install --omit=dev`；
-  - 只为**当前音源**拉起一个实例；切到另一个平台时补起（只 spawn，不再走安装——界面
-    已经画在屏幕上，被 npm 冻住几十秒不可接受）；
-  - **退出版图**：自己拉起的实例随退出停止，不留常驻 node。`--api-start` 是显式要求
-    常驻的例外，用 `--api-stop` 停；
-  - 安装带文件锁，两个实例同时首次启动不会往同一个 `node_modules` 里写。
+  - **Probe first**: if a service is already on the port, **reuse it and leave it alone on exit** — it may be one the user started, or one another kugou-tui instance started;
+  - Only when the service is missing does it act, searching "configured `api_dir` → `/usr/share/kugou-tui/api/kugou` (distro package) → `~/.local/share/kugou-tui/api/kugou` → `~/KuGouMusicApi`", and only if all are absent does it download the pinned commit (`a5a9801`) and `npm install --omit=dev`;
+  - Launches one instance only for the **current source**; when switching to another platform it starts that one too (spawn only, no install — the UI is already drawn and being frozen by npm for tens of seconds is unacceptable);
+  - **Exit cleanup**: an instance it started stops on exit, leaving no resident node. `--api-start` is the explicit exception that requests residency, stopped with `--api-stop`;
+  - Installation is file-locked, so two instances first-starting at once don't write into the same `node_modules`.
 
-  **前提没变：机器上要有 Node.js（>= 12）**。没有 node 时程序会直接说清楚并退出——
-  Rust 这一侧变不出 Node 运行时。
+  **The prerequisite is unchanged: Node.js (>= 12) must be on the machine.** Without node the program says so clearly and exits — the Rust side can't conjure a Node runtime.
 
-- 配置项 `api_auto_start`（默认 `true`）与 `api_dir`；命令行 `--no-api-start` /
-  `--api-start` / `--api-stop`；环境变量 `KUGOU_API_AUTO_START` / `KUGOU_API_DIR`。
-- crate 发布到 [crates.io](https://crates.io/crates/kugou-tui)，`cargo install kugou-tui`
-  可用。
+- Config items `api_auto_start` (default `true`) and `api_dir`; command line `--no-api-start` / `--api-start` / `--api-stop`; environment variables `KUGOU_API_AUTO_START` / `KUGOU_API_DIR`.
+- The crate is published to [crates.io](https://crates.io/crates/kugou-tui), so `cargo install kugou-tui` works.
 
-### 修复
+### Fixed
 
-- **「按 Space 或 Enter 重试」此前是一句空头支票**（`app/update.rs` 的
-  `StreamInterrupted` 分支）。边下边播第二次断流后只打一句提示就返回，没有任何按键
-  接得住它：
+- **"Press Space or Enter to retry" was an empty promise** (the `StreamInterrupted` branch in `app/update.rs`). After the second stream interruption during streaming playback it just printed a notice and returned, and no key could catch it:
 
-  - `Space` 走 `toggle_playback()` 的普通起播路径，位置取 `state.resume`（会话恢复用
-    的，此时为 `None`），于是**从头播**，不是从断点续；
-  - `Enter` 走 `activate()`，按 `(Tab, Focus)` 分派成「播放选中歌曲 / 打开歌单」，与
-    断掉的那首无关；
-  - 而且 `start_playback` 只在 hash **不同**时才清 `stream_retried`，手动重播同一首
-    之后额度不恢复，再断流连自动兜底都没有。
+  - `Space` went through `toggle_playback()`'s normal start path, taking the position from `state.resume` (used for session restore, `None` here), so it **played from the start**, not from the break point;
+  - `Enter` went through `activate()`, dispatched by `(Tab, Focus)` into "play the selected track / open a playlist", unrelated to the interrupted track;
+  - And `start_playback` only cleared `stream_retried` when the hash was **different**, so after manually replaying the same track the allowance wasn't restored, and another interruption had no automatic fallback at all.
 
-  现在断流后把断点存进 `pending_stream_retry`，按 `Space` 从那里续播并归还自动兜底
-  额度；提示改为「按 Space 从断点重试」——`Enter` 的语义是「进入下一层 / 播放选中项」，
-  保持可预测，不再写进提示。换歌与主动停止都会作废这个断点。
+  Now, after an interruption the break point is stored in `pending_stream_retry`, pressing `Space` resumes from there and restores the automatic fallback allowance, and the notice becomes "press Space to retry from the break point" — `Enter`'s semantics are "enter the next level / play the selected item", kept predictable, no longer written into the notice. Changing tracks and stopping intentionally both invalidate this break point.
 
-- **流式播放「自然播完」时没有取消下载任务**（`app/update.rs` 的 `TrackFinished`）。
-  那里只写了 `active_stream = None`——放下的只是我们手里那一份 `Arc`，后台下载任务
-  自己还持有一份，会继续把整首往内存窗口和 `.part` 文件里灌。切歌与主动停止两条路
-  都调了 `cancel()`，唯独最常见的一条漏了。同时把「归还空闲页」的 `malloc_trim`
-  挪到这里：它原先只在下一首 `load` 时执行，那时新的分配已经发生，刚还回去的页又
-  被占回来了。
+- **Streaming playback did not cancel the download task on "natural finish"** (`TrackFinished` in `app/update.rs`). It only wrote `active_stream = None` — releasing only the `Arc` in our hand, while the background download task held another copy and kept pouring the whole track into the memory window and the `.part` file. Track change and intentional stop both called `cancel()`; only the most common path missed it. Also moved the "return free pages" `malloc_trim` here: it previously ran only on the next track's `load`, by which point the new allocations had already happened and the just-returned pages were taken back.
 
-- **「听久了内存只涨不落」的根因：mmap 阈值定得太高**（`src/main.rs`）。原先钉在
-  1 MiB，而酷狗封面解码出来是 300–900 KB 的位图，**正好落在它下面**，于是走 brk
-  arena——free 只把页还给 arena，RSS 停在峰值，要等下一次 `malloc_trim` 才可能收回，
-  这就是「没有泄漏但收不回」的来源。改成 256 KiB 后这些块直接走 mmap，`free` 即
-  `munmap`，无条件还内核，不再依赖 trim 的时机。低于阈值的分配行为不变。
+- **The root cause of "memory only grows the longer you listen": the mmap threshold was set too high** (`src/main.rs`). It was pinned at 1 MiB, while Kugou covers decode to 300–900 KB bitmaps, **falling right below it**, so they went through the brk arena — `free` only returns pages to the arena, RSS stays at the peak, and it may only be reclaimed at the next `malloc_trim`, which is the source of "no leak but can't reclaim". Changed to 256 KiB so these blocks go through mmap directly and `free` becomes `munmap`, unconditionally returning to the kernel, no longer dependent on trim timing. Allocations below the threshold are unchanged.
 
-  依据是 `audio::engine::tests::mmap_threshold_effect_probe` 的对照数据（分配尺寸
-  随轮次变化，两段都不 trim）：1 MiB 下 20 轮 +192 → +332 KiB 单调上升后停住，
-  256 KiB 下恒定 +0。**固定尺寸测不出这个**——那总能复用同一批 chunk。
+  The basis is the comparison data from `audio::engine::tests::mmap_threshold_effect_probe` (allocation sizes vary by round, neither segment trims): at 1 MiB, 20 rounds rise +192 → +332 KiB monotonically then stop; at 256 KiB it is a constant +0. **A fixed size can't measure this** — it can always reuse the same batch of chunks.
 
-- **MPRIS 推送不稳**（`src/mpris.rs`、`src/app/desktop.rs`）。三个独立原因，都不是
-  「信号没发出去」那么简单：
+- **MPRIS pushes were unstable** (`src/mpris.rs`, `src/app/desktop.rs`). Three independent causes, none as simple as "the signal wasn't sent":
 
-  1. **`mpris:trackid` 是一个固定路径**（`/org/kugou_tui/Track/1`）。MPRIS 规范把
-     它定义为「曲目的唯一身份」，客户端（DMS / Quickshell / 各类状态栏）靠它判断
-     「换歌了没有」。固定不变的结果是：元数据明明变了，按规范实现的客户端仍认为还是
-     同一首，标题和封面停在上一首。现在按曲目 hash 派生（脏字符过滤后不足则回落到
-     占位路径）。
-  2. **信号发送失败被 `let _` 吞掉、连接断了也不重连**。session bus 重启
-     （`systemctl --user restart dbus`、注销再登录）或总线名被别的实例抢走之后，旧连接
-     上的信号会一直发不出去，而 `connected` 仍是 true——主线程照旧往里写快照，桌面
-     组件却永远停在最后一帧，日志里一句都看不到。现在连续三次发不出去即判定连接已坏，
-     置 `connected = false` 并在 5 秒后重连。托盘侧早有「每 5 秒对账自愈」，MPRIS 侧
-     一直没有，这次补上。
-  3. **位置走了 `PropertiesChanged`**。规范里 `Position` 是不通过它通知的属性：它一直
-     在动，客户端按自己的时钟推算，只有跳变（seek）才需要被告知——那走 `Seeked`。
-     早先发的是 `position_changed`，属于非标准用法；严格些的客户端收到不该出现的属性
-     变化反而会重置本地推算，进度条就跳。现在跳变发 `Seeked`，并把它从
-     `PropertiesChanged` 的判据里摘掉。
+  1. **`mpris:trackid` was a fixed path** (`/org/kugou_tui/Track/1`). The MPRIS spec defines it as "the track's unique identity", and clients (DMS / Quickshell / various status bars) use it to decide "did the track change". Being fixed meant that even when the metadata clearly changed, a spec-compliant client still thought it was the same track, and the title and cover stayed on the previous one. It is now derived from the track hash (with dirty characters filtered out, falling back to a placeholder path if too short).
+  2. **Signal send failures were swallowed by `let _`, and a broken connection wasn't reconnected.** After a session bus restart (`systemctl --user restart dbus`, logout and back in) or the bus name being taken by another instance, signals on the old connection keep failing to send while `connected` is still true — the main thread keeps writing snapshots in, but the desktop component stays on the last frame forever, with nothing in the logs. Now three consecutive send failures mark the connection broken, set `connected = false`, and reconnect after 5 seconds. The tray side already had "reconcile and self-heal every 5 seconds"; the MPRIS side never did, and this adds it.
+  3. **Position went through `PropertiesChanged`.** In the spec `Position` is a property not notified through it: it moves constantly and clients infer it by their own clock; only a jump (seek) needs to be reported — that goes through `Seeked`. What was sent earlier was `position_changed`, a non-standard usage; stricter clients receiving an unexpected property change would reset their local inference and the progress bar would jump. Now jumps send `Seeked`, and it is removed from the `PropertiesChanged` criteria.
 
-### 诊断
+### Diagnosis
 
-- `KUGOU_TUI_MEM_TRACE=1` 每 5 秒把 RSS 连同「可能累积的东西」的计数写进日志
-  （`logger::rss_kib` + `App::tick`）：流式下载登记表、播放队列长度、命中区容量、
-  当前曲目。光有 RSS 只能看出涨了，这些计数才能把范围收到某一条路径上。
-  与 `KUGOU_TUI_DEBUG` 分开：后者会连按键日志一起打开，反而把趋势淹掉。
-- 三个 `#[ignore]` 探针，各自打印每轮 RSS：
-  `ui::views::player::tests::cover_swap_rss_probe`（反复换封面）、
-  `audio::engine::tests::file_swap_rss_probe`（反复装载本地文件）、
-  `audio::engine::tests::mixed_alloc_rss_probe` 与
-  `mmap_threshold_effect_probe`（尺寸混杂的分配 vs. 阈值对照）。
-  跑法：`cargo test --release <名字> -- --ignored --nocapture`。
+- `KUGOU_TUI_MEM_TRACE=1` writes RSS to the log every 5 seconds along with counts of "things that might accumulate" (`logger::rss_kib` + `App::tick`): the streaming download registry, the playback queue length, the hit-zone capacity, the current track. RSS alone only shows growth; these counts narrow it to a specific path. Kept separate from `KUGOU_TUI_DEBUG`: the latter also turns on key logging, which drowns out the trend.
+- Three `#[ignore]` probes, each printing per-round RSS:
+  `ui::views::player::tests::cover_swap_rss_probe` (repeatedly swapping covers),
+  `audio::engine::tests::file_swap_rss_probe` (repeatedly loading local files),
+  `audio::engine::tests::mixed_alloc_rss_probe` and
+  `mmap_threshold_effect_probe` (mixed-size allocations vs. threshold comparison).
+  Run with: `cargo test --release <name> -- --ignored --nocapture`.
 
-  实测：换封面 40 轮、装载 30 轮、混合分配 40 轮，RSS 都在头两轮内落定后**恒定**
-  ——换歌路径没有对象泄漏，剩下的就是「页还没还」。
+  Measured: 40 rounds of cover swapping, 30 rounds of loading, 40 rounds of mixed allocation — RSS settles within the first two rounds and is then **constant** — the track-change path has no object leak, and the rest is "pages not yet returned".
 
 ## [0.4.6] - 2026-09-29
 
-### 新增
+### Added
 
-- **托盘从「注册一次就完」补成完整集成**（`src/tray.rs`，+660 行）。此前托盘的
-  菜单、滚轮、状态反馈都没有，且注册失败一次就永久放弃：
+- **The tray went from "register once and done" to a full integration** (`src/tray.rs`, +660 lines). Previously the tray had no menu, wheel, or status feedback, and gave up permanently after one registration failure:
 
-  - **滚轮控制**：图标上垂直滚动调音量、水平滚动快进 / 快退。只看 delta 的
-    **符号**不按格数缩放——宿主给的绝对值不统一（有的 ±1、有的 ±120），
-    按格数放会时大时小。端到端测试补了三条派发断言（上滚 / 下滚 / 右滚），
-    零位移断言不派发。
-  - **菜单加「退出」**：走正常退出流程（先保存配置与播放进度），与按 `q` 等价。
-    此前最小化（niri）之后只能回终端按 `q`。
-  - **播放 / 暂停、静音两项跟着状态切换措辞**：播放中显示「暂停」，其余显示
-    「播放」；静音时显示「取消静音」。标签变化时菜单 revision +1 并广播
-    `LayoutUpdated` + `ItemsPropertiesUpdated`（只含这两个 id）——两个信号都发
-    是因为有的宿主只认其中一个。菜单补了分隔线把播放控制与其余项隔开。
-  - **图标跟随播放状态**：暂停 / 停止时换**调暗**的同一张图（只压 alpha 到
-    45%，颜色不变），并广播 `NewIcon`。加载态算「即将出声」，跟播放一样用亮图
-    ——缓冲的两秒图标灰掉看起来反而像卡住。两套图启动时一次预渲染。
-  - **注册自愈**：托盘线程从「注册失败即放弃」改为每 5 秒对一次
-    `RegisteredStatusNotifierItems` 账，名单里没有自己就（重新）注册。修掉的
-    场景：状态栏比播放器后启动、面板重启把 watcher 换了一轮——此前托盘要重启
-    播放器才会出现，现在最多 5 秒自动补上。日志只在连接状态**翻转**时记一条，
-    面板一直不在时不会每 5 秒刷一行 WARN。
-  - **图标改版**：单音符（符头 + 符干）改为连尾双音符（♫），源
-    `assets/tray.svg` 重画，内嵌 PNG 从 64px 提到 256px；预渲染尺寸从 22 / 64
-    两档扩到 16 / 22 / 24 / 32 / 48 / 64 六档——少给尺寸会让某些宿主拿最接近
-    的一档硬放大。
+  - **Wheel control**: vertical scrolling on the icon adjusts volume, horizontal seeks forward / backward. Only the delta's **sign** is used, not scaled by notches — hosts give inconsistent absolute values (some ±1, some ±120), so scaling by notches would be sometimes large and sometimes small. Three end-to-end dispatch assertions were added (scroll up / down / right), and a zero-displacement assertion that nothing is dispatched.
+  - **Added "Quit" to the menu**: goes through the normal exit flow (saving config and playback position first), equivalent to pressing `q`. Previously after minimizing (niri) the only way back was to press `q` in the terminal.
+  - **Play / pause and mute switch wording with state**: "Pause" while playing, "Play" otherwise; "Unmute" when muted. On a label change the menu revision increments and broadcasts `LayoutUpdated` + `ItemsPropertiesUpdated` (containing only these two ids) — both signals are sent because some hosts recognize only one. A separator was added to the menu to split playback control from the rest.
+  - **The icon follows playback state**: paused / stopped switches to a **dimmed** version of the same image (alpha lowered to 45%, color unchanged) and broadcasts `NewIcon`. The loading state counts as "about to make sound" and uses the bright image like playing — a grayed icon during the two seconds of buffering actually looks stuck. Both images are pre-rendered once at startup.
+  - **Registration self-heals**: the tray thread went from "give up on registration failure" to reconciling against `RegisteredStatusNotifierItems` every 5 seconds and (re-)registering when it's not in the list. Scenarios fixed: the status bar starting after the player, or a panel restart swapping the watcher — previously the tray only appeared after restarting the player, now it appears within 5 seconds at most. The log records only when the connection state **flips**, so a panel that stays away doesn't spam a WARN line every 5 seconds.
+  - **Icon redesign**: a single note (notehead + stem) changed to a beamed double note (♫), the source `assets/tray.svg` redrawn, the embedded PNG raised from 64 px to 256 px; pre-rendered sizes expanded from 22 / 64 to 16 / 22 / 24 / 32 / 48 / 64 — giving fewer sizes makes some hosts hard-scale from the nearest one.
 
-- **首页 / 可视化页的 ↑/↓ 切歌**（`app/update.rs` 的 `MoveUp` / `MoveDown` 分派）。
-  这两页没有可导航的列表，方向键原本是空的；它们又正是「看着歌词 / 频谱听歌」的
-  页面，切歌是最高频操作，所以划给播放控制。**有列表的页面（搜索 / 歌单 / 歌手 /
-  榜单 / 云端 / 队列 / 设置）不改**——抢走列表导航等于抢走核心交互。
-  `CHEATSHEET` 补一条说明，漏项能被既有的键位表测试查出来。
+- **↑/↓ track change on the home / visualizer pages** (`MoveUp` / `MoveDown` dispatch in `app/update.rs`). These two pages have no navigable list, so the arrow keys were empty; they are exactly the "watch lyrics / spectrum while listening" pages, where track change is the most frequent operation, so it was assigned to playback control. **Pages with lists (search / playlists / artists / rankings / cloud / queue / settings) are unchanged** — taking over list navigation is taking over the core interaction. `CHEATSHEET` got an explanatory entry, and a missed item is caught by the existing keybinding-table test.
 
-- **`audio/resample.rs`：hi-res 母版的抗混叠重采样**。rodio 的
-  `SampleRateConverter` 是**无滤波的线性插值**（模块自述 "simple linear
-  interpolation"）：44.1k → 48k 这类上采样没问题，但 88.2 / 96 / 176.4 kHz 的
-  母版在 48 kHz 设备上是**降采样**——超过 24 kHz 的内容会原样镜像折叠回可听
-  频带，高频还多一层约 1 dB 滚降。现在用 rubato 的 sinc 重采样器
-  (`sinc_len=256`、`f_cutoff=0.95`、BlackmanHarris2 窗) 替掉线性插值，并把
-  `sample_rate()` 声明成设备率，rodio 侧的转换随之成为恒等变换。上采样不包装
-  （无混叠问题，不值得付 sinc 的 CPU）。**已知边界**：结尾会多出至多一块
-  （约 30 ms）的静音尾——`FixedIn` 的输入块定长，最后一块不足的部分以零填充。
-  听不见，也不影响进度条（时长声明来自内层源）。
+- **`audio/resample.rs`: anti-aliasing resampling of hi-res masters**. rodio's `SampleRateConverter` is **unfiltered linear interpolation** (the module's own words: "simple linear interpolation"): upsampling like 44.1k → 48k is fine, but 88.2 / 96 / 176.4 kHz masters are **downsampling** on a 48 kHz device — content above 24 kHz mirrors and folds back into the audible band, and the highs get an extra ~1 dB rolloff. It now uses rubato's sinc resampler (`sinc_len=256`, `f_cutoff=0.95`, BlackmanHarris2 window) instead of linear interpolation, and declares `sample_rate()` as the device rate, so rodio's conversion becomes an identity transform. Upsampling is not wrapped (no aliasing issue; not worth the sinc CPU). **Known boundary**: the end gets up to one extra block (~30 ms) of silence — `FixedIn`'s input blocks are fixed-length and the last partial block is zero-filled. Inaudible, and it doesn't affect the progress bar (the duration declaration comes from the inner source).
 
-### 修复
+### Fixed
 
-- **进度条只能往前拖，回拖 / 快退 / 歌词回跳全部失效**（`audio/engine.rs::reload_at`
-  与 `audio/streaming.rs::reader_from_start`）。病根在解码器：symphonia 的 FLAC
-  解码器对**没有 SEEKTABLE** 的文件不能向后跳，demuxer 直接返回 `ForwardOnly`。
-  酷狗给的无损档实测正是这种（`ffprobe` 读不到 seektable，原始包扫描也找不到
-  `SEEKTABLE` 块），于是「往后拖」全灭。修复是绕开它：用同一份数据源**重建
-  解码器**，新解码器从文件头出发，跳到任意位置都是前向跳，必然成功（代价一次
-  几十毫秒重建）。流式缓冲那一路额外要求「归零读指针的克隆」——原缓冲的读指针
-  停在老解码器的位置上，直接克隆会让新解码器从半截开始，「跳回前面」又退回
-  向后 seek。
+- **The progress bar could only be dragged forward; dragging back / seeking back / jumping back from lyrics all failed** (`audio/engine.rs::reload_at` and `audio/streaming.rs::reader_from_start`). The root cause is in the decoder: symphonia's FLAC decoder cannot seek backward in a file **without a SEEKTABLE**, and the demuxer returns `ForwardOnly`. The lossless files Kugou provides are measured to be exactly this (ffprobe finds no seektable, and a raw packet scan finds no `SEEKTABLE` block), so "dragging forward" died entirely. The fix bypasses it: **rebuild the decoder** from the same data source; the new decoder starts from the file head, so seeking to any position is a forward seek and necessarily succeeds (at the cost of one rebuild of tens of milliseconds). The streaming buffer path additionally requires "a clone that zeroes the read pointer" — the original buffer's read pointer sits at the old decoder's position, and cloning directly would make the new decoder start mid-way, and "jump back to earlier" would fall back to a backward seek.
 
-- **hi-res 母版听着比别的客户端「毛」**——上一条重采样修的就是它。《起风了》
-  是 88.2 kHz 母版，`highpass=24k` 后仍有约 −50 dB 的真实内容，而它与
-  moekoemusic 拿到的文件**音频 MD5 完全相同**——两边听感不同的病根在降采样
-  那一步，不在文件选择。抗混叠有测试钉住：30 kHz 音降采样后必须被压到 −26 dB
-  以下，带内 1 kHz 保幅，seek 后滤波器状态必须重建。
+- **hi-res masters sound "grittier" than other clients** — the resampling above fixes it. 《起风了》 is an 88.2 kHz master, and after `highpass=24k` there is still about −50 dB of real content, and its file has an **identical audio MD5** to what moekoemusic gets — the differing sound is in the downsampling step, not in file selection. Anti-aliasing is pinned by tests: a 30 kHz tone must be suppressed below −26 dB after downsampling, an in-band 1 kHz tone keeps its amplitude, and the filter state must be rebuilt after seek.
 
-- **点歌词总是跳到隔壁句**（`ui/views/player.rs` 的命中区登记）。`hit_zones`
-  的 row 是**屏幕行号**，`index_at` 先做 `row - rect.top()`；正文明细区上沿取错
-  时，整块命中区会整体偏一行或几行。修复把命中区锚定在**这一帧真正渲染的
-  布局**上：行数取「可视行」与「内容剩余行」的小者，上沿取内容区顶 + 实际
-  内边距（`offset < first_display` 时内容整体下移的行数）。
-  **实测**（pty 直驱 harness，绕开 tmux 对鼠标上报的改写）：暂停后同一屏幕行
-  连点 3 次，`time_ms` 三次全同；`row - top + first == display` 对 21 行全部
-  自洽；相邻屏幕行的 `display` 步长恒为 1；从上往下 `ms` 单调不减。
+- **Clicking a lyric always jumped to the neighboring line** (the hit-zone registration in `ui/views/player.rs`). `hit_zones`'s row is a **screen row**, and `index_at` first does `row - rect.top()`; when the top of the lyric content area was taken wrong, the whole hit zone shifted by one or more rows. The fix anchors the hit zone to the **layout actually rendered this frame**: the row count is the smaller of "visible rows" and "remaining content rows", and the top is the content area top + the actual inner padding (the number of rows the content is shifted down when `offset < first_display`).
+  **Measured** (a pty-driven harness, bypassing tmux's rewriting of mouse reports): after pausing, clicking the same screen row 3 times gives the same `time_ms` all three times; `row - top + first == display` is self-consistent for all 21 rows; the `display` step between adjacent screen rows is always 1; `ms` is monotonically non-decreasing from top to bottom.
 
-- **`flac` 档给 mp4 容器时的静默串味**（`api/catalog.rs`）。mp4 是另一条转码
-  链路的产物，母版和 flac / mp3 不同，播它就是「听着和别的客户端不一样」。
-  参照 moekoemusic 的 `extName == 'mp4'` 判定，遇到 mp4 候选落到下一档。
+- **Silent flavor-mixing when the `flac` tier delivers an mp4 container** (`api/catalog.rs`). mp4 is the output of another transcoding chain, with a different master from flac / mp3, so playing it "sounds different from other clients". Following moekoemusic's `extName == 'mp4'` check, an mp4 candidate falls through to the next tier.
 
-- **内存破百 MB 不回落**（`src/main.rs` + `audio/engine.rs`）。glibc 默认用
-  **动态** mmap 阈值：一次大分配（封面解码、下载缓冲）会把阈值抬到它的大小，
-  之后同样大的块改从 arena 里切——`free` 只把页还进 arena，RSS 从此抬到历史
-  峰值不回落。现在把阈值钉死在 1 MiB，大块一律 mmap（`munmap` 即还 OS），
-  并在换歌这个天然边界调一次 `malloc_trim`。仅 Unix（Windows 的 MSVC 堆本来
-  就积极归还）。
+- **Memory over 100 MB that doesn't fall back** (`src/main.rs` + `audio/engine.rs`). glibc uses a **dynamic** mmap threshold by default: one large allocation (cover decode, download buffer) raises the threshold to its size, and afterwards equally large blocks are carved from the arena — `free` only returns pages to the arena, and RSS stays at the historical peak thereafter. The threshold is now pinned at 1 MiB, so large blocks always go through mmap (`munmap` returns to the OS), and `malloc_trim` is called once at the natural boundary of track change. Unix only (the Windows MSVC heap already returns aggressively).
 
-- **托盘相关文档与实现不符**：`tray.rs` 模块注释与 `USER_GUIDE` 还写着
-  「不实现菜单」「watcher 只在进程启动 / 退出时同步」，与已实现 DBusMenu 与
-  5 秒自愈的代码不符，已改成分键位说明（左键 / 滚轮 / 右键 / 中键 / 图标状态）。
+- **Tray-related docs didn't match the implementation**: `tray.rs`'s module comment and `USER_GUIDE` still said "no menu implemented" and "the watcher is only synced on process start / exit", contradicting the code that implements DBusMenu and 5-second self-healing; changed to a per-key description (left click / wheel / right click / middle click / icon state).
 
-### 测试
+### Tests
 
-本版新增 6 条守护测试，都钉在**移除修复就会立刻失败**的那一层：
+This release adds 6 guard tests, each pinned to the layer where **removing the fix makes it fail immediately**:
 
-| 测试 | 钉住的层 |
+| Test | Layer pinned |
 |---|---|
-| `late_song_clicks_do_not_shift_by_the_offset_gap` | 末屏 `offset` 撞上 `max_offset` 后的点击错位 |
-| `hit_zone_top_anchors_to_the_first_content_row` | 命中区上沿 = 内容首行 |
-| `rebuilt_decoder_can_seek_backward_from_the_start` | 重建解码器能前向跳到较早位置并继续出样本 |
-| `backward_seek_lands_near_the_target_not_at_the_start` | 归零读指针后能跳到目标而非回到开头 |
-| `ultrasonic_tone_is_suppressed_not_aliased` | 30 kHz 被抗混叠压到 −26 dB 以下 |
-| `in_band_tone_passes_with_its_amplitude` | 带内 1 kHz 保幅（±1.5 dB） |
+| `late_song_clicks_do_not_shift_by_the_offset_gap` | Click misalignment after the last screen's `offset` hits `max_offset` |
+| `hit_zone_top_anchors_to_the_first_content_row` | Hit-zone top = first content row |
+| `rebuilt_decoder_can_seek_backward_from_the_start` | A rebuilt decoder can forward-seek to an earlier position and keep producing samples |
+| `backward_seek_lands_near_the_target_not_at_the_start` | After zeroing the read pointer, it can jump to the target rather than back to the start |
+| `ultrasonic_tone_is_suppressed_not_aliased` | 30 kHz suppressed below −26 dB by anti-aliasing |
+| `in_band_tone_passes_with_its_amplitude` | In-band 1 kHz keeps its amplitude (±1.5 dB) |
 
-总计 366 → 370 条（另有 1 条 ignored）。
+Total 366 → 370 (plus 1 ignored).
 
 ## [0.4.5] - 2026-09-29
 
-### 修复
+### Fixed
 
-- **多声道无损文件只播了前两个声道，听到的不是这首歌**（新增 `audio/downmix.rs`，
-  接线在 `audio/engine.rs::build_decoder`）。触发场景：播《东京不太热 (DJ Z新豪版)》
-  （`hash=1953202D07B954E785CA5249E1A64B3C`）时，`flac` 档给的是一个 **4.0 声道**的
-  FLAC，而那个文件里**歌在后两个声道**：
+- **Multichannel lossless files played only the first two channels; what you heard wasn't the song** (new `audio/downmix.rs`, wired in `audio/engine.rs::build_decoder`). Trigger: playing 《东京不太热 (DJ Z新豪版)》 (`hash=1953202D07B954E785CA5249E1A64B3C`), the `flac` tier delivers a **4.0-channel** FLAC, and in that file **the song is in the last two channels**:
 
-  | 声道 | dBFS | 与同曲 128 kbps mp3 的相关性 |
+  | Channel | dBFS | Correlation with the same song's 128 kbps mp3 |
   |---|---|---|
   | ch0 FL | −21.0 | +0.35 |
   | ch1 FR | −20.6 | +0.39 |
   | ch2 BL | −11.7 | **+0.90** |
   | ch3 BR | −12.8 | **+0.89** |
 
-  四路全混与 mp3 的相关性是 +0.999——也就是说前两个声道根本不是这首歌。而 rodio 0.22
-  的 `ChannelCountConverter` 降声道时是「保留每帧前 N 个样本、其余直接丢弃」
-  （`conversions/channels.rs`），于是我们实际只播了 FL/FR，用户听到的是另一段音频，
-  表现成「音频版本和其他客户端（moekoemusic）不一致」。
+  The correlation of all four mixed with the mp3 is +0.999 — that is, the first two channels aren't this song at all. And rodio 0.22's `ChannelCountConverter` downmixes by "keep the first N samples of each frame, discard the rest" (`conversions/channels.rs`), so we actually played only FL/FR, and the user heard a different piece of audio, showing up as "the audio version differs from other clients (moekoemusic)".
 
-  现在 `build_decoder` 的两个出口统一过 `downmix::to_stereo`：偶数索引声道 → L、
-  奇数索引声道 → R 取平均，`channels()` 恒为 2（这样 rodio 侧那次转换就成了空操作）。
-  单声道/立体声是恒等变换，不影响绝大多数歌。**实测**（走 `build_decoder` 的真实解码
-  路径、素材是酷狗给的原始文件）：下混结果与正确立体声混音的相关系数从 +0.35 升到
-  **+0.998 / +0.997**。两条守护测试：`decoded_multichannel_files_are_downmixed_to_stereo`
-  用自造的 4 声道 WAV 走一遍 `build_decoder` 并断言 `channels() <= 2`；
-  `the_mixer_hears_the_song_only_because_we_downmixed_first` 用 `rodio::mixer::mixer`
-  搭一个不依赖声卡的 mixer，**对照**证明「源直接进 mixer 会只剩前两个声道」、
-  「先下混再进则听到的是正确混音」——它钉的正是 bug 发生的那一层。两条都是
-  把那层拆掉就立刻失败。
+  Now both exits of `build_decoder` go through `downmix::to_stereo`: even-indexed channels → L, odd-indexed channels → R averaged, with `channels()` always 2 (so rodio's conversion becomes a no-op). Mono/stereo is an identity transform and affects the vast majority of songs not at all. **Measured** (through `build_decoder`'s real decode path, on the original files Kugou provides): the correlation of the downmixed result with the correct stereo mix rises from +0.35 to **+0.998 / +0.997**. Two guard tests: `decoded_multichannel_files_are_downmixed_to_stereo` runs a self-made 4-channel WAV through `build_decoder` and asserts `channels() <= 2`; `the_mixer_hears_the_song_only_because_we_downmixed_first` builds a soundcard-independent mixer with `rodio::mixer::mixer` and **compares**, proving "the source going straight into the mixer leaves only the first two channels" and "downmixing first lets the correct mix through" — it pins exactly the layer where the bug occurs. Both fail immediately when that layer is removed.
 
-  **取平均而不是求和**：求和更贴近这个文件的立体声母版（mp3 的 L ≈ `FL+BL`），
-  但只要两个声道相关就会削顶；平均天然安全（`|out| <= max|in|`）。代价是这一对
-  声道互不相关（+0.03）而母版是它们的和，所以下混后整体比参照低约 **6 dB**。
-  音量用户可调，削顶是实打实的失真——取轻的那一头。详见 `downmix` 模块顶部。
+  **Averaging rather than summing**: summing is closer to this file's stereo master (the mp3's L ≈ `FL+BL`), but any correlation between the two channels causes clipping; averaging is inherently safe (`|out| <= max|in|`). The cost is that this pair of channels is uncorrelated (+0.03) while the master is their sum, so the downmix is about **6 dB** lower overall than the reference. Volume is user-adjustable, clipping is real distortion — take the lighter end. See the top of the `downmix` module for details.
 
-  顺带修掉同根因的另一处：`LevelMeter` 只采第 0 声道做电平/频谱，4 声道输入时
-  **频谱可视化画的也是错的音频**；下混层放在它前面之后自动跟着对。
+  Fixed the same root cause elsewhere: `LevelMeter` sampled only channel 0 for level/spectrum, so with 4-channel input **the spectrum visualizer drew the wrong audio too**; putting the downmix layer in front of it fixes that automatically.
 
-- **`/song/url` 的静默降级没人管**（`api/catalog.rs::downgrade_note`）。实测请求
-  `quality=flac` 对没有无损档的歌会回 `status=1` + `extName=mp3` + `bitRate=128000`
-  （3,749,296 B），而 `extract_stream_url` 只检查 `status`——界面会一直标着 flac、
-  实际放 128 kbps，且永远查不出来。现在按「容器 + 码率」粗排一次档位，实际比要的低时
-  给出人话（`音质已降级：请求 flac，服务端实际给了 128 kbps mp3`），经
-  `StreamUrl::reason` 透到界面。`super` 与蝰蛇系列不参与比较（接口层没有可对照的
-  容器/码率），mp3 不报码率时也不下结论——宁可不说，也不能误报；`mp4` / `m4a`（AAC）
-  按「有损」参与比较，所以「设了无损却拿到 AAC」也会报出来（这一条的依据是参照实现
-  moekoemusic 专门挡 `extName == 'mp4'`，不是我们自己实测到的）。
-  回归测试 `song_stream_url_reports_a_silent_downgrade` 用手写服务端端到端跑一遍。
+- **`/song/url`'s silent downgrade was unhandled** (`api/catalog.rs::downgrade_note`). Measured: requesting `quality=flac` for a song with no lossless tier returns `status=1` + `extName=mp3` + `bitRate=128000` (3,749,296 B), while `extract_stream_url` only checks `status` — the UI would keep showing flac while playing 128 kbps, with no way to find out. It now ranks tiers roughly by "container + bitrate" and, when the actual is lower than requested, gives a plain message (`quality downgraded: requested flac, server actually gave 128 kbps mp3`), passed to the UI via `StreamUrl::reason`. `super` and the viper series don't take part in the comparison (the interface layer has no comparable container/bitrate), and when mp3 gives no bitrate no conclusion is drawn — better to say nothing than to misreport; `mp4` / `m4a` (AAC) take part in the comparison as "lossy", so "set lossless but got AAC" is also reported (this item's basis is the reference implementation moekoemusic specifically blocking `extName == 'mp4'`, not our own measurement).
+  Regression test `song_stream_url_reports_a_silent_downgrade` runs it end-to-end with a hand-written server.
 
-- **降级提示此前会被整个吞掉**（`app/update.rs`）。`StreamUrl::reason` 只在 `is_trial`
-  分支被读，于是「蝰蛇音质没权限、已降到标准档」这条提示从来没显示过。现在非试听分支
-  也会把它作为普通提示报出来。
+- **The downgrade notice was previously swallowed entirely** (`app/update.rs`). `StreamUrl::reason` was read only in the `is_trial` branch, so the notice "viper quality has no permission, downgraded to standard" was never shown. Now the non-preview branch also reports it as an ordinary notice.
 
-- **候选音质可能跨版本串味**（`api/catalog.rs::parse_quality_candidates`）。取链时会把手上的
-  多个 hash 逗号拼接一起发给 `/privilege/lite`，响应因此是**多个 item**；老写法把全部 item
-  的 variant 混进一张表、谁先出现谁赢，而服务端并不保证 item 顺序——某个 hash 一旦指向同曲的
-  **另一个版本**（不同版 / 翻唱 / 铃声），就可能挑到别的版本的文件。现在分两遍：先只认与主 item
-  （按 `hash` 认出）同一个 `album_audio_id` 的条目，拿不到才放开到全部——第二遍必须留着，
-  那是「搜索给的 hash 已下架、歌在 `audio_info` 的另一个 hash 下」那条修复路径。
-  回归测试三条：`candidates_never_borrow_a_quality_from_another_version`、
-  `candidates_identify_the_primary_item_by_hash_not_by_position`、
-  `candidates_fall_back_to_other_hashes_when_the_primary_has_nothing`。
+- **Candidate qualities could mix across versions** (`api/catalog.rs::parse_quality_candidates`). When resolving a stream, the multiple hashes on hand are comma-joined and sent to `/privilege/lite`, so the response has **multiple items**; the old code mixed all items' variants into one table with first-come-first-wins, and the server doesn't guarantee item order — once a hash points to **another version** of the same song (different edition / cover / ringtone), it could pick the wrong version's file. It now works in two passes: first accept only entries with the same `album_audio_id` as the primary item (identified by `hash`), and only if none are found broaden to all — the second pass must stay, as it is the fix path for "the hash from search was delisted and the song is under another hash in `audio_info`".
+  Three regression tests: `candidates_never_borrow_a_quality_from_another_version`,
+  `candidates_identify_the_primary_item_by_hash_not_by_position`,
+  `candidates_fall_back_to_other_hashes_when_the_primary_has_nothing`.
 
-### 变更
+### Changed
 
-- **打包脚本在普通 CI 里也跑一遍**（`ci.yml` 的 Linux 与 macOS 两栏）。发行包此前只在
-  `release.yml` 里产出，而那是 tag 推出去之后——**tag 不可撤销**，打包脚本要是漏了文件，
-  只能发一个坏包或者认了。这个项目真踩过：0.3.7 那版漏了三个脚本，非 Arch 用户解压后
-  配不起接口服务。现在任意一次 push 都会打一次发行包并传成 artifact，问题在推 tag 之前
-  就暴露；macOS 那一栏顺带覆盖 `make-release-tarball` 里为 BSD 工具（`readlink`、
-  `shasum`）写的分支——那几段只有在那边才会被执行到。
+- **The packaging script also runs in the regular CI** (the Linux and macOS columns of `ci.yml`). The release tarball was previously produced only in `release.yml`, which runs after the tag is pushed — and **a tag can't be undone**, so if the packaging script missed a file the only options were shipping a broken package or accepting it. This project really hit that: the 0.3.7 release missed three scripts, and non-Arch users couldn't set up the interface service after extracting. Now any push builds a release tarball and uploads it as an artifact, so problems surface before the tag is pushed; the macOS column additionally covers the branches written in `make-release-tarball` for BSD tools (`readlink`, `shasum`) — those only execute there.
 
-- `api/model.rs` 里「`audio_id` 拆成两个字段分别存，取链接时挨个试」那段注释与实现不符
-  （只有一个字段，且 `/song/url` 刻意不发送任何 album 系 id）。改成如实描述，
-  免得下一个人照着注释去找一段不存在的重试逻辑。
+- A comment in `api/model.rs` about "splitting `audio_id` into two fields stored separately and trying them one by one when resolving the stream" didn't match the implementation (there is only one field, and `/song/url` deliberately sends no album-family id). Rewritten to describe reality, so the next person doesn't go looking for a retry logic that doesn't exist.
 
 ## [0.4.4] - 2026-09-28
 
-### 变更
+### Changed
 
-- **拆 `app/update.rs`**（4728 → 4144 行）。它是全程序唯一改状态的地方，长期膨胀到
-  4700 行，改一处要读的上下文太多。已切出三块，**全部是纯搬移、逻辑零改动**，
-  搬完归一化可见性后逐字节比对过（`search` / `playback` 的 `diff` 输出为空，
-  `navigation` 只差一个尾随空行）：
+- **Split `app/update.rs`** (4728 → 4144 lines). It is the only place the whole program changes state, and it had grown to 4700 lines, so changing one thing required reading too much context. Three blocks were split out, **all pure moves with zero logic change**, compared byte-for-byte after normalizing visibility (the `diff` output for `search` / `playback` is empty, and `navigation` differs by one trailing blank line):
 
-  | 新模块 | 行数 | 内容 |
+  | New module | Lines | Contents |
   |---|---|---|
-  | `app/navigation.rs` | 237 | 切页、焦点、选择移动、`go_back` |
-  | `app/playback.rs` | 320 | 起播 / 切歌 / 进度 / 音量 / 静音 / 歌词偏移 |
-  | `app/search.rs` | 142 | 提交搜索、加载更多（含 `SEARCH_MAX_PAGES`） |
+  | `app/navigation.rs` | 237 | Page switching, focus, selection movement, `go_back` |
+  | `app/playback.rs` | 320 | Start / track change / progress / volume / mute / lyric offset |
+  | `app/search.rs` | 142 | Submit search, load more (including `SEARCH_MAX_PAGES`) |
 
-  **边界比标题重要。**「播放控制」那一节里挤着五个不属于播放的方法，没有跟着搬走：
-  `sync_mpris` / `sync_tray`（由 `tick()` 每拍调的输出适配器）、`toggle_window`
-  （niri 的 compositor IPC）、`client_for`（全文件共用的客户端构造辅助，6 处调用）、
-  `request_lyric`（结果处理在 `handle_loaded` 里，请求与处理同文件才省上下文）。
-  判断标准是「调用方在哪、结果谁处理」，不是「它写在哪个标题下面」——宁可模块小一点、
-  边界干净，也不为了凑体积把邻居一起搬走。
+  **Boundaries matter more than headings.** The "playback control" section held five methods that aren't about playback, and they did not move with it:
+  `sync_mpris` / `sync_tray` (output adapters called by `tick()` every beat), `toggle_window`
+  (niri's compositor IPC), `client_for` (a client-construction helper shared by the whole file, 6 call sites),
+  `request_lyric` (its result handling is in `handle_loaded`, and keeping request and handling in the same file saves context).
+  The criterion is "where the callers are, who handles the result", not "which heading it sits under" — better a smaller module with a clean boundary than dragging neighbors along to pad the size.
 
-  **切完之后复查依赖，发现并修掉了一处叶子互依。** `activate()`（Enter 键按
-  `(Tab, Focus)` 决定该搜索、该播放还是该打开）原本跟着「导航」切进了
-  `navigation.rs`，于是 navigation 去调 search 与 playback，`navigation ↔ search`
-  变成双向。`startup_search()`（`--search` 的启动胶水）同理让 search 反向依赖
-  navigation。两者搬回 `update.rs` 的分派层后，依赖变成星形：`update` 单向调用三个
-  模块，`navigation` / `playback` 只回调 `update`，`search` 谁也不调。
-  **搬移等价不代表边界正确——边界错了不报错，只是把耦合从文件里挪到模块之间**，
-  所以每切完一块都要重新数一遍模块调用图。
+  **After the split, reviewing dependencies found and fixed a leaf-to-leaf cycle.** `activate()` (the Enter key deciding by `(Tab, Focus)` whether to search, play, or open) was originally moved with "navigation" into `navigation.rs`, so navigation called search and playback, making `navigation ↔ search` bidirectional. `startup_search()` (the `--search` startup glue) likewise made search depend back on navigation. After both moved back to `update.rs`'s dispatch layer, the dependencies became a star: `update` calls the three modules one-way, `navigation` / `playback` only call back to `update`, and `search` calls no one.
+  **A move being equivalent doesn't mean the boundary is correct — a wrong boundary doesn't error, it just moves the coupling from within a file to between modules**, so after each block is split, recount the module call graph.
 
-  代价说明白：Rust 的方法私有性按「写 `impl` 块的模块」算，不是按类型——方法搬走后
-  另一侧调用会报 `E0624`，得逐个改成 `pub(super)`，且**两个方向都要改**。
-  这是拆分的固有成本，不是设计缺陷；编译器会把清单列全。
+  The cost stated plainly: Rust's method privacy is per "module where the `impl` block is written", not per type — after a method moves, calls from the other side report `E0624` and must each be changed to `pub(super)`, and **both directions need changing**. This is the inherent cost of splitting, not a design flaw; the compiler lists them all.
 
-  剩下的 `cloud.rs` / `settings.rs` 按同样粒度继续，一次一块。规矩与进度记在
-  `docs/MAINTENANCE.md` §1.8。
+  The remaining `cloud.rs` / `settings.rs` continue at the same granularity, one block at a time. The rules and progress are in `docs/MAINTENANCE.md` §1.8.
 
-- **拆 `app/update.rs` 第二轮**（4144 → 2958 行），把上面说的 `cloud.rs` /
-  `settings.rs` 切完了，另加一块 `desktop.rs`。同样是纯搬移：116 个函数逐个比对
-  签名 + 函数体（空白折叠、`pub(super)` 归一化）**全部逐字符存活**，唯一被删的
-  是一份重复的实现（见下面「修复」第一条）。
+- **Split `app/update.rs` round two** (4144 → 2958 lines), finishing the `cloud.rs` / `settings.rs` mentioned above plus a `desktop.rs` block. Again pure moves: 116 functions compared one by one by signature + body (whitespace collapsed, `pub(super)` normalized) **all surviving byte-for-byte**, the only deletion being one duplicated implementation (see the first item under "Fixed" below).
 
-  | 新模块 | 行数 | 内容 |
+  | New module | Lines | Contents |
   |---|---|---|
-  | `app/cloud.rs` | 937 | 登录 / 音源切换 / VIP / 云端歌单 / 账号资料 |
-  | `app/settings.rs` | 728 | 设置页：候选值 + 显示文本 + 三个交互 |
-  | `app/desktop.rs` | 106 | MPRIS / 系统托盘 / 窗口控制 |
-  | `app/navigation.rs` | 275 | 另接了数字键与 `v` 键打开音源页 |
+  | `app/cloud.rs` | 937 | Login / source switch / VIP / cloud playlists / account profile |
+  | `app/settings.rs` | 728 | Settings page: candidate values + display text + three interactions |
+  | `app/desktop.rs` | 106 | MPRIS / system tray / window control |
+  | `app/navigation.rs` | 275 | Additionally took on number keys and the `v` key opening the source page |
 
-  依赖仍是**星形**且没有互相调用的一对：`update` 指向 6 个模块，模块只回指
-  `update` / `mod`。一处**故意接受**的跨模块调用：`navigation` 调 `settings`
-  的 `move_settings`（设置页的光标移动归设置页，理由记在 MAINTENANCE §1.8）。
+  Dependencies are still a **star** with no mutually-calling pair: `update` points to 6 modules, and modules only point back to `update` / `mod`. One **deliberately accepted** cross-module call: `navigation` calls `settings`'s `move_settings` (settings-page cursor movement belongs to the settings page; the reason is in MAINTENANCE §1.8).
 
-- **修四处错位的文档注释**。它们的共同症状是「一段注释紧贴在另一个函数的文档
-  前面，被 Rust 并成同一个文档」，于是 `fetch_user_info` 的文档开头讲的是 VIP、
-  `handle_digit` 的文档开头讲的是 `v` 键切换音源、`open_quality_picker` 的开头
-  讲的是下载歌曲、`describe_song` 的开头讲的是音质标签。四处各自归位。
+- **Fixed four misplaced doc comments.** Their common symptom is "a comment sits right before another function's doc and is merged into the same doc by Rust", so `fetch_user_info`'s doc opened talking about VIP, `handle_digit`'s about the `v` key switching sources, `open_quality_picker`'s about downloading songs, and `describe_song`'s about quality labels. All four returned to their places.
 
-### 新增
+### Added
 
-- **`scripts/kugou-api.ps1`：Windows 侧的服务管理**（start / stop / restart / status / logs）。
-  此前 Windows 上没有任何办法停掉后台的 node：启动器只做「探活 → 没起就拉起」，
-  想停只能去任务管理器按名字猜着杀，而猜错会把别的 Node 项目一起带走。现在两个平台
-  共用同一套 PID 文件约定（`<PID> <端口>`，空格分隔，落在缓存目录的 `api-<实例>.pid`），
-  启动器拉起的实例，`kugou-api.ps1 stop` 停得掉。
+- **`scripts/kugou-api.ps1`: service management on the Windows side** (start / stop / restart / status / logs). Previously there was no way to stop the background node on Windows: the launcher only did "probe → launch if not running", so stopping meant guessing by name in Task Manager, and guessing wrong took other Node projects down with it. Now both platforms share the same PID-file convention (`<PID> <port>`, space-separated, in the cache directory as `api-<instance>.pid`), so an instance the launcher started can be stopped by `kugou-api.ps1 stop`.
 
-- **`kugou-api logs`**：直接跟随日志（`logs lite` 跟概念版）。此前要看日志得先
-  `status` 拿到路径，再自己 `tail`。
+- **`kugou-api logs`**: follows the log directly (`logs lite` follows the concept edition). Previously you had to `status` to get the path and then `tail` yourself.
 
-- **启动器补 `--dry-run`**（bash 侧；PowerShell 侧本来就有）：只打印解析到的配置、
-  音源、实例、探测地址、服务目录与二进制路径，不启动任何东西。排查「为什么它说服务
-  没起」时不用再靠猜。
+- **The launcher gained `--dry-run`** (bash side; the PowerShell side already had it): prints only the parsed config, source, instance, probe address, service directory, and binary path, and starts nothing. Debugging "why does it say the service isn't running" no longer needs guessing.
 
-- 启动器在拉起服务前**先查 `node`**。此前没装 Node 要等满 20 秒，再从日志尾部那句
-  `ENOENT` 里推断原因。
+- The launcher now **checks for `node`** before launching the service. Previously, without Node installed you waited the full 20 seconds and then inferred the cause from the `ENOENT` at the end of the log.
 
-- 启动器在 macOS 上会检查二进制的 `com.apple.quarantine` 属性，并给出 `xattr -d`
-  那条命令。签名缺失的二进制被 Gatekeeper 杀掉时终端只显示 `Killed: 9`，看起来像
-  程序自己的 bug。
+- On macOS the launcher checks the binary's `com.apple.quarantine` attribute and gives the `xattr -d` command. When a signature-less binary is killed by Gatekeeper the terminal only shows `Killed: 9`, which looks like the program's own bug.
 
-### 修复
+### Fixed
 
-- **网易云的歌单 / 榜单会被静默截断**（`source/netease.rs`）。`playlist_tracks_all`
-  用「不满一页 ⇒ 结束」停翻页，而 `song_from_json` 会过滤条目（缺 hash、字段类型
-  不对），一页 500 条剩 499 条是常事——只要撞上，整张表就停在那儿，用户看到的是
-  一个短了一截的歌单，没有任何报错。酷狗那侧（`api/catalog.rs::collect_all_pages`）
-  一直是「只有空页才停」，两侧判据不一致本身就是这个 bug 的信号。
+- **NetEase playlists / rankings were silently truncated** (`source/netease.rs`). `playlist_tracks_all` stopped paging on "less than a full page ⇒ done", while `song_from_json` filters entries (missing hash, wrong field type), so 500 entries leaving 499 is common — and once hit, the whole table stops there, and the user sees a shortened playlist with no error. The Kugou side (`api/catalog.rs::collect_all_pages`) has always been "stop only on an empty page"; the inconsistency between the two criteria was itself the signal of this bug.
 
-  改成「只有空页才停」，判据抽成自由函数 `should_continue_paging`（`got > 0`，
-  签名里**故意没有** `page_size`——页大小一旦进判据，截断就回来了）。
+  Changed to "stop only on an empty page", with the criterion extracted into the free function `should_continue_paging` (`got > 0`, and the signature **deliberately has no** `page_size` — once page size enters the criterion, truncation returns).
 
-  改它的前提是「越界 offset 到底返回空数组还是报错」，这个之前没法实测（本机只跑着
-  酷狗概念版服务 `:3001`）。这次起了 NeteaseCloudMusicApi（`:3002`）实测：
-  `/playlist/track/all?id=3778678&limit=500&offset=500`（该歌单 200 首）与
-  `offset=999999` 都返回 `{"songs":[],"privileges":[],"code":200}`——**空数组、
-  不报错**，也没有把 offset 夹回末页返回重复内容。所以多打一次越界请求是安全的，
-  代价只是整表加载末尾多一个请求（这个接口一次就要几秒）。
+  The premise for changing it was "does an out-of-range offset return an empty array or an error", which couldn't be measured before (only the Kugou concept-edition service `:3001` was running locally). This time NeteaseCloudMusicApi was started (`:3002`) and measured:
+  `/playlist/track/all?id=3778678&limit=500&offset=500` (that playlist has 200 songs) and
+  `offset=999999` both return `{"songs":[],"privileges":[],"code":200}` — **an empty array, not an error**, and it doesn't clamp the offset back to the last page and return duplicate content. So one extra out-of-range request is safe, at the cost of one extra request at the end of a full-table load (this interface takes several seconds per call).
 
-  回归测试 `paging_stops_only_on_an_empty_page`：把判据退回 `got >= 500` 时它当场
-  失败（`1 条也该继续翻页`）。另有一条 `an_out_of_range_page_is_empty_and_
-  therefore_ends_paging` 把上面那段**服务端行为的实测结论**钉住——哪天上游改成
-  越界就报非 200，`playlist_tracks_all` 的 `?` 会把错误抛上去，那时要重新实测
-  并改这条。`docs/MAINTENANCE.md` §5、§7 同步。
+  Regression test `paging_stops_only_on_an_empty_page`: it fails on the spot when the criterion is reverted to `got >= 500` (`1 条也该继续翻页`). Another, `an_out_of_range_page_is_empty_and_
+  therefore_ends_paging`, pins the **measured server-behavior conclusion** above — if upstream one day returns a non-200 for out-of-range, `playlist_tracks_all`'s `?` will throw the error up, and this test must be re-measured and changed then. `docs/MAINTENANCE.md` §5, §7 synced.
 
-- **`;`（打开歌曲右键菜单）改不了键位**（`keymap.rs`）。它在 `resolve_normal` 与
-  `CHEATSHEET` 里都有，帮助面板也照常显示，`docs/CONFIGURATION.md` 的键位表里也列着，
-  但 `action_from_name` 的动作名表里**没有 `context_menu`**——用户照文档写
-  `context_menu = "m"` 时得到的是「未知动作 context_menu」，而那个动作明明存在。
-  `CONTRIBUTING.md` 把「记得同步这张表」写成了一条人工步骤，这次就漏了。
+- **`;` (open the track context menu) couldn't be rebound** (`keymap.rs`). It appears in both `resolve_normal` and `CHEATSHEET`, the help panel shows it, and `docs/CONFIGURATION.md`'s keybinding table lists it, but the action-name table in `action_from_name` **lacks `context_menu`** — a user writing `context_menu = "m"` per the docs got "unknown action context_menu", while the action clearly exists. `CONTRIBUTING.md` lists "remember to sync this table" as a manual step, and this time it was missed.
 
-  动作名表从 `match` 改成了 `const REBINDABLE`（数据），于是「帮助面板里有默认键位的
-  动作，是否都能绑上名字」可以机械检查：新测试拿 `CHEATSHEET` 与 `REBINDABLE`
-  两份名单对着数，去掉修复后它会精确报出
-  `「;」（打开歌曲右键菜单）→ ContextMenu`。另加一条表本身的自检
-  （不重名、全小写 snake_case）——重名会让 `find` 静默取到先出现的那条。
-  `docs/CONFIGURATION.md` 的清单与计数（60 → 61）一并跟上。
+  The action-name table changed from a `match` to `const REBINDABLE` (data), so "do all actions with a default key in the help panel have a bindable name" can be checked mechanically: a new test compares the `CHEATSHEET` and `REBINDABLE` lists, and removing the fix makes it report precisely `「;」（打开歌曲右键菜单）→ ContextMenu`. A self-check of the table itself (no duplicate names, all lowercase snake_case) was added too — duplicates make `find` silently take the first. `docs/CONFIGURATION.md`'s list and count (60 → 61) follow.
 
-- **歌词译文会整体串位一行**（`api/lyric.rs`）。`parse_lrc` 与 `attach_translations`
-  各写了一份「这一行算不算歌词」的判据：前者看 `parse_krc_words` 的返回值是否为空，
-  后者看 `clean_krc_markup` 是否为空。两者在「`<` 之前有字、却没有配对的 `>`」的行上
-  分道扬镳（歌里写了 `宝贝<3` 这种），于是 `attach_translations` 算出来的行号多出一项，
-  **之后每一行的译文都往后串一位**——用户看到「译文和原文对不上」，没有任何报错。
+- **Lyric translations shifted by one line overall** (`api/lyric.rs`). `parse_lrc` and `attach_translations` each wrote their own "does this line count as a lyric" criterion: the former checks whether `parse_krc_words`'s return is empty, the latter whether `clean_krc_markup` is empty. They diverge on a line with "text before `<` but no matching `>`" (like the `宝贝<3` written in the song), so `attach_translations` computed a line number one too high, and **every subsequent line's translation shifted by one** — the user sees "the translation doesn't match the original", with no error.
 
-  现在判据只有一处（`has_lyric_content`），两边都调它。顺带修掉同源的另一个症状：
-  `parse_krc_words` 只输出标记**之后**的字符，所以那一行以前会被整行丢掉——
-  `<` 之前的字也是正文，现在收下（这些字没有逐字时间，于是退回整行高亮）。
+  The criterion now exists in only one place (`has_lyric_content`), and both call it. The same root cause's other symptom is fixed too: `parse_krc_words` only emitted the characters **after** the marker, so that line was previously dropped entirely — text before `<` is also body text and is now kept (those characters have no per-character timing, so it falls back to whole-line highlight).
 
-  回归测试 `a_line_with_a_stray_angle_bracket_does_not_shift_translations`：
-  去掉修复后它会报 `left: [译1, 译2, 译3]` / `right: [译1, 译3, 译4]`。
+  Regression test `a_line_with_a_stray_angle_bracket_does_not_shift_translations`:
+  removing the fix makes it report `left: [译1, 译2, 译3]` / `right: [译1, 译3, 译4]`.
 
-- **封面「不变形」模式在一段退化区域上会 panic**（`ui/views/player.rs::fit_box`）。
-  `rows.clamp(1, area.height)` 在 `area.height == 0` 时直接炸——`Ord::clamp` 要求
-  `min <= max`，而 `clamp(1, 0)` 会 `assert!(min <= max)`。
+- **The cover "no distortion" mode panicked on a degenerate area** (`ui/views/player.rs::fit_box`).
+  `rows.clamp(1, area.height)` blows up directly when `area.height == 0` — `Ord::clamp` requires
+  `min <= max`, and `clamp(1, 0)` triggers `assert!(min <= max)`.
 
-  现在**没有**可复现的触发路径（实测 `render_home` 的布局在 4~24 行之间最低给封面栏
-  4 行，`Min(6)` 优先于 `Length(8)`），但这是布局的巧合而不是这里的保证——
-  封面区的布局本身就改过一次（见那段「之前让封面框按图片比例自己算高度」的注释）。
-  现在退化区域直接返回空矩形：既不 panic，也不会把框撑到区域外面去
-  （硬凑 1×1 会让 `area.width - columns` 当场下溢）。回归测试同时钉住
-  「零尺寸不 panic」与「算出来的框永远不超出区域」。
+  There is now **no reproducible trigger path** (measured: `render_home`'s layout gives the cover column at least 4 rows for any height between 4 and 24, with `Min(6)` taking priority over `Length(8)`), but that is a coincidence of the layout, not a guarantee here — the cover area's layout itself changed once (see that comment "previously let the cover box compute its own height from the image ratio"). Now a degenerate area returns an empty rectangle: it neither panics nor pushes the box outside the area (forcing 1×1 would make `area.width - columns` underflow on the spot). The regression test pins both "zero size doesn't panic" and "the computed box never exceeds the area".
 
-- **Windows 上的 PowerShell 脚本会满屏乱码**（`scripts/*.ps1`）。四个 `.ps1` 都没有
-  UTF-8 BOM，而 Windows 自带的 Windows PowerShell 5.1 在文件没有 BOM 时**按当前
-  ANSI 代码页解码**——中文 Windows 上是 GBK，于是脚本里那几十条面向用户的中文提示
-  （「找不到 node」「已在运行」……）全变成乱码。
+- **The PowerShell scripts on Windows show garbage everywhere** (`scripts/*.ps1`). None of the four `.ps1` files had a UTF-8 BOM, and Windows' built-in Windows PowerShell 5.1 **decodes by the current ANSI code page** when there is no BOM — GBK on Chinese Windows — so the dozens of user-facing Chinese messages in the scripts ("node not found", "already running"…) all became garbage.
 
-  为什么一直没发现：CI 的 Windows 那栏用的是 `shell: pwsh`，也就是 PowerShell 7，
-  而 7.x 默认按 UTF-8 读——**CI 绿了不代表用户那边正常**。现在四个文件都加上 BOM
-  （只改解码方式，逐字节确认过除开头 3 字节外内容完全没动），并把这条写进
-  `docs/MAINTENANCE.md` §1.7。
+  Why it went unnoticed: the Windows column of CI uses `shell: pwsh`, i.e. PowerShell 7, and 7.x reads UTF-8 by default — **CI being green doesn't mean it's fine for the user**. All four files now have a BOM (only the decoding changed, verified byte-for-byte that nothing except the first 3 bytes moved), and this is written into `docs/MAINTENANCE.md` §1.7.
 
-- **并发翻页的整表顺序是随机的**（`api/catalog.rs`）。`collect_all_pages` 一批页
-  同时发出去，然后在 `JoinSet::join_next()` 里直接 `all.extend(songs)`——而
-  `join_next()` 给的是**任务完成顺序**，不是页码顺序。于是打开任何超过 6 页
-  （>180 首）的歌单 / 榜单 / 歌手页，整表的页序都是乱的。榜单尤其致命：它的
-  「顺序」就是榜单内容本身，TOP500 被随机排列等于榜单没了。
+- **Concurrent paging produced a random full-table order** (`api/catalog.rs`). `collect_all_pages` sent a batch of pages at once and then directly did `all.extend(songs)` in `JoinSet::join_next()` — and `join_next()` gives the **task completion order**, not the page order. So opening any playlist / ranking / artist page over 6 pages (>180 tracks) had a scrambled page order. Rankings are especially fatal: their "order" is the ranking content itself, and TOP500 randomly permuted means the ranking is gone.
 
-  现在一批的结果先按页码收进 `collected`，排好序再拼。回归测试用手写的假服务端
-  让页码**必然倒序返回**（第 N 页等 `60ms × (7 - N)`），所以这条不是靠运气过的：
-  去掉排序后它稳定地给出 `h1, h7, h6, h5, h4, h3, h2`。
+  Now a batch's results are collected into `collected` by page number and spliced after sorting. The regression test uses a hand-written fake server to make pages return **necessarily in reverse order** (page N waits `60ms × (7 - N)`), so this test doesn't pass by luck: removing the sort makes it steadily produce `h1, h7, h6, h5, h4, h3, h2`.
 
-- **同一首歌上会同时跑两条流式下载**（`audio/download.rs`）。连按两次 Enter 就是
-  两条 `start_streaming` 落在同一个目标上（`App::active_stream` 要等到攒够开头才
-  被握住，中间那段窗口谁也拦不住第二条）。两条流会互相破坏：后开的那次
-  `truncate(true)` 把先写的字节从盘上抹掉（而缓冲窗口之外的数据正是靠 `pread`
-  这个文件读回来，读回空洞就是噪音），失败 / 取消时的 `remove_file` 还会删掉
-  对方的文件，让它改名失败、白下一整首。
+- **Two streaming downloads could run on the same song at once** (`audio/download.rs`). Pressing Enter twice is two `start_streaming` calls landing on the same target (`App::active_stream` is only held once the pre-roll is reached, and nothing stops the second one in that window). Two streams destroy each other: the later one's `truncate(true)` wipes the earlier bytes from disk (while data outside the buffer window is read back via `pread` on that file, so reading a hole means noise), and the `remove_file` on failure / cancel deletes the other's file, making its rename fail and wasting a whole download.
 
-  现在 `Downloader` 按临时文件路径登记在跑的流，第二条直接复用第一条的缓冲、
-  不再起任务。顺带把整首下载和流式下载的临时文件分开（`x.mp3.part` 与
-  `x.mp3.stream.part`）——后台预取下一首时，用户完全可能正好切到那一首。
+  Now `Downloader` registers running streams by temp-file path, and a second one reuses the first's buffer instead of starting a task. Also, whole-track and streaming downloads use separate temp files (`x.mp3.part` and `x.mp3.stream.part`) — when prefetching the next track in the background, the user may well switch to exactly that one.
 
-- **音质档位有两种说法**。`app/update.rs` 里另有一份私有的 `quality_label`，只认
-  6 档，比 `app/settings::quality_label` 少了 `viper_atmos` 与 `viper_tape`。于是
-  按快捷键切到那两档时状态栏显示原始串 `viper_atmos`，而设置页同一项显示
-  「蝰蛇全景声」。现在只有一份实现，并加了一条测试：每个可选音质都必须有中文名，
-  不许退回原始串。
+- **Two versions of the quality labels.** `app/update.rs` had another private `quality_label` recognizing only 6 tiers, missing `viper_atmos` and `viper_tape` compared to `app/settings::quality_label`. So switching to those two tiers with a shortcut showed the raw string `viper_atmos` in the status bar, while the settings page showed the same item as "viper panorama". Now there is only one implementation, plus a test: every selectable quality must have a display name, and may not fall back to the raw string.
 
-- **网易云歌手页的「N 首」是专辑数**。`source/netease.rs` 把 `/top/artists` 的
-  `albumSize` 填进了 `song_count`，而它是专辑数，歌曲数是 `musicSize`。类型正确、
-  语义错误，界面上每个歌手后面都挂着一个错数字且不会有任何异常。改成 `musicSize`，
-  拿不到就不显示（比显示错的强）。
+- **The "N songs" on the NetEase artist page was the album count.** `source/netease.rs` put `/top/artists`'s `albumSize` into `song_count`, but that's the album count; the song count is `musicSize`. Correct type, wrong meaning, and every artist on the UI carried a wrong number with no exception. Changed to `musicSize`, and when unavailable it shows nothing (better than showing a wrong number).
 
-- **分块并发下载会写出内容损坏的缓存文件**（`audio/download.rs`）。分块下载只检查
-  `status.is_success()`，于是服务端（或中间 CDN / 代理）忽略 `Range`、回 `200 OK`
-  加整首内容时也会照写：四个任务各自 `seek(自己的起点)` 再写整首，互相覆盖，得到一个
-  「长度对、内容全错」的文件，还照常改名进缓存——之后每次播放都命中它。
+- **Chunked concurrent download could write a corrupt cache file** (`audio/download.rs`). Chunked download only checked `status.is_success()`, so when the server (or an intermediate CDN / proxy) ignored `Range` and returned `200 OK` with the whole content, it still wrote: the four tasks each `seek(their own start)` and wrote the whole thing, overwriting each other, producing a "correct length, entirely wrong content" file that was still renamed into the cache — and every later play hit it.
 
-  现在要求三件事同时成立才继续写：状态码必须是 `206`、`Content-Range` 必须能解析、
-  解析出的范围必须**逐字节等于**请求的范围（顺带核对总长度与 HEAD 一致）。任何一条
-  不满足就退回单连接重下——宁可慢一次，不能坏一个缓存文件。
+  Now three things must hold simultaneously before continuing to write: the status code must be `206`, `Content-Range` must parse, and the parsed range must be **byte-for-byte equal** to the requested range (also checking the total length matches HEAD). If any fails, it falls back to a single-connection re-download — better one slow time than one corrupt cache file.
 
-- **不完整的下载会被当成成功**。完成条件此前是「写入的字节数大于 0」，而 `.part`
-  已经 `set_len(total)` 预分配过，文件大小本身就证明不了完整性。现在要求每个块写满
-  自己那一段、总和等于总长度，并在改名之前 `sync_all`；单连接路径在服务端给了
-  `Content-Length` 时也要求收满。
+- **An incomplete download was treated as success.** The completion condition was previously "bytes written greater than 0", but `.part` has already been `set_len(total)` pre-allocated, so the file size itself proves nothing about completeness. Now each chunk must fill its own segment, the total must equal the total length, and `sync_all` is called before the rename; the single-connection path also requires receiving the full amount when the server gives `Content-Length`.
 
-  回归测试用 std 的 `TcpListener` 起了一个最小的 HTTP 服务端（不引新依赖），覆盖
-  正常 206、服务端忽略 Range 回 200、`Content-Range` 与请求不符、传输中断四种情况。
-  把三处防护逐个去掉后，「服务端忽略 Range」那条会返回 4 MiB（真实长度 1 MiB）——
-  也就是修复前那个坏文件。
+  The regression test starts a minimal HTTP server with std's `TcpListener` (no new dependencies), covering four cases: normal 206, server ignoring Range and returning 200, `Content-Range` not matching the request, and a mid-transfer interruption. Removing the three guards one by one makes the "server ignores Range" case return 4 MiB (real length 1 MiB) — the corrupt file from before the fix.
 
-- **Windows 的发行 zip 里没有 PowerShell 脚本**。`build-windows.ps1` 只拷了三个 bash
-  脚本，而 README 与 `docs/INSTALL.md` 让 Windows 用户跑的正是
-  `.\scripts\kugou-tui.ps1` / `.\scripts\kugou-api-install.ps1`——解压后这些文件不存在，
-  第一步就卡住。现在按「文档提到过的都必须在包里」为准，六份脚本一起带。
+- **The Windows release zip had no PowerShell scripts.** `build-windows.ps1` copied only three bash scripts, while README and `docs/INSTALL.md` tell Windows users to run exactly `.\scripts\kugou-tui.ps1` / `.\scripts\kugou-api-install.ps1` — those files don't exist after extracting, so the first step is stuck. Now the rule is "whatever the docs mention must be in the package", and all six scripts are included.
 
-- **三个 bash 脚本在 macOS 上跑不起来**。逐条列出，因为每一处都会直接中断脚本：
+- **Three bash scripts wouldn't run on macOS.** Listed item by item, because each one aborts the script directly:
 
-  - `declare -A`（`kugou-api`、`kugou-api-install`）需要 bash 4，而 macOS 自带的
-    `/bin/bash` 是 3.2——报 `declare: -A: invalid option`，一行都跑不了。改成
-    `case` 分派 + 间接展开。
-  - `readlink -f`（三个脚本）是 GNU 扩展，macOS 的 `readlink` 报
-    `illegal option -- f`。改成逐层解软链（`make-release-tarball` 里早就是这么做的）。
-  - 配置与缓存目录在 macOS 上找错了地方：`dirs` 给的是
-    `~/Library/Application Support` 与 `~/Library/Caches`，而脚本读的是 `~/.config`
-    与 `~/.cache`。后果是启动器永远找不到 `config.toml`，于是永远按默认值（`:3000`、
-    标准版）探活——用概念版音源的人只会看到「服务启动失败」。
-  - `setsid`（util-linux 专有）与 `ss`（iproute2）在 macOS 上不存在，分别退回
-    `nohup` 与 `lsof`。
-  - `seq` 换成 `while` 计数循环。
+  - `declare -A` (`kugou-api`, `kugou-api-install`) needs bash 4, while macOS's built-in `/bin/bash` is 3.2 — it reports `declare: -A: invalid option` and not one line runs. Changed to `case` dispatch + indirect expansion.
+  - `readlink -f` (all three scripts) is a GNU extension, and macOS's `readlink` reports
+    `illegal option -- f`. Changed to resolving symlinks level by level (`make-release-tarball` already did this).
+  - The config and cache directories were looked up in the wrong place on macOS: `dirs` gives
+    `~/Library/Application Support` and `~/Library/Caches`, while the scripts read `~/.config`
+    and `~/.cache`. The consequence is that the launcher never finds `config.toml` and always probes with defaults (`:3000`, standard edition) — people using the concept edition only see "service failed to start".
+  - `setsid` (util-linux specific) and `ss` (iproute2) don't exist on macOS, falling back to
+    `nohup` and `lsof` respectively.
+  - `seq` replaced with a `while` counting loop.
 
-  > 顺带把「配置根目录」统一到 `KUGOU_TUI_CONFIG_DIR`：PowerShell 侧一直认它，
-  > bash 侧此前只认 XDG 变量。
+  > Also unified the "config root directory" to `KUGOU_TUI_CONFIG_DIR`: the PowerShell side always honored it, while the bash side previously honored only the XDG variables.
 
-- 启动器拉起的服务现在会写 PID 文件，`kugou-api stop` / `status` 因此管得到它。
-  此前它是个「孤儿进程」：端口占着，但按 PID 文件停不掉，`status` 只会说
-  「端口有响应，但不是本脚本起的」。
+- A service launched by the launcher now writes a PID file, so `kugou-api stop` / `status` can manage it. Previously it was an "orphan process": the port was taken, but it couldn't be stopped by PID file, and `status` only said "the port responds, but it wasn't started by this script".
 
-- **迟到的异步结果会污染界面**（`app/update.rs`）。所有请求都是 `tokio::spawn`
-  出去的，回来顺序不保证，而此前只有「播放」那一侧判了身份（`is_current`、
-  歌词/封面比 `hash`）。剩下的路径照单全收，于是：
+- **Late async results polluted the UI** (`app/update.rs`). All requests are `tokio::spawn`ed and return in no guaranteed order, and previously only the "playback" side checked identity (`is_current`, lyrics/cover by `hash`). The rest took results as they came, so:
 
-  - 搜「A」→ 结果还在路上 → 改搜「B」→ A 的结果先到，**把 B 的结果整体覆盖**；
-    点 `M` 加载更多时更糟：A 的歌被追加进 B 的列表，而标题还写着 B。
-  - 打开歌单 A → 用户改开 B → A 的结果先到，右侧变成「标题写着 B、内容是 A」。
-  - 歌手与榜单同理（左列高亮 B、右列是 A 的歌）。
-  - 切歌单广场分类 / 歌手地区筛选时，旧分类的结果会顶掉新分类的列表。
+  - Search "A" → results still in flight → search "B" → A's results arrive first and **overwrite B's results entirely**; pressing `M` to load more is worse: A's songs are appended to B's list while the title still says B.
+  - Open playlist A → user opens B instead → A's results arrive first, and the right side becomes "title says B, content is A".
+  - Same for artists and rankings (left column highlights B, right column is A's songs).
+  - When switching the playlist-plaza category / artist region filter, the old category's results overwrite the new category's list.
 
-  现在每条结果回来都要先自证身份，不一致直接丢弃；判据抽成 `accepts_search_result`
-  与 `accepts_open_item` 两个自由函数并加了测试（`App` 构造需要音频引擎与运行时，
-  单测里搭不出来，所以判据必须留在能单独测的地方）。
+  Now every result must prove its identity on return and is discarded if inconsistent; the criteria are extracted into two free functions, `accepts_search_result` and `accepts_open_item`, with tests (`App` construction needs an audio engine and runtime, which can't be built in unit tests, so the criteria must live where they can be tested alone).
 
-  顺带修掉两个同源的小问题：过期结果不再把正在进行的搜索的「正在搜索…」抹掉
-  （清 `busy` 挪到判据之后）；连按 `M` 不再基于同一个 `page` 各发一次请求
-  （两次结果都追加就是重复的一页，晚到的那条还会让顺序倒过来）。
+  Two same-root minor problems fixed too: a stale result no longer wipes the in-progress search's "searching…" (clearing `busy` moved after the criterion); and pressing `M` repeatedly no longer fires one request per press on the same `page` (both results appended means a duplicated page, and the later one also reverses the order).
 
-  身份字段一律在 `spawn` **之前**写进状态（`open_playlist` / `open_artist` /
-  `open_board`），写在结果里就晚了——那条结果永远对不上。判据与清单记在
-  `docs/MAINTENANCE.md` §4 的第 11 条。
+  Identity fields are always written to state **before** `spawn` (`open_playlist` / `open_artist` / `open_board`); writing them in the result is too late — that result never matches. The criteria and list are in `docs/MAINTENANCE.md` §4 item 11.
 
-### 变更
+### Changed
 
-- **只推 tag 就能发版**。`release.yml` 增加第一个 job `prepare`，由它调用新的
-  `scripts/release-notes` 从 `CHANGELOG.md` 取出该版本正文、建好 Release；三个平台
-  job 都 `needs: prepare`。
+- **Pushing a tag alone is enough to release.** `release.yml` gains a first job `prepare` that calls the new `scripts/release-notes` to extract the version's body from `CHANGELOG.md` and create the Release; all three platform jobs `needs: prepare`.
 
-  此前 Release 只能由本地 `scripts/release` 创建，工作流只负责**等**它出现——于是
-  「只推 tag」是不成立的：tag 一推 CI 就起来，等满 5 分钟也没有 Release，三个 job
-  一起失败。现在 `git tag … && git push origin <tag>` 一条路走完。
+  Previously the Release could only be created by the local `scripts/release`, and the workflow only **waited** for it to appear — so "push the tag alone" didn't work: pushing the tag starts CI, and after waiting a full 5 minutes with no Release, all three jobs failed together. Now `git tag … && git push origin <tag>` does it in one path.
 
-  `scripts/release-notes` 是从 `scripts/release` 里那段 `awk` 抽出来的：这段正文有
-  两个消费方（本地发版与 CI），写成两份必然漂移，而发行说明是发布页的门面。
+  `scripts/release-notes` is extracted from that `awk` block in `scripts/release`: this body has two consumers (local release and CI), and writing it twice necessarily drifts, while the release notes are the face of the release page.
 
-  > 代价：只推 tag 不会更新 AUR 的 `PKGBUILD` / `.SRCINFO`，也不校验 CHANGELOG
-  > 有对应版本节。要同时发 AUR 仍然得跑 `scripts/release`。
+  > Cost: pushing the tag alone doesn't update AUR's `PKGBUILD` / `.SRCINFO`, nor validate that CHANGELOG has the corresponding version section. To also release AUR, you still run `scripts/release`.
 
-- **Linux 发行包也由 CI 产出**。此前只有 Windows 与 macOS 交给 CI，Linux 那份由本地
-  `scripts/release` 编好上传——那意味着**开发机不在手边就发不出 Linux 包**：换机器、
-  重装，或者只想给一个已经发过的版本补资产，都得先把 Rust 工具链与整棵依赖树重建一遍。
-  现在 `release.yml` 增加 `ubuntu-latest` 一栏，推 `v*` tag 时三个平台统一出包，
-  产物不依赖任何一台具体的机器。
+- **The Linux release package is also produced by CI.** Previously only Windows and macOS were handed to CI, and the Linux one was built and uploaded by the local `scripts/release` — which meant **no Linux package without the dev machine at hand**: switching machines, reinstalling, or just backfilling assets for an already-released version all required rebuilding the Rust toolchain and the entire dependency tree. Now `release.yml` gains an `ubuntu-latest` column, and pushing a `v*` tag builds all three platforms uniformly, with artifacts independent of any specific machine.
 
-  本地 `scripts/release` 的打包与上传**保持不变**：两边同名，靠
-  `upload-release-asset` 的 `--clobber` 覆盖，谁后到谁生效。因此两边的 sha256
-  **不保证相同**（rustc 小版本、目标机器上的 C 工具链都会影响 `aws-lc-sys` 的编译
-  结果），本地记下的哈希事后对不上是正常的。
+  The local `scripts/release`'s packaging and upload are **unchanged**: the two sides share names and `upload-release-asset`'s `--clobber` overwrites, so whoever arrives later wins. Therefore the two sides' sha256 are **not guaranteed identical** (the rustc minor version and the target machine's C toolchain both affect `aws-lc-sys`'s compilation result), and a locally recorded hash not matching later is normal.
 
-- **CI 的 Linux 栏会传一份二进制 artifact**（`kugou-tui-linux-x86_64`，保留 14 天）。
-  此前每次 push 都会 `cargo build --release`，但产物用完即弃——想拿一份能跑的二进制
-  只能等发版，或者在本机重编一次（`lto = "fat"` + `codegen-units = 1`，要好几分钟）。
+- **CI's Linux column uploads a binary artifact** (`kugou-tui-linux-x86_64`, kept 14 days). Previously every push ran `cargo build --release`, but the artifact was discarded after use — getting a runnable binary meant waiting for a release or rebuilding locally (`lto = "fat"` + `codegen-units = 1`, several minutes).
 
 ## [0.4.3] - 2026-09-27
 
-### 新增
+### Added
 
-- **Windows 与 macOS 的发行包**。此前 Release 里只有 Linux 的 tarball——不是漏了，
-  是开发机是 Linux，而 Windows 的 `.exe` 必须在 Windows 上编（MSVC 工具链）、
-  macOS 的二进制必须在 macOS 上编（Apple SDK）。现在交给 CI：
+- **Windows and macOS release packages.** Previously the Release had only the Linux tarball — not an omission, but because the dev machine is Linux, and Windows's `.exe` must be built on Windows (MSVC toolchain) and macOS's binary on macOS (Apple SDK). Now it's handed to CI:
 
-  - `.github/workflows/release.yml`：推 `v*` tag 时在 `windows-latest` 与
-    `macos-latest` 上各编一份、打好包、挂到 GitHub Release 上；
-    也可以 `workflow_dispatch` 手动指定 tag，给**已经发过**的版本补资产。
-  - `scripts/upload-release-asset`：上传那一步单独抽出来，两个平台共用（Windows
-    runner 上的 `shell: bash` 就是 Git Bash）。它处理两件事：**等 Release 出现**
-    （本地发版流程是「推 tag → 建 Release」，tag 一推 CI 就起来了，直接上传会撞上
-    release not found），以及**幂等**（`--clobber`，补资产/重试时覆盖同名文件）。
-  - 两个 job 都会先核对 `--version` 与 tag 一致，checkout 错 ref 时能拦住。
+  - `.github/workflows/release.yml`: on pushing a `v*` tag, builds one each on `windows-latest` and
+    `macos-latest`, packages them, and attaches them to the GitHub Release;
+    `workflow_dispatch` can also specify a tag manually to backfill assets for an **already-released** version.
+  - `scripts/upload-release-asset`: the upload step extracted on its own, shared by both platforms (on a Windows
+    runner, `shell: bash` is Git Bash). It handles two things: **waiting for the Release to appear**
+    (the local release flow is "push tag → create Release", and pushing the tag starts CI, so uploading directly would hit
+    release not found), and **idempotency** (`--clobber`, overwriting same-named files on backfill/retry).
+  - Both jobs first verify that `--version` matches the tag, catching a wrong checkout ref.
 
-  > Linux 不在这里重复构建：`scripts/release` 已经在本地编好、验好、传上去了。
+  > Linux is not rebuilt here: `scripts/release` has already built, verified, and uploaded it locally.
 
-- **歌词换行的过渡动画**（仿 Apple Music 的逐行切换）。此前换行是**瞬间跳变**：
-  `active_line` 一变，配色与滚动偏移同时硬切，没有任何时间维度的缓动。
+- **Lyric line-change transition animation** (imitating Apple Music's per-line switch). Previously a line change was an **instant jump**:
+  the moment `active_line` changed, the colors and scroll offset switched hard together, with no easing in the time dimension.
 
-  做法是把「离当前行多远」从整数距离换成**两个锚点距离场的插值**——换行时保留旧锚点，
-  按 `t = ease_out_cubic(已过时长 / 总时长)` 在「到旧行距离」与「到新行距离」之间插值：
+  The approach replaces "how far from the current line" from an integer distance with **an interpolation of two anchor distance fields** — on a line change the old anchor is kept,
+  and by `t = ease_out_cubic(elapsed / total)` it interpolates between "distance to the old line" and "distance to the new line":
 
   ```text
-  d = lerp(|行 - 旧行|, |行 - 新行|, t)
-  色 = mix(mix(text_dim, lyric_far, fade(d)), 高亮色, heat)
+  d = lerp(|line - old_line|, |line - new_line|, t)
+  color = mix(mix(text_dim, lyric_far, fade(d)), highlight, heat)
   ```
 
-  `heat` 一个标量同时表达进入与退出：新行 `0 → 1` 点亮，旧行 `1 → 0` 淡出，其余行
-  的明暗层次也跟着平滑重排。**没有新增任何渲染原语**，全部复用既有的 `mix` /
-  `fade_ratio`，逐字扫光原样叠加在 `heat` 之上。
+  `heat` is a single scalar expressing both entry and exit: the new line `0 → 1` lights up, the old line `1 → 0` fades out, and the other lines'
+  brightness levels rearrange smoothly with it. **No new render primitives were added**; it all reuses the existing `mix` /
+  `fade_ratio`, with the per-character sweep layered on top of `heat` as-is.
 
-  > **为什么不做「上滑」和「缩放」**：终端没有子单元格定位——一个字符格就是一行，
-  > `Paragraph` 的滚动偏移是整数（没有小数滚动），字体尺寸也固定。所以位置维度
-  > 动不了，能做过渡的只有颜色维度。硬做整行跳只会显得生硬。
+  > **Why no "slide up" or "zoom"**: terminals have no sub-cell positioning — one character cell is one row,
+  > `Paragraph`'s scroll offset is an integer (no fractional scrolling), and font size is fixed. So the position dimension
+  > can't move; the only dimension available for a transition is color. Forcing a whole-line jump would just look stiff.
 
-  - 时长按行距自适应：`min(配置值, 该行到下一行的间隔 × 0.55)`。快歌的行只有几百
-    毫秒，按上限走会出现「上一次过渡还没走完就该换下一行」。
-  - 一次跨 3 行以上（拖动进度条、点歌词行跳转）**直接吸附**，不逐行淡过去。
-  - 切歌 / 清空歌词会复位过渡状态，新歌第一句不会从上一首的某一行淡过来。
-  - 复用既有的 30fps 提速逻辑（`lyric_visible`），**没有为动画新增计时器**。
+  - Duration adapts to line spacing: `min(configured value, gap to the next line × 0.55)`. Fast songs' lines last only a few hundred
+    milliseconds, and going by the cap would mean "the previous transition hasn't finished before the next line is due".
+  - Crossing 3+ lines at once (dragging the progress bar, clicking a lyric line to jump) **snaps** directly, without fading line by line.
+  - Changing tracks / clearing lyrics resets the transition state, so a new song's first line doesn't fade in from some line of the previous song.
+  - Reuses the existing 30fps speedup logic (`lyric_visible`), **adding no timer for the animation**.
 
-- **点击歌词行跳到这一句**。命中区机制（`HitZone` / `HitTarget`）现成可用，新增
-  `HitTarget::LyricLine` 即可；「显示行 → 歌词行」的映射由渲染层每帧回填，与
-  `hit_zones` 同一套约定（只有渲染层知道行几何——译文/音译会让两者不再一一对应）。
+- **Click a lyric line to jump to that line.** The hit-zone machinery (`HitZone` / `HitTarget`) was ready to use; adding
+  `HitTarget::LyricLine` suffices; the "display row → lyric line" mapping is backfilled each frame by the render layer, under the same convention as
+  `hit_zones` (only the render layer knows the line geometry — translations/transliterations break the one-to-one correspondence).
 
-  跳转目标要**加回 `lyric_offset_ms`**：当前行是按 `position − lyric_offset_ms` 算的，
-  直接跳到 `line.time_ms` 会正好差一句。这一步漏了不会报错，所以单独抽成
-  `lyric_seek_target` 并加了测试。
+  The jump target must **add back `lyric_offset_ms`**: the current line is computed as `position − lyric_offset_ms`,
+  so jumping directly to `line.time_ms` would be off by exactly one line. Missing this doesn't error, so it's extracted into
+  `lyric_seek_target` with a test.
 
-- `lyric_anim_ms` 配置项（默认 `200`，`0` = 关闭），设置页有「歌词动画」一项。
-  三种情况会强制关闭，与取值无关：`lite_mode`、16 色模式（没有中间色阶，淡入会
-  退化成「过半时整块硬翻」）、一次跨 3 行以上。
+- The `lyric_anim_ms` config item (default `200`, `0` = off), with a "lyric animation" item on the settings page.
+  Three cases force it off regardless of value: `lite_mode`, 16-color mode (no intermediate levels, so a fade
+  degenerates into "a hard flip at the halfway point"), and crossing 3+ lines at once.
 
-### 变更
+### Changed
 
-- `scripts/make-release-tarball` 改成**在 macOS 上也能跑**（CI 的 macOS 那一栏要用它
-  产出 `aarch64-apple-darwin` 的包）。两处 GNU 专有的东西换掉了：`readlink -f`
-  （BSD 的 readlink 没有 `-f`，改成自己逐层解软链）与 `sha256sum`
-  （macOS 那边叫 `shasum -a 256`）。顺带确认它只用 bash 3.2 就有的语法
-  ——macOS 自带的 bash 就是 3.2。
+- `scripts/make-release-tarball` was changed to **also run on macOS** (CI's macOS column needs it to
+  produce the `aarch64-apple-darwin` package). Two GNU-specific things were replaced: `readlink -f`
+  (BSD's readlink has no `-f`; changed to resolving symlinks level by level) and `sha256sum`
+  (on macOS it's `shasum -a 256`). Also confirmed it uses only syntax available in bash 3.2
+  — macOS's built-in bash is 3.2.
 
-- `fade_ratio` 的参数从 `usize` 改成 `f32`（过渡期间距离是插值出来的小数）。
-  稳态下传进去的仍是整数值，结果与改造前**逐位相同**——所以既有的配色断言一行未改，
-  另加了一条「过渡走完后与稳态逐格相同」的护栏测试盯着这件事。
+- `fade_ratio`'s parameter changed from `usize` to `f32` (during a transition the distance is an interpolated fraction).
+  In steady state the value passed in is still an integer, and the result is **bit-identical** to before — so the existing color assertions are unchanged, with one
+  extra guard test watching that "after the transition finishes, it matches steady state cell by cell".
 
-### 验证
+### Verification
 
-- `cargo test` **313 passed / 0 failed**（本次新增 20 条）
-- 新增的测试覆盖：进度端点与 ease-out 单调性、四道否决、行距自适应、最后一行兜底、
-  换行中途重定向、显示行映射越界、**交叉淡化两头都对**（旧行变暗 / 新行变亮）、
-  过渡中途两行都是半亮、过渡走完与稳态逐格相同、占位提示不登记命中区、
-  跳转目标加回偏移（三档偏移 + 下溢）
-- `cargo fmt --all --check`、Linux 与 Windows 两个目标的 `clippy -D warnings` 均 exit 0
-- `scripts/make-release-tarball` 实跑过（含软链场景），
-  `scripts/upload-release-asset` 的「glob 无匹配必须报错」分支实测会退出 1
-  ——这条抓出过一个真 bug：`assets=("$pattern")` 加了引号时 bash 不做路径展开，
-  于是那个检查永远不触发，CI 会一片绿而 Release 上什么都没有
+- `cargo test` **313 passed / 0 failed** (20 added this time)
+- New tests cover: progress endpoints and ease-out monotonicity, the four vetoes, line-spacing adaptation, last-line fallback,
+  mid-transition redirection, display-row mapping out of bounds, **both ends of the cross-fade correct** (old line dims / new line brightens),
+  both lines half-lit mid-transition, transition-end matching steady state cell by cell, placeholder notices not registering hit zones,
+  and the jump target adding back the offset (three offset levels + underflow)
+- `cargo fmt --all --check`, and `clippy -D warnings` on both the Linux and Windows targets, all exit 0
+- `scripts/make-release-tarball` was actually run (including a symlink scenario), and
+  `scripts/upload-release-asset`'s "glob with no match must error" branch was measured to exit 1
+  — this caught a real bug: `assets=("$pattern")` with quotes means bash doesn't do path expansion,
+  so that check never fired, and CI would be all green while the Release had nothing
 
 ## [0.4.2] - 2026-09-27
 
-### 新增
+### Added
 
-- **Windows 支持（10/11，x86_64）**。此前 `docs/INSTALL.md` 直接把 Windows 写成
-  「不行」，理由是 `zbus` 在那边要 `async-io`；实际盘下来问题不止那一条，
-  按「编译不过 → 编译过了但行为不对 → 行为对了但用起来别扭」三层各修了一批：
+- **Windows support (10/11, x86_64).** Previously `docs/INSTALL.md` simply wrote Windows off as
+  "doesn't work", on the grounds that `zbus` needs `async-io` there; in practice the problems went beyond that one, and
+  a batch was fixed at each of three layers, "doesn't compile → compiles but behaves wrong → behaves right but is awkward to use":
 
-  1. **编译不过的**（三处，都是硬错误）：
-     - `audio/streaming.rs` 用了 `std::os::unix::fs::FileExt::read_at`（`pread`）。
-       Windows 没有 `pread`，包了一层 `read_at`，那边走 `seek_read`
-       （借 `ReadFile` 的 OVERLAPPED 做定位读）。副作用是会挪文件游标，
-       而那个句柄是只读落盘文件、游标没人用，所以无害——注释里写清了。
-     - `logger.rs` 的 stderr 重定向用了 `libc::dup2` + `STDERR_FILENO`，
-       而 `libc` 在 Windows 上**没有** `STDERR_FILENO`，`std::os::fd` 整个模块
-       也不存在。改成平台分支：Unix 照旧 `dup2`，Windows 用 `SetStdHandle`
-       改 `STD_ERROR_HANDLE`。
-     - `mpris.rs` / `tray.rs` 是 D-Bus 集成，Windows 上既没有 session bus
-       也没有认这两个接口的宿主。连同 `zbus` 依赖一起收敛到 `cfg(unix)`，
-       相关字段与同步逻辑同步条件编译。
+  1. **Doesn't compile** (three, all hard errors):
+     - `audio/streaming.rs` used `std::os::unix::fs::FileExt::read_at` (`pread`).
+       Windows has no `pread`; a `read_at` wrapper was added, going through `seek_read`
+       (borrowing `ReadFile`'s OVERLAPPED for a positioned read) there. The side effect is that it moves the file cursor,
+       and that handle is a read-only spill file whose cursor no one uses, so it's harmless — noted in the comment.
+     - `logger.rs`'s stderr redirection used `libc::dup2` + `STDERR_FILENO`,
+       while `libc` on Windows **has no** `STDERR_FILENO`, and the `std::os::fd` module
+       doesn't exist either. Changed to a platform branch: Unix keeps `dup2`, Windows uses `SetStdHandle`
+       to change `STD_ERROR_HANDLE`.
+     - `mpris.rs` / `tray.rs` are D-Bus integrations, and Windows has neither a session bus
+       nor a host recognizing these two interfaces. Together with the `zbus` dependency they're confined to `cfg(unix)`,
+       with the related fields and sync logic conditionally compiled.
 
-  2. **编译过了但行为不对的**：
-     - **下载目录的 `~` 展开在 Windows 上失效**。`app/settings.rs` 只读 `HOME`，
-       而那是 Unix 的约定，Windows 上是 `USERPROFILE`——结果是 `~/Music`
-       原样留着，最后落出一个名字就叫 `~` 的目录，用户在自己以为的位置找不到文件。
-       改成 `HOME` 优先、拿不到再问 `dirs::home_dir()`（Windows 上走
-       `SHGetKnownFolderPath`）。顺带认 `~\Music` 这种反斜杠写法。
-     - **配置落盘位置**：`dirs` 在 Windows 上给的是 `%APPDATA%` / `%LOCALAPPDATA%`，
-       无需平台分支，但文档里一直只写 XDG 路径，容易让人找错地方。
-     - **`--print-config` 谎报托盘状态**：Windows 上会显示「系统托盘 : 启用」，
-       而那份代码压根没编进去。现在如实显示「不可用（windows 无 D-Bus）」，
-       `tray` 的默认值也改成按平台取（非 Unix 默认关）。
+  2. **Compiles but behaves wrong**:
+     - **`~` expansion in the download directory fails on Windows**. `app/settings.rs` read only `HOME`,
+       a Unix convention, while on Windows it's `USERPROFILE` — the result was that `~/Music` stayed as-is, ending up with a directory literally named `~`, and the user not finding files where they expected.
+       Changed to `HOME` first, then `dirs::home_dir()` if unavailable (on Windows it goes through
+       `SHGetKnownFolderPath`). Also accepts the backslash form `~\Music`.
+     - **Config write location**: `dirs` on Windows gives `%APPDATA%` / `%LOCALAPPDATA%`,
+       needing no platform branch, but the docs only ever listed XDG paths, making it easy to look in the wrong place.
+     - **`--print-config` lied about tray status**: on Windows it showed "system tray : enabled",
+       while that code isn't compiled at all. It now honestly shows "unavailable (windows has no D-Bus)",
+       and `tray`'s default is now platform-dependent (off by default on non-Unix).
 
-  3. **依赖调整**：
-     - TLS 后端按平台分叉：非 Windows 仍是 rustls，**Windows 改用系统自带的
-       SChannel**。这不是性能取舍——rustls 会把 `aws-lc-sys` 拖进来，而那是 C 代码，
-       Windows 下除了 MSVC 还要额外装 **CMake + NASM** 才编得过。换掉之后
-       Windows 的构建前置就只剩「Rust + MSVC 工具链」，证书校验还顺带走了系统根证书库。
-     - `zbus`、`libc` 收敛到 `cfg(unix)`；Windows 侧新增 `windows-sys`
-       （本来就在依赖树里，只是显式声明 `SetStdHandle` 用得到的那几个 feature）。
+  3. **Dependency adjustments**:
+     - The TLS backend forks by platform: non-Windows stays rustls, **Windows switches to the system's built-in
+       SChannel**. This isn't a performance trade-off — rustls drags in `aws-lc-sys`, which is C code,
+       and on Windows that needs **CMake + NASM** installed in addition to MSVC to compile. After the swap,
+       Windows's build prerequisites are just "Rust + MSVC toolchain", and certificate validation additionally goes through the system root store.
+     - `zbus`, `libc` confined to `cfg(unix)`; the Windows side gains `windows-sys`
+       (already in the dependency tree, just explicitly declaring the features `SetStdHandle` needs).
 
-- `scripts/build-windows.ps1`：Windows 的构建 + 打包脚本（对应 Unix 侧的
-  `make-release-tarball`），产出 `dist\kugou-tui-<版本>-<三元组>.zip`。
-  仓库里其余脚本都是 bash，Windows 下默认跑不了，构建本身两条命令就够、
-  真正容易漏的是打包（发行包必须同时带上那三个 bash 脚本与 `docs/`）。
+- `scripts/build-windows.ps1`: Windows's build + packaging script (the Unix side's counterpart is
+  `make-release-tarball`), producing `dist\kugou-tui-<version>-<triple>.zip`.
+  The rest of the repo's scripts are bash and don't run on Windows by default; the build itself is two commands, and
+  the truly easy-to-miss part is packaging (the release package must carry those three bash scripts and `docs/`).
 
-- `scripts/kugou-tui.ps1` 与 `scripts/kugou-api-install.ps1`：Windows 侧的启动器
-  与服务安装器，对应 bash 的同名脚本。装上后日常使用就是两条命令
-  （`kugou-api-install.ps1` 一次 → `kugou-tui.ps1` 开播），不必再手动开一个终端
-  起 `node app.js`。几个刻意的取舍：
+- `scripts/kugou-tui.ps1` and `scripts/kugou-api-install.ps1`: the Windows-side launcher
+  and service installer, counterparts of the same-named bash scripts. After installing, daily use is two commands
+  (`kugou-api-install.ps1` once → `kugou-tui.ps1` to start playing), no longer needing to manually open a terminal
+  to start `node app.js`. A few deliberate trade-offs:
 
-  - 启动器**不写 `param()` 块**：一旦声明了参数，PowerShell 会把 `-s 海阔天空`
-    当成写错的参数名直接报错；没有 `param()` 时全部参数进 `$args`，正好能原样透传。
-  - 安装与启动**分开**（bash 侧是安装器顺手把服务拉起来）：这样「怎么起服务」
-    只有启动器一处实现，两边不会各自漂移。
-  - 只依赖 PowerShell **5.1**（Windows 自带的那版），不要求额外装 pwsh 7；
-    平台判断用 `$env:OS` 而不是 `$IsWindows`（后者 6.0 才有）。
-  - 带 `--dry-run`，只打印「当前音源 / 探测地址 / 服务目录 / 服务在不在跑」，
-    排查「为什么它说服务没起」时不用猜。
+  - The launcher **has no `param()` block**: once parameters are declared, PowerShell treats `-s 海阔天空`
+    as a misspelled parameter name and errors out; without `param()`, all arguments go into `$args`, which passes them through as-is.
+  - Install and start are **separate** (on the bash side the installer starts the service along the way): this way "how to start the service"
+    has only one implementation, in the launcher, and the two sides don't drift.
+  - Depends only on PowerShell **5.1** (the version Windows ships), requiring no extra pwsh 7;
+    platform detection uses `$env:OS` rather than `$IsWindows` (the latter only exists from 6.0).
+  - Has `--dry-run`, printing only "current source / probe address / service directory / is the service running",
+    so debugging "why does it say the service isn't running" needs no guessing.
 
-- **CI**（`.github/workflows/ci.yml`）：**Linux / Windows / macOS 三个平台**各跑一遍
-  `clippy -D warnings + test + build`，Windows 那一栏再跑一次打包脚本。
-  此前仓库里没有 CI，而 `CONTRIBUTING.md` 却写着「CI 会用同样的命令」——
-  现在这句话成立了。Windows 那一栏是这次的重点：路径展开、配置目录、
-  缓存文件命名这些差异只有真跑起来才露出来，光靠 `cargo check` 保证不了。
+- **CI** (`.github/workflows/ci.yml`): **Linux / Windows / macOS** each run
+  `clippy -D warnings + test + build`, and the Windows column runs the packaging script once more.
+  Previously the repo had no CI, yet `CONTRIBUTING.md` said "CI uses the same commands" —
+  now that statement holds. The Windows column is this time's focus: path expansion, config directory,
+  and cache file naming only surface when actually run, and `cargo check` alone can't guarantee them.
 
-- **macOS 进入 CI**，于是「macOS 支持吗」有了可验证的答案，而不是一句「理论上可行」。
-  代码层面它和 Linux 共用 `cfg(unix)` 分支，本来就没有 Linux 专属的调用残留；
-  但**共用不等于验证过**——`dirs` 在那边给的是 `~/Library/...` 而不是 XDG 目录、
-  音频走 CoreAudio、字体探测拿不到 `fc-list`，这些只有真跑一遍测试才看得见。
-  已知差异（无 MPRIS/托盘、无最小化窗口、配置路径不同）见 `docs/INSTALL.md`
-  新增的「在 macOS 上构建与运行」。
+- **macOS entered CI**, so "does macOS work" now has a verifiable answer instead of "theoretically possible".
+  At the code level it shares the `cfg(unix)` branch with Linux and had no Linux-specific call residue;
+  but **sharing isn't the same as verified** — `dirs` there gives `~/Library/...` instead of XDG directories,
+  audio goes through CoreAudio, and font detection can't reach `fc-list`; these are only visible when the tests actually run.
+  Known differences (no MPRIS/tray, no minimize window, different config paths) are in `docs/INSTALL.md`'s
+  new "Building and running on macOS".
 
-- `KUGOU_TUI_CONFIG_DIR`：整体覆盖配置根目录。便携安装（程序与配置一起放 U 盘）
-  用得上；也让「配置能活过一次重启」那条测试能在 Windows 上跑——那边 `dirs`
-  走的是 Win32 Known Folder，`XDG_CONFIG_HOME` 对它无效，没有这个开关就只能跳过测试。
-- `KUGOU_TUI_NERD_FONT`：显式指定有没有 Nerd Font。Windows 没有 fontconfig，
-  `fc-list` 探测一律落空，装了 Nerd Font 的用户靠它把图标打开。
+- `KUGOU_TUI_CONFIG_DIR`: overrides the config root directory wholesale. Useful for portable installs (program and config together on a USB stick);
+  it also lets the "config survives a restart" test run on Windows — there `dirs` goes through the Win32 Known Folder, and `XDG_CONFIG_HOME` has no effect on it, so without this switch the test could only be skipped.
+- `KUGOU_TUI_NERD_FONT`: explicitly specifies whether a Nerd Font is present. Windows has no fontconfig,
+  so `fc-list` detection always fails; users with a Nerd Font use this to turn the icons on.
 
-### 变更
+### Changed
 
-- **修正失效的 MSRV 声明：`rust-version` 1.86 → 1.90**。声明 1.86 是错的，而且
-  错得有害——用 1.86 编会收到一长串「某依赖要求更高 rustc」，而不是一句「你需要 1.90」。
-  真实下限由**依赖**顶上去（`quantette` 0.6 要 1.90，经 ratatui-image → icy_sixel 引入；
-  ratatui 0.30 要 1.88、rodio 0.22 要 1.87），已用 `cargo +1.90.0 check --locked
-  --all-targets` 实测确认。README 徽章、`docs/INSTALL.md`、`CONTRIBUTING.md` 与
-  三处源码注释里的旧数字一并改掉。
+- **Corrected the wrong MSRV declaration: `rust-version` 1.86 → 1.90**. Declaring 1.86 was wrong, and harmfully so — building with 1.86 yields a long list of "some dependency requires a higher rustc" rather than "you need 1.90".
+  The real floor is pushed up by a **dependency** (`quantette` 0.6 requires 1.90, pulled in via ratatui-image → icy_sixel;
+  ratatui 0.30 requires 1.88, rodio 0.22 requires 1.87), confirmed with `cargo +1.90.0 check --locked
+  --all-targets`. The old number in the README badge, `docs/INSTALL.md`, `CONTRIBUTING.md`, and
+  three source comments was changed too.
 
-- **清掉 29 处按真实 MSRV 才暴露的 clippy 建议**。这不是「顺手清理」——那条错误的
-  MSRV 声明同时也把 clippy 的 MSRV 感知 lint 全压住了（它按 `rust-version` 判断哪些
-  新 API 可用），所以声明一改成 1.90，`clippy -D warnings` 立刻红了。三类：
+- **Cleared 29 clippy suggestions exposed only by the real MSRV**. This isn't "incidental cleanup" — that wrong
+  MSRV declaration also suppressed all of clippy's MSRV-aware lints (it uses `rust-version` to decide which
+  new APIs are available), so the moment the declaration changed to 1.90, `clippy -D warnings` went red. Three kinds:
 
-  | lint | 处数 | 改法 |
+  | lint | Count | Fix |
   |---|---|---|
-  | `collapsible_if` | 23 | `if let Some(x) = a { if b { .. } }` → `if let Some(x) = a && b { .. }`（let-chain，1.88 起可用） |
+  | `collapsible_if` | 23 | `if let Some(x) = a { if b { .. } }` → `if let Some(x) = a && b { .. }` (let-chain, available since 1.88) |
   | `manual_is_multiple_of` | 3 | `n % 2 == 0` → `n.is_multiple_of(2)` |
-  | `chunks_exact_to_as_chunks` | 3 | `bytes.chunks_exact(4)` → `bytes.as_chunks::<4>().0`（元素类型由 `&[u8]` 变成 `&[u8; 4]`） |
+  | `chunks_exact_to_as_chunks` | 3 | `bytes.chunks_exact(4)` → `bytes.as_chunks::<4>().0` (element type goes from `&[u8]` to `&[u8; 4]`) |
 
-  都是 `cargo clippy --fix` 的机器可应用建议，语义等价，改完 293 条测试全过。
+  All are machine-applicable suggestions from `cargo clippy --fix`, semantically equivalent, and all 293 tests pass after.
 
-- **`cargo fmt --all` 拉平了格式基线**，CI 从此可以跑 `cargo fmt --check`。
-  之前仓库有 38 处不是 rustfmt 干净的（多为手写换行与 rustfmt 的取舍不一致），
-  而 `CONTRIBUTING.md` 却要求贡献者跑 `cargo fmt --all`——两边对不上。
-  这次一并拉平（19 个文件，纯空白），于是那句「CI 会用同样的命令」真正成立。
+- **`cargo fmt --all` flattened the format baseline**, so CI can now run `cargo fmt --check`.
+  The repo had 38 spots that weren't rustfmt-clean (mostly hand-written line breaks differing from rustfmt's choices),
+  while `CONTRIBUTING.md` required contributors to run `cargo fmt --all` — the two didn't match.
+  Flattened this time (19 files, pure whitespace), so that "CI uses the same commands" truly holds.
 
-- `~` 展开的逻辑抽成纯函数（主目录由调用方传入），相关测试不再改写进程级
-  `HOME`——测试是并行跑的，那种写法是偶发失败的隐患。
-- 音频设备打开失败的提示按平台给排查线索（Windows 上提 Windows 音频服务，
-  而不是一直说「检查 PipeWire/ALSA」）。
-- `docs/LICENSES.md` 按新的 `Cargo.lock` 重算（依赖 469 → **478** 个包；
-  宽松许可 455 → **464**）。新增的 `native-tls` / `openssl` / `openssl-sys` 等
-  是 `native-tls` 为「非 Windows、非 macOS」目标声明的 OpenSSL 后端——
-  本项目只在 Windows 下用它（走 SChannel），**Linux 构建根本不编译这几个包**，
-  文档里已注明这一点，免得看表的人以为产物里多了个 OpenSSL。
+- The `~` expansion logic is extracted into a pure function (the home directory passed in by the caller), so related tests no longer rewrite the process-level
+  `HOME` — tests run in parallel, and that pattern is a latent flake.
+- The audio-device open failure message gives platform-specific troubleshooting hints (on Windows it mentions the Windows audio service,
+  rather than always saying "check PipeWire/ALSA").
+- `docs/LICENSES.md` recomputed against the new `Cargo.lock` (dependencies 469 → **478** packages;
+  permissive licenses 455 → **464**). The new `native-tls` / `openssl` / `openssl-sys` etc.
+  are the OpenSSL backend `native-tls` declares for "non-Windows, non-macOS" targets —
+  this project uses it only on Windows (going through SChannel), and **a Linux build doesn't compile these packages at all**;
+  the doc notes this so readers of the table don't think the artifact gained an OpenSSL.
 
-### 文档
+### Docs
 
-- README 从「Linux 项目」改成**多平台叙述**：安装段按平台分列（预编译包 / 源码构建），
-  并补了一张 Linux / Windows / macOS 的能力对照表。徽章同步（`platform` 与 `rust` 版本）。
-- `docs/INSTALL.md`：新增「在 Windows 上构建与运行」（含 PowerShell 脚本用法、
-  `--dry-run`、终端要求、功能差异表、改代码时怎么确认没弄坏 Windows）与
-  「在 macOS 上构建与运行」两节；环境要求表补上 Linux 的 `alsa-lib` / `pkg-config`
-  前置（干净容器上缺了会在 `alsa-sys` 报错，此前没写）与 macOS 一行。
-- `docs/FAQ.md`：新增「平台相关」一节，回答 Windows 的脚本/工具链/托盘/封面/字体
-  与「macOS 支持吗」。
-- `docs/RELEASE.md`：说明 Windows 的 zip 由 `scripts/build-windows.ps1` 产出、
-  **当前不由 `scripts/release` 自动附带**（那脚本是 bash、跑在 Linux 上），
-  以及挂到 Release 上的手动步骤与将来交给 CI 的做法。
-- `docs/CONFIGURATION.md`：**动作名清单漏了 `toggle_window`**（写 59 个，实际 60 个），
-  已补上并说明它是唯一没有默认键位的动作、且仅在 niri 下生效；`tray` 一段补上
-  非 Unix 平台的表现。
-- 修正「最小化窗口 = `m` 键」的写法：`m` 是**静音**，最小化的入口在**托盘菜单**里
-  （README / INSTALL / CHANGELOG 三处）。
-- `docs/MAINTENANCE.md`：§1.6 补 macOS 一栏与三平台 CI 的说明；新增 §1.7
-  记录 Windows 侧三个脚本的坑（`param()` 与 `$args`、`Start-Process` 的
-  重定向限制、只用 5.1 语法）。
+- README changed from "a Linux project" to a **multi-platform narrative**: the install section is split by platform (prebuilt package / source build),
+  plus a Linux / Windows / macOS capability comparison table. Badges synced (`platform` and `rust` versions).
+- `docs/INSTALL.md`: added "Building and running on Windows" (including PowerShell script usage,
+  `--dry-run`, terminal requirements, feature-differences table, and how to check you haven't broken Windows) and
+  "Building and running on macOS"; the requirements table gains Linux's `alsa-lib` / `pkg-config`
+  prerequisites (missing on a clean container, it errors in `alsa-sys`, previously unstated) and a macOS row.
+- `docs/FAQ.md`: added a "Platform-specific" section, answering Windows's scripts/toolchain/tray/cover/fonts
+  and "does macOS work".
+- `docs/RELEASE.md`: explains that the Windows zip is produced by `scripts/build-windows.ps1`,
+  **currently not attached automatically by `scripts/release`** (that script is bash, running on Linux),
+  plus the manual steps to attach it to the Release and the future plan to hand it to CI.
+- `docs/CONFIGURATION.md`: **the action-name list was missing `toggle_window`** (wrote 59, actually 60),
+  now added with a note that it is the only action with no default key and only takes effect under niri; the `tray` section gains
+  the non-Unix platforms' behavior.
+- Corrected "minimize window = `m` key": `m` is **mute**, and minimize's entry is in the **tray menu**
+  (three places: README / INSTALL / CHANGELOG).
+- `docs/MAINTENANCE.md`: §1.6 gains a macOS column and a note on the three-platform CI; new §1.7
+  records the Windows-side three scripts' pitfalls (`param()` vs `$args`, `Start-Process`'s
+  redirection limit, using only 5.1 syntax).
 
-### 已知限制
+### Known limitations
 
-- Windows 上没有系统托盘、MPRIS，也没有「最小化窗口」（触发入口在托盘菜单里）：
-  前两者是 D-Bus 接口，后者走的是 niri 的 compositor IPC。都是**降级**：
-  相关入口不会出现，不会点了没反应。
-- Windows 上封面只能走半块字符画：Windows Terminal 不支持 Kitty / iTerm2 的图形协议。
-- Windows 侧的 `kugou-tui.ps1` / `kugou-api-install.ps1` 是 bash 版的**对应物而非
-  逐行移植**：只覆盖主流程（当前音源 → 服务目录/端口/`platform` → 探活 → 拉起 →
-  等就绪 → 进播放器），`kugou-api`（`start`/`stop`/`restart`/`status` 四个子命令）
-  没有对应物——启动器已经覆盖了它唯一的日常用途。要停服务就关掉播放器后
-  `Stop-Process -Name node`，或用 `Get-NetTCPConnection -LocalPort 3000` 找到 PID。
-- **Windows 的 zip 还没进发版流程**：Release 里目前只有 Linux 的 tarball，
-  Windows 用户按 `docs/INSTALL.md` 从源码构建。要挂上去得在 Windows 上跑一次
-  `build-windows.ps1` 再 `gh release upload`，或让 CI 在打 tag 时上传。
-- **macOS 没有在真机长期使用过**：CI 跑的是 `clippy + test + build`，覆盖不到
-  音频设备枚举、CoreAudio 实际出声、iTerm2 图形协议这些真机行为。
-- **Intel Mac 没有预编译包**：CI 的 `macos-latest` 是 arm64，产出的二进制在 Intel
-  机器上跑不了。Intel 用户目前只能从源码构建（`cargo build --release`）。
+- On Windows there is no system tray, no MPRIS, and no "minimize window" (its entry is in the tray menu):
+  the first two are D-Bus interfaces, the last goes through niri's compositor IPC. All are **degradations**:
+  the entries don't appear, and nothing does nothing when clicked.
+- On Windows the cover can only be half-block character art: Windows Terminal doesn't support the Kitty / iTerm2 graphics protocols.
+- The Windows-side `kugou-tui.ps1` / `kugou-api-install.ps1` are **counterparts, not line-by-line ports** of the bash versions:
+  they cover only the main flow (current source → service directory/port/`platform` → probe → launch →
+  wait ready → enter the player), and `kugou-api` (the `start`/`stop`/`restart`/`status` subcommands)
+  has no counterpart — the launcher already covers its only daily use. To stop the service, close the player and
+  `Stop-Process -Name node`, or use `Get-NetTCPConnection -LocalPort 3000` to find the PID.
+- **The Windows zip isn't in the release flow yet**: the Release currently has only the Linux tarball, and
+  Windows users build from source per `docs/INSTALL.md`. To attach it, run
+  `build-windows.ps1` once on Windows and then `gh release upload`, or have CI upload on tag.
+- **macOS hasn't been used long-term on real hardware**: CI runs `clippy + test + build`, which doesn't cover
+  audio device enumeration, CoreAudio actually making sound, or the iTerm2 graphics protocol.
+- **No prebuilt package for Intel Mac**: CI's `macos-latest` is arm64, and the produced binary can't run on
+  Intel machines. Intel users can currently only build from source (`cargo build --release`).
 
 ## [0.4.1] - 2026-09-26
 
-### 修复
+### Fixed
 
-- **程序一运行就独占声卡，麦克风和扬声器全被挤哑；退出后声音也回不来**。
-  这是一条把整个系统音频搞瘫的 bug，根因是「绕过声音服务器直连硬件」：
+- **The program hogged the sound card as soon as it ran, silencing the microphone and speakers; sound didn't come back after exit**.
+  This is a bug that took down the whole system's audio, and the root cause is "bypassing the sound server and connecting directly to hardware":
 
-  1. **设置页里有个叫「Default Audio Device」的设备，名字看着最像"系统默认"，
-     实际是 ALSA 的 `sysdefault`——`plughw:0` 的直连别名**（见
-     `/usr/share/alsa/pcm/default.conf`；而真正的默认设备叫
-     「Default ALSA Output (currently PipeWire Media Server)」）。选中它之后
-     程序直连 USB 声卡，PipeWire 再想打开那张卡就是「设备或资源忙」——
-     麦克风、扬声器、其它应用的声音一起没了。
-  2. 就算没选它，`open_default_sink()` 在默认设备打不开时还会**遍历设备列表
-     抓第一个能开的**——在服务器系统上那同样是抢占硬件。
+  1. **The settings page had a device named "Default Audio Device", which looks the most like "system default",
+     but is actually ALSA's `sysdefault` — a direct alias of `plughw:0`** (see
+     `/usr/share/alsa/pcm/default.conf`; the real default device is called
+     "Default ALSA Output (currently PipeWire Media Server)"). Selecting it made the program connect directly to the USB sound card, and PipeWire then trying to open that card got "device or resource busy" —
+     the microphone, speakers, and other apps' sound all went away.
+  2. Even without selecting it, `open_default_sink()` would **iterate the device list and grab the first one it could open** when the default device couldn't open — which on a server system is likewise grabbing the hardware.
 
-  现在引擎先探测声音服务器（PipeWire / PulseAudio）是否在场：
+  The engine now first probes whether a sound server (PipeWire / PulseAudio) is present:
 
-  - **在场时，可选设备只剩经服务器路由的三种 PCM**（`default` / `pipewire` /
-    `pulse`），直连硬件的（`sysdefault`、`hw:`、`plughw:`、`front:`、
-    `surround*:`、`iec958:`、`hdmi:` …）一律不进列表——ALSA 硬件设备是独占语义，
-    抓走一个就挤死服务器上的所有其它客户端；
-  - **默认设备只开 PCM `default`**，打不开就如实报错，不再回退到裸硬件；
-  - 没有声音服务器（headless 的裸 ALSA 系统）时行为不变，直连没有
-    「挤死别人」的问题。
+  - **When present, the selectable devices are only the three PCMs routed through the server** (`default` / `pipewire` /
+    `pulse`), and direct-to-hardware ones (`sysdefault`, `hw:`, `plughw:`, `front:`,
+    `surround*:`, `iec958:`, `hdmi:` …) never enter the list — ALSA hardware devices are exclusive-semantics,
+    and grabbing one strangles all other clients on the server;
+  - **The default device opens only PCM `default`**, and if it can't, it reports honestly rather than falling back to raw hardware;
+  - With no sound server (a headless bare-ALSA system) behavior is unchanged; a direct connection has no
+    "strangle others" problem.
 
-  配置里遗留的 `audio_device = "Default Audio Device"` 不会让程序起不来：
-  找不到就记一条日志、回退系统默认（界面会显示实际打开的设备）。
+  A leftover `audio_device = "Default Audio Device"` in the config won't stop the program: if not found, it logs a line and falls back to the system default (the UI shows the actually opened device).
 
-- **音频线程卡住时退出会僵住，设备一直不释放**。收尾对音频线程的 `join` 改成
-  **有界等待**（3 秒）：正常情况它一个轮询周期（200ms）内就退出；万一卡在驱动
-  层面的阻塞操作上，等不到就放弃——进程照常退出，内核回收它持有的全部 fd，
-  设备立即释放。`panic`（release 构建 `panic = "abort"`）与被 `kill -9` 时
-  同样由内核回收，不需要额外处理。
+- **Exit froze when the audio thread was stuck, and the device was never released**. The final `join` on the audio thread was changed to a
+  **bounded wait** (3 seconds): normally it exits within one polling cycle (200 ms); if it's stuck in a driver-level blocking operation,
+  giving up after the wait — the process exits as usual, the kernel reclaims all fds it holds, and the device is released immediately. `panic` (release builds use `panic = "abort"`) and being `kill -9`'d
+  are likewise reclaimed by the kernel, needing no extra handling.
 
 ## [0.4.0] - 2026-09-26
 
-### 修复
+### Fixed
 
-- **连续播放 / 频繁切歌后常驻内存涨到一百多 MB，而且不回落**。两处叠加：
+- **Resident memory grew to over a hundred MB after continuous playback / frequent track changes, and didn't fall back**. Two things compounded:
 
-  1. 边下边播的字节缓冲**只追加、不回收**，一首歌下到多少就常驻多少（实测 1:1，
-     放 64 MiB 的 Hi-Res 就是 66.5 MiB）；
-  2. 切歌时**不取消**上一首的下载任务。用户每按一次 `n`，就多一条还在跑的下载在
-     后台把整首往内存里灌，谁也不回收——实测连切 5 首、每首 64 MiB，RSS 冲到
-     **323.7 MiB**。
+  1. The streaming byte buffer **only appends, never reclaims**, so however much a song downloads stays resident (measured 1:1,
+     a 64 MiB Hi-Res file means 66.5 MiB);
+  2. Track changes **don't cancel** the previous track's download task. Every press of `n` adds another still-running download
+     pouring the whole track into memory in the background, with nothing reclaiming it — measured: 5 track changes of 64 MiB each pushed RSS to
+     **323.7 MiB**.
 
-  现在缓冲只保留读指针附近 4 MiB 的尾部窗口，窗口之外的字节从落盘文件 `pread`
-  读回来（下载本来就是落盘的，数据就在页缓存里）；切歌/停止/退出时主动取消旧任务。
-  同样负载下：单曲 66.5 → **12.5 MiB**，连切 5 首 323.7 → **3.0 MiB**，
-  同一份对照负载连播 24 首稳定在 12.5 MiB（不再随曲目数增长）。
+  Now the buffer keeps only a 4 MiB tail window around the read pointer, and bytes outside it are read back from the on-disk file via `pread`
+  (the download is written to disk anyway, so the data is in the page cache); track change/stop/exit actively cancel the old task.
+  Under the same load: single track 66.5 → **12.5 MiB**, 5 track changes 323.7 → **3.0 MiB**,
+  and 24 consecutive tracks on the same comparison load stabilize at 12.5 MiB (no longer growing with track count).
 
-- **边下边播时播放进度会突然回到开头**。用户看到的是「缓冲一下，然后从头再放一遍」，
-  根因有两层，缺一不可地都要修：
+- **Playback position suddenly jumped back to the start during streaming playback**. The user sees "it buffers, then plays from the beginning again",
+  and the root cause has two layers, both of which had to be fixed:
 
-  1. **流一放完就重新装载**。后台下载下完时发的是「音频已落盘，可以放了」，
-     而这个事件的处理函数会 `audio.load()` 一次——可那时候歌**已经在放了**，
-     重新装载等于把播放位置冲回 0。现在这个收尾走独立事件，只清进度、预取、回收缓存，
-     绝不碰播放器。
-  2. **断流被当成了播完**。rodio 的解码器把任何读错误都吞成 EOF，所以「数据没跟上」
-     和「这首放完了」在播放层长得一模一样；按「播完」处理就会触发切歌，单曲循环
-     （或队列里只一首）下就是从 0 再放一遍。现在引擎按住那条流的真实状态分档：
-     取消（静默）、下载失败（报错，不切歌）、读超时（留住位置续播一次）、下完了
-     （才切歌）。
+  1. **Reloading as soon as the stream finished**. When the background download finished it emitted "audio is on disk, ready to play",
+     and that event's handler called `audio.load()` once — but by then the song **was already playing**, and
+     reloading reset the position to 0. This finalization now goes through a separate event that only clears progress, prefetches, and reclaims cache,
+     never touching the player.
+  2. **A broken stream was treated as finished**. rodio's decoder swallows any read error as EOF, so "data didn't keep up"
+     and "this song finished" look identical at the playback layer; treating it as "finished" triggers a track change, and under repeat-one
+     (or a single-track queue) that means playing from 0 again. Now the engine classifies by the stream's real state:
+     cancelled (silent), download failed (error, no track change), read timeout (keep the position and resume once), finished
+     (then change track).
 
-  另外位置要在**曲目结束之前**就记下来：源一结束 `Player::get_pos()` 就报 0，
-  那一帧再读就等于把位置抹掉（用户看到进度条突然回到 00:00）。断流与下载失败之后，
-  按 Space 会从停住的位置接着放，而不是从头。
+  Also, the position must be recorded **before the track ends**: once the source ends, `Player::get_pos()` reports 0, and
+  reading it on that frame erases the position (the user sees the progress bar suddenly jump back to 00:00). After a broken stream or download failure,
+  pressing Space continues from where it stopped, rather than from the start.
 
-- **下载中断会把「半首」留在缓存里**。流式下载原先直接写正式缓存文件名，失败或被
-  取消时会留下一个「看起来完整、其实只有前几 MB」的文件；而缓存查找只按「文件在不在」
-  判断，下次播放命中它就会在中间莫名结束。更糟的是它还会**反复重启**：文件放完 →
-  被判为播完 → 单曲循环从头 → 再放完 —— 用户实际听到的就是十几秒一循环。
-  现在先写 `.part`、**下完才改名**，失败/取消时删掉；缓存回收与「清空缓存」也跳过
-  `.part`（它是半成品，不是缓存）。
+- **An interrupted download left "half a song" in the cache**. Streaming download previously wrote the final cache filename directly, and on failure or
+  cancellation it left a "looks complete, actually only the first few MB" file; cache lookup judges only by "is the file there",
+  so the next play would hit it and end inexplicably in the middle. Worse, it would **restart repeatedly**: the file plays out →
+  judged finished → repeat-one from the start → plays out again — the user actually hears a loop every ten-odd seconds.
+  Now it writes `.part` first and **renames only when complete**, deleting it on failure/cancel; cache reclamation and "clear cache" also skip
+  `.part` (it's a half-finished product, not a cache).
 
-### 变更
+### Changed
 
-- **打开歌单时，首屏改从**末尾那一页**取**。原先不管列表怎么显示都先取第 1 页，
-  而默认是倒序显示（`o` 键可切），真正出现在最上面的是**最后一页**的内容——
-  于是用户看到的是「先闪一屏歌单中部的歌，几秒后整表到位、画面整体翻一次」。
-  实测反馈就是「每次进歌单，第一眼看到的都不是我心里的第一首」。现在倒序显示时
-  首屏直接取末页，一进去就是最终列表的头部；正序显示时仍取第 1 页。
+- **When opening a playlist, the first screen now fetches from the** last **page**. Previously it always fetched page 1 regardless of how the list displayed,
+  while the default display is descending (`o` toggles), so what truly appears on top is the **last page**'s content —
+  so the user saw "a flash of mid-playlist songs, then a few seconds later the whole table arrives and the screen flips entirely".
+  The measured feedback was "every time I enter a playlist, the first thing I see isn't the first song in my head". Now in descending display
+  the first screen fetches the last page directly, so entering shows the head of the final list; in ascending display it still fetches page 1.
 
-  顺带修掉一个连带的判据错误：「这一页不满 ⇒ 这就是全部」**只在第 1 页成立**。
-  末页不满是常态（414 首 = 13×30 + 24，末页就 24 首），照搬老判据会让「整表补齐」
-  永远不出门，歌单从此只显示那 24 首。曲数拿不到时（有的接口不给）仍退回第 1 页。
+  Also fixed a related criterion error: "this page isn't full ⇒ this is everything" **holds only for page 1**.
+  The last page not being full is normal (414 songs = 13×30 + 24, so the last page has 24), and copying the old criterion would make "fill the whole table"
+  never happen, so the playlist would show only those 24 forever. When the song count is unavailable (some interfaces don't give it) it still falls back to page 1.
 
-### 文档
+### Docs
 
-- 新增 **[docs/MAINTENANCE.md](docs/MAINTENANCE.md)**：模块地图、数据流、风险点与
-  已知坑、改完怎么跑验证。`docs/DESIGN.md` 的「边下边播」一节补上了窗口回收、
-  断流分档与 `.part` 改名三条设计说明。
+- Added **[docs/MAINTENANCE.md](docs/MAINTENANCE.md)**: module map, data flow, risk points and
+  known pitfalls, and how to run verification after changes. `docs/DESIGN.md`'s "streaming playback" section gained three design notes on window reclamation,
+  stream classification, and the `.part` rename.
 
 ## [0.3.10] - 2026-09-25
 
-### 修复
+### Fixed
 
-- **歌手列表只显示第一组，A–Z 全表被丢掉**。`/artist/lists` 是按首字母**分组**返回的
-  （`data.info` 是 28 个 `{title, singer: [...]}`：热门 + A–Z + `#`），而解析器把组包装
-  当成了歌手本身——每一组都解析失败，最后掉进兜底扫描只命中第一组，界面只剩热门那
-  60 人。实测应有 **1054** 人。线上日志里因此刷了 19 条「响应未命中任何候选键……
-  请核对字段布局」的警告——那条警告本身就在喊「布局没认全」，只是一直没人回头查。
+- **The artist list showed only the first group; the whole A–Z table was dropped**. `/artist/lists` returns grouped by initial letter
+  (`data.info` is 28 `{title, singer: [...]}`: hot + A–Z + `#`), while the parser treated the group wrapper
+  as the artist itself — every group failed to parse, and it finally fell into the fallback scan hitting only the first group, leaving only the hot 60
+  artists in the UI. Measured: there should be **1054**. The online log therefore spammed 19 "response matched no candidate key……
+  please check the field layout" warnings — that warning itself was shouting "the layout isn't fully recognized", it just had no one going back to check.
 
-- **点进歌手，一首歌都没有**。`/artist/audios` 的 `data` **本身就是歌曲数组**（歌单是
-  `data.songs`、排行榜是 `data.songlist`，只有它是裸数组），而 `extract_songs` 只在
-  `data` 里按命名键找，数组本身永远命中不了，于是恒返回空。修复后歌手页正常列出。
+- **Clicking into an artist gave zero songs**. `/artist/audios`'s `data` **is itself the song array** (playlists are
+  `data.songs`, rankings are `data.songlist`, and only this one is a bare array), while `extract_songs` only looked for named keys
+  inside `data`; the array itself never matched, so it always returned empty. After the fix the artist page lists normally.
 
-  这两个都是拿真实响应逐字段核对「解析器读的候选键 vs 响应里实际存在的键」查出来的，
-  与之前网易云 `ar`/`al`/`dt` 那次同型。各配了用真实 JSON 写的单元测试。
+  Both were found by checking, field by field against real responses, "the candidate keys the parser reads vs. the keys actually present in the response",
+  the same shape as the earlier NetEase `ar`/`al`/`dt` case. Each got a unit test written with real JSON.
 
-- **接口端口上跑着别的服务时，报错看不懂**。服务端回 2xx 但不是 JSON 时，原先直接抛
-  serde 的原话 `expected value at line 1 column 1`，完全看不出该去查什么。现在单独成
-  `AppError::NonJsonBody`：带上响应体开头（是网页、是空响应、还是一段纯文本，一眼可辨），
-  并直接提示「检查该音源的 `api_base`」。实测撞过：配置里 `[sources.kugou] api_base`
-  指向 3000，而那个端口上跑着另一个 Web 服务。
+- **When another service ran on the API port, the error was unreadable**. When the server returned 2xx but not JSON, it previously threw
+  serde's raw message `expected value at line 1 column 1`, giving no clue what to check. It's now a separate
+  `AppError::NonJsonBody`: it includes the start of the response body (whether it's a web page, an empty response, or a piece of plain text, all obvious at a glance)
+  and directly suggests "check that source's `api_base`". Measured hitting this: the config's `[sources.kugou] api_base`
+  pointed to 3000, while another web service ran on that port.
 
-- **发行包自足性检查会假报「缺脚本」**。`tar -tzf … | grep -q X` 里 `grep -q` 命中即退出，
-  而 tar 是边解析边往 stdout 写的，会因 SIGPIPE 而死（退出码 141）；`set -o pipefail`
-  于是把整条管道判为失败——包明明是好的却报缺。改成先把清单落到文件再逐项核对。
+- **The release self-sufficiency check falsely reported "missing script"**. In `tar -tzf … | grep -q X`, `grep -q` exits on the first match,
+  while tar writes to stdout as it parses, dying from SIGPIPE (exit code 141); `set -o pipefail`
+  then judged the whole pipeline as failed — the package was fine but reported missing. Changed to write the listing to a file first and check item by item.
 
-- **发版动作清单没跟着 `--no-aur` 变**。带 `--no-aur` 跑仍会列出「更新 AUR」「推 AUR」，
-  然后一件都不做。这份清单的用途就是让人在按下回车之前确认「将要发生什么」，列了却不做
-  等于在骗人；现在按开关拼装并明示已跳过。
+- **The release action list didn't change with `--no-aur`**. Running with `--no-aur` still listed "update AUR" and "push AUR",
+  then did nothing. This list's purpose is to let a person confirm "what will happen" before pressing Enter; listing without doing is
+  lying, so it's now assembled by switch and states the skip explicitly.
 
-### 新增
+### Added
 
-- **`scripts/release` —— 一条命令走完发版**。阶段一（本地、可反复跑）：前置检查 →
-  回收中间产物 → clippy + 测试 → 构建 → 打发行包；然后**停下来**列出阶段二将要执行的
-  每一条外部动作，等确认。阶段二（不可逆）：push main → 打 tag → 推 tag → 更新并验证
-  AUR → 建 Release → 下载回来核对 → 推 AUR。网络步骤带退避重试（实测 `git push` 报过
-  `TLS unexpected eof`），建 Release 做成幂等。AUR 账号拿不到时用 `--no-aur` 整条跳过。
+- **`scripts/release` — release in one command**. Stage one (local, repeatable): prechecks →
+  reclaim intermediates → clippy + tests → build → package; then **stop** and list every external action stage two will run,
+  waiting for confirmation. Stage two (irreversible): push main → tag → push tag → update and verify
+  AUR → create Release → download back and verify → push AUR. Network steps have backoff retries (measured: `git push` reported
+  `TLS unexpected eof`), and Release creation is idempotent. When the AUR account is unavailable, `--no-aur` skips the whole thing.
 
-- **`scripts/clean` —— 回收构建中间产物**。一轮发版会在 `target/package/`、`dist/` 里的
-  历史 tarball、AUR 仓库的 `src/` 与 `pkg/` 三处留下东西，实测 10+ MiB/轮。默认只清明确
-  可再生的中间产物，**不动** `target/` 整体（会毁掉增量编译）与运行时的歌曲磁盘缓存
-  （用户数据，且它自带逐出逻辑）；要清得显式加 `--all` / `--cache`。
+- **`scripts/clean` — reclaim build intermediates**. One release leaves things in three places — `target/package/`, historical tarballs in `dist/`,
+  and the AUR repo's `src/` and `pkg/` — measured 10+ MiB per round. By default it clears only clearly regenerable intermediates, **not**
+  `target/` as a whole (which would destroy incremental compilation) or the runtime song disk cache
+  (user data, and it has its own eviction logic); to clear those, add `--all` / `--cache` explicitly.
 
-### 文档
+### Docs
 
-- 新增 **`docs/RELEASE.md`**：版本号与标签规则、发行版产物应包含哪些内容、目标仓库、
-  各步骤的执行顺序与依赖关系、失败后怎么恢复，以及两类回收逻辑的触发时机与清理范围。
-  其中「为什么 AUR 更新必须在 push tag 之后」单独写了——那是整条流程里唯一无法重排的依赖。
-- `CONTRIBUTING.md` 的发版一节改为指向脚本与规格。原来那份手工步骤正是脚本现在做的事，
-  留两份必然漂移。
-- 更正 **crates.io 的错误声明**：0.3.9 的条目与 GitHub 发行说明里写了「已发布到 crates.io」，
-  那是假的——`cargo install` 只能装上主程序，不带那三个脚本、也不带接口服务，是条「半截」
-  的安装路径。已从 CHANGELOG 与发行说明里撤掉（tag 里的原文改不了，由本版覆盖）。
-- README 补上「Release 里的预编译包」这条安装路径——它今天就能用，之前只写在
-  `docs/INSTALL.md` 里，门面上看不到。
-- `docs/INSTALL.md` 预编译包示例里的版本号跟到 0.3.10。
+- Added **`docs/RELEASE.md`**: version and tag rules, what a release artifact should contain, target repositories,
+  each step's execution order and dependencies, how to recover after failure, and the trigger timing and scope of the two kinds of cleanup logic.
+  "Why the AUR update must come after pushing the tag" is written out separately — that is the only un-reorderable dependency in the whole flow.
+- `CONTRIBUTING.md`'s release section now points to the script and the spec. The original manual steps were exactly what the script now does, and
+  keeping two copies necessarily drifts.
+- Corrected **a false crates.io claim**: the 0.3.9 entry and GitHub release notes said "published to crates.io",
+  which was false — `cargo install` only installs the main program, carrying neither those three scripts nor the interface service, a "half"
+  install path. Removed from CHANGELOG and the release notes (the original text in the tag can't be changed; this version supersedes it).
+- README gained the "prebuilt package in Releases" install path — it works today and was previously only in
+  `docs/INSTALL.md`, invisible on the face.
+- The version number in `docs/INSTALL.md`'s prebuilt-package example follows to 0.3.10.
 
 ## [0.3.9] - 2026-09-25
 
-### 文档
+### Docs
 
-- `CONTRIBUTING.md` 新增**「发版」**一节，把今天连发几版踩到的坑写成步骤：
-  工具脚本要在打 tag **之前**提交、AUR 的 `pkgver`/`sha256sums` 跟着改且
-  `.SRCINFO` 必须重新生成、上游提交号钉在**两处**、**发完要下载回来核对**
-  （0.3.7 的 tarball 漏脚本就是因为只看本地目录）。
-- 修 `CONTRIBUTING.md` 两处过时内容：「release 约 5.4 MiB、常驻约 13 MiB」→ 实测
-  7.0 MiB / 14–17 MiB；指向 README「实测修正过的认知」表的引用——那张表其实在
-  `docs/DESIGN.md` 的「接口适配」，这个引用在拆分 README **之前**就是坏的。
-- 「解析上游响应要宽容」补一条：**同一个上游可能有多套字段布局**，别只认调试时
-  看到的那一套（网易云的 `artists`/`album`/`duration` 与 `ar`/`al`/`dt`），
-  每种都要有单元测试钉住。
-- 修 `docs/LICENSES.md` 里一条**安装后会断的链接**：文档装在
-  `/usr/share/doc/kugou-tui/docs/`，而许可按 Arch 惯例在 `/usr/share/licenses/`
-  下，`../LICENSE` 必然失效。改成写明路径，两种场合都读得懂。
+- `CONTRIBUTING.md` gains a **"Release"** section, writing today's several back-to-back releases' pitfalls into steps:
+  tool scripts must be committed **before** tagging, AUR's `pkgver`/`sha256sums` follow along and
+  `.SRCINFO` must be regenerated, the upstream commit is pinned in **two places**, and **after releasing you must download back and verify**
+  (the 0.3.7 tarball missed scripts because only the local directory was checked).
+- Fixed two outdated spots in `CONTRIBUTING.md`: "release about 5.4 MiB, resident about 13 MiB" → measured
+  7.0 MiB / 14–17 MiB; and a reference to README's "measured corrections" table — that table is actually in
+  `docs/DESIGN.md`'s "interface adaptation", and this reference was broken **before** the README was split.
+- "Parsing upstream responses must be tolerant" gains a point: **one upstream may have multiple field layouts**, don't recognize only
+  the one seen while debugging (NetEase's `artists`/`album`/`duration` vs. `ar`/`al`/`dt`);
+  each must be pinned by a unit test.
+- Fixed a **link that breaks after installation** in `docs/LICENSES.md`: the docs are installed under
+  `/usr/share/doc/kugou-tui/docs/`, while the license, per Arch convention, is under `/usr/share/licenses/`,
+  so `../LICENSE` necessarily fails. Changed to stating the path, readable in both cases.
 
 ## [0.3.8] - 2026-09-25
 
-### 修复
+### Fixed
 
-- **`kugou-tui-install-api` 装了一堆用不到的开发依赖**。它跑的是 `npm install`
-  （全量），而 `kugou-api` 的自动补装用的是 `npm install --omit=dev`——两处不一致。
+- **`kugou-tui-install-api` installed a pile of unneeded dev dependencies**. It ran `npm install`
+  (full), while `kugou-api`'s automatic top-up used `npm install --omit=dev` — the two were inconsistent.
 
-  服务运行时是 `node app.js`，上游那 10 个 devDependencies 全是开发工具
-  （`nodemon` / `typescript` / `pkg` / `prettier` / `ts-node` / `tsdown` / `@types/*`），
-  一个都用不到。实测同一台机器：装全量 **311** 个包，只装生产依赖 **120** 个。
-  差的那一半纯粹是白等、白占磁盘。现在两处统一用 `--omit=dev`。
+  The service runs as `node app.js`, and upstream's 10 devDependencies are all dev tools
+  (`nodemon` / `typescript` / `pkg` / `prettier` / `ts-node` / `tsdown` / `@types/*`),
+  none of which are used. Measured on the same machine: full install **311** packages, production-only **120**.
+  The difference is half pure waiting and wasted disk. Both places now use `--omit=dev`.
 
-### 文档
+### Docs
 
-- `docs/INSTALL.md` 补上**「路径三：预编译二进制」**。之前只有「从源码构建」与
-  「AUR」两条，非 Arch 用户拿到 Release 里的 tarball 之后没有任何说明。
-  现在写清了解压、把二进制与三个脚本链进 `~/.local/bin`（`scripts/kugou-tui` 与
-  二进制同名，链过去要改名）、以及 `kugou-tui-install-api kugou` 这一步。
+- `docs/INSTALL.md` gained **"Path 3: prebuilt binaries"**. Previously there were only "build from source" and
+  "AUR", leaving non-Arch users with no explanation after getting the Release tarball.
+  Now it explains extracting, symlinking the binary and three scripts into `~/.local/bin` (`scripts/kugou-tui` has the same
+  name as the binary, so rename when linking), and the `kugou-tui-install-api kugou` step.
 
-> 另外，从本版起 Release 的 tarball 里**同时包含三个脚本与全部文档**（之前只有
-> 二进制与 README）。非 Arch 用户解压后就能把接口服务配起来，不必再回仓库 clone。
+> Also, from this version on the Release tarball **contains three scripts and all docs at once** (previously only the
+> binary and README). Non-Arch users can set up the interface service right after extracting, without going back to the repo to clone.
 
 ## [0.3.7] - 2026-09-25
 
-### 新增
+### Added
 
-- **支持「软件包内置的接口服务」**。为 AUR 包的「装完即用」准备：包会把接口服务连同
-  生产依赖装到 `/usr/share/kugou-tui/api/<音源>`（只读），三个脚本现在都会优先用它，
-  没有才退回 `~` 下自己 clone 的那份——`kugou-api-install` 发现系统目录就直接启动，
-  **跳过 clone 与 npm install**。
+- **Support for a "package-provided interface service"**. Prepared for the AUR package's "works right after install": the package installs the interface service together with
+  its production dependencies into `/usr/share/kugou-tui/api/<source>` (read-only), and the three scripts now prefer it,
+  falling back to the one cloned under `~` only if absent — `kugou-api-install` starts it directly when it finds the system directory,
+  **skipping clone and npm install**.
 
-  之所以能把服务打进包里：它**不往自己目录写任何文件**（源码里没有 `writeFile` /
-  `mkdirSync`），实测整个目录 `chmod -R a-w` 之后照样能起、能返回真实数据。
-  于是 `/usr` 保持只读、不被 npm 污染，也不需要常驻进程。
+  The reason the service can go into a package: it **writes no files into its own directory** (no `writeFile` /
+  `mkdirSync` in the source), and measured, after `chmod -R a-w` on the whole directory it still starts and returns real data.
+  So `/usr` stays read-only, unpolluted by npm, with no resident process needed.
 
-  路径可用 `KUGOU_API_SYSTEM_ROOT` 覆盖（给非 `/usr` 前缀的打包与测试用）。
+  The path can be overridden with `KUGOU_API_SYSTEM_ROOT` (for non-`/usr` prefixes in packaging and tests).
 
-### 修复
+### Fixed
 
-- **全新安装时启动器静默退出**。`scripts/kugou-tui` 开了 `set -o pipefail`，而读配置
-  用的是 `sed -n ... | head -n 1`；**全新安装时配置文件还不存在**，`sed` 退出非零 →
-  管道被判失败 → `set -e` 让整个脚本静默退出（退出码 2，一句提示都没有）。
-  用户第一次跑就是黑的，而这条路径正是「装完即用」要走的。
+- **The launcher exited silently on a fresh install**. `scripts/kugou-tui` enabled `set -o pipefail`, while reading the config
+  used `sed -n ... | head -n 1`; **on a fresh install the config file doesn't exist yet**, so `sed` exited non-zero →
+  the pipeline was judged failed → `set -e` made the whole script exit silently (exit code 2, not one message).
+  The user's first run was black, and this path is exactly the one "works right after install" must take.
 
-  现在读取前先 `[ -r ]` 判可读。顺带把重复了**三遍**的 `sources.active` 提取合并成
-  一个 `read_active_source()`。
+  Now it checks `[ -r ]` for readability before reading. Also merged the `sources.active` extraction, repeated **three times**, into
+  one `read_active_source()`.
 
 ## [0.3.6] - 2026-09-25
 
-### 修复
+### Fixed
 
-- **启动器脚本装到系统目录后找不到客户端二进制**。`scripts/kugou-tui` 与
-  `scripts/kugou-api` 都按「脚本所在目录 `/../target/release/kugou-tui`」定位二进制
-  ——软链到 `~/.local/bin` 没问题（`readlink -f` 会解析回仓库），但脚本被**拷贝到**
-  `/usr/bin` 时那条路径会变成 `/usr/target/...`，必然不存在。这是发行版打包一定会踩的
-  坑（准备 AUR 包时发现：装完 `kugou-tui` 直接报「找不到可执行文件」）。
+- **The launcher script couldn't find the client binary after being installed to a system directory**. Both `scripts/kugou-tui` and
+  `scripts/kugou-api` located the binary as "script directory `/../target/release/kugou-tui`"
+  — symlinking into `~/.local/bin` was fine (`readlink -f` resolves back to the repo), but when the script is **copied** to
+  `/usr/bin`, that path becomes `/usr/target/...`, which necessarily doesn't exist. This is a pitfall distro packaging always hits
+  (found while preparing the AUR package: after install, `kugou-tui` directly reported "executable not found").
 
-  现在两处都加了 `PATH` 回退：仓库里的构建产物优先，找不到就用 `PATH` 上的
-  `kugou-tui`。`KUGOU_TUI_BIN` / `KUGOU_API_BIN` 仍然可以显式指定；都没找到时的报错
-  信息也说清了「从源码跑要先编译」与「装过包该设哪个变量」。
+  Both now have a `PATH` fallback: the repo's build output first, and the `kugou-tui` on `PATH` if not found. `KUGOU_TUI_BIN` / `KUGOU_API_BIN` can still be set explicitly; the error
+  when neither is found now also clarifies "running from source requires building first" and "which variable to set if installed from a package".
 
 ## [0.3.5] - 2026-09-25
 
-### 修复
+### Fixed
 
-- **网易云下打开歌单里的歌曲一直 404**。歌单列表能正常显示，点进去却报
-  `接口 /playlist/track/all/new 返回状态码 404`。
+- **Opening songs inside a NetEase playlist always 404'd**. The playlist list displayed fine, but clicking in reported
+  `interface /playlist/track/all/new returned status 404`.
 
-  原因是歌单「首屏」那条路径**绕过了音源分派**：它为了「先给一页让界面立刻有内容」，
-  直接调了 `ApiClient` 上酷狗的分页方法（`user_playlist_tracks` /
-  `playlist_tracks`，参数是 `listid` + `page` + `pagesize`，端点为
-  `/playlist/track/all/new`）——那是酷狗的端点，网易云服务根本没有。而后台补全
-  那一段是走分派的（`active_source.*_tracks_all`），偏偏首屏失败会直接 `return`，
-  **根本走不到补全**，所以症状就是「一直 404」。
+  The reason is that the playlist "first screen" path **bypassed source dispatch**: to "give one page so the UI has content immediately",
+  it called Kugou's paging methods directly on `ApiClient` (`user_playlist_tracks` /
+  `playlist_tracks`, with parameters `listid` + `page` + `pagesize`, endpoint
+  `/playlist/track/all/new`) — that's Kugou's endpoint, which the NetEase service doesn't have at all. And the background fill-in
+  went through dispatch (`active_source.*_tracks_all`), except the first screen's failure `return`ed directly,
+  **never reaching the fill-in**, so the symptom was "always 404".
 
-  现在分页也走分派（新增 `SourceKind::playlist_tracks_page` 与 `PlaylistRef`，
-  区分酷狗的「自己的歌单 / 公开歌单」两套端点；网易云两者是同一个端点）。
+  Now paging also goes through dispatch (adding `SourceKind::playlist_tracks_page` and `PlaylistRef`,
+  distinguishing Kugou's two endpoint sets for "own playlist / public playlist"; for NetEase both are the same endpoint).
 
-  顺带把两处重复的翻页实现合并成一个 `playlist_tracks_all`，并删掉只为「首屏补盖
-  来源章」而存在的 `SourceKind::stamp`——首屏走分派之后，盖章由分派层统一负责，
-  那个补丁没有存在理由了。
+  Also merged the two duplicated paging implementations into one `playlist_tracks_all`, and removed the `SourceKind::stamp` that existed only to "stamp the source for the first screen's fill-in" — after the first screen goes through dispatch, stamping is handled uniformly by the dispatch layer,
+  and that patch had no reason to exist.
 
-- **网易云歌单页与歌手页里的歌没有歌手、没有专辑、时长显示 `00:00`**。搜索页却
-  一切正常，所以不容易发现。
+- **Songs in NetEase playlist and artist pages had no artist, no album, and showed `00:00` duration**. The search page was
+  fine, so it wasn't easy to notice.
 
-  网易云用**两套字段名**描述同一首歌：`/search` 给 `artists` / `album` / `duration`，
-  而 `/playlist/track/all`（歌单、榜单）与 `/artists`（歌手热歌）给 `ar` / `al` / `dt`。
-  解析只认了前者。现在两套都认，并加了单元测试钉住两种布局。
+  NetEase uses **two field-name sets** for the same song: `/search` gives `artists` / `album` / `duration`,
+  while `/playlist/track/all` (playlists, rankings) and `/artists` (artist top songs) give `ar` / `al` / `dt`.
+  The parser recognized only the former. Now both are recognized, with unit tests pinning both layouts.
 
-- **网易云云端歌单永远报「尚未登录」**。扫码登录后界面显示「登录成功」，歌单页却
-  一直说未登录——两边看到的状态不一致。
+- **NetEase cloud playlists always reported "not logged in"**. After QR login the UI showed "login successful", but the playlist page
+  kept saying not logged in — the two sides disagreed.
 
-  根因在服务端下发的凭据格式上：`NeteaseCloudMusicApi`（api-enhanced）的
-  `server.js` 用 `/;\s+|(?<!\s)\s+$/g` 切分 `Cookie` 头，**只认「分号 + 空格」**
-  这一种分隔；而它在 `/login/qr/check` 成功时返回的 `cookie` 字段是**整段
-  `Set-Cookie`**（含 `Max-Age` / `Expires` / `Path` 属性，多个 cookie 之间用 `;;`
-  连接）。`;;` 处不切分，于是 `Path=/openapi/clientlog;;MUSIC_U=00CC…` 被当成
-  **一个** `k=v`，键是 `Path`，`MUSIC_U` 压根没进 `req.cookies`。
+  The root cause is the credential format the server issues: `NeteaseCloudMusicApi` (api-enhanced)'s
+  `server.js` splits the `Cookie` header with `/;\s+|(?<!\s)\s+$/g`, **recognizing only the "semicolon + space"**
+  separator; while the `cookie` field it returns on a successful `/login/qr/check` is a **whole
+  `Set-Cookie`** (with `Max-Age` / `Expires` / `Path` attributes, multiple cookies joined by `;;`).
+  `;;` isn't split, so `Path=/openapi/clientlog;;MUSIC_U=00CC…` is treated as
+  **one** `k=v`, with key `Path`, and `MUSIC_U` never entering `req.cookies`.
 
-  也就是说：这串凭据从存进配置文件那一刻起就是坏的，界面上的「已登录」是个谎言。
+  That is: this credential string was broken from the moment it was stored in the config file, and the UI's "logged in" was a lie.
 
-  现在存入前会先规范化（`util::normalize_cookie_header`：丢属性段、丢空段、
-  按 `"; "` 重连、同名取最后一次），**组装请求头时再过一遍**——后者让存量坏配置
-  无需重新扫码即可自愈。
+  Now it's normalized before storing (`util::normalize_cookie_header`: drop attribute segments, drop empty segments,
+  reconnect with `"; "`, last-wins for duplicates), **and passes through once more when assembling the request header** — the latter lets existing broken configs
+  self-heal without re-scanning the QR code.
 
-- **网易云的请求会带上酷狗的 `dfid`**。`dfid` 是酷狗专有的设备指纹（它把 dfid 拼进
-  cookie 交给上游做风控校验），网易云没有这个机制。原先无条件拼进去，等于把一个
-  别家的设备标识发给了它，既没用、又让人分不清这串凭据到底属于谁。现在按
-  `SourceKind::uses_device_fingerprint()` 判断，只发给酷狗。
+- **NetEase requests carried Kugou's `dfid`**. `dfid` is Kugou's proprietary device fingerprint (it splices dfid into
+  the cookie for upstream risk control), and NetEase has no such mechanism. Previously it was spliced in unconditionally, sending a
+  foreign device identifier to it — useless, and confusing about whose credential string this actually is. Now it's decided by
+  `SourceKind::uses_device_fingerprint()`, sent only to Kugou.
 
-- **网易云的四个写接口走了会重试的通道**（加歌 / 删歌 / 建歌单 / 删歌单），违反
-  「写操作不重试」的约定：删歌第一次其实成功了、只是响应丢了的话，重发会得到
-  「歌不存在」——用户看到一句失败提示，而歌其实已经删掉了。改用 `*_mutating` 变体。
+- **NetEase's four write interfaces went through a retrying channel** (add song / remove song / create playlist / delete playlist), violating
+  "writes are not retried": if deleting a song actually succeeded the first time and only the response was lost, resending gives
+  "song doesn't exist" — the user sees a failure message while the song is actually already deleted. Changed to `*_mutating` variants.
 
-- **网易云登录后界面弹「获取用户资料失败」**。拉资料走的是酷狗端点（不带 uid），
-  网易云返回 `{"code":400,"message":"参数错误"}`。现在按音源分派：网易云走
-  `/user/detail?uid=`（昵称、头像、等级）。会员信息在网易云没有对应端点
-  （`/user/vip/detail` 是 404），通过新增的 `Capability::vip` 跳过，不再白打接口。
+- **NetEase popped "failed to fetch user profile" after login**. Fetching the profile went through Kugou's endpoint (without uid),
+  and NetEase returned `{"code":400,"message":"参数错误"}`. Now it dispatches by source: NetEase goes through
+  `/user/detail?uid=` (nickname, avatar, level). Membership has no corresponding endpoint on NetEase
+  (`/user/vip/detail` is a 404), skipped via the new `Capability::vip`, no longer calling a dead interface.
 
-### 文档
+### Docs
 
-- **README 拆分为门面版**（295 → 129 行）：只留一句话 slogan、三个核心卖点、
-  最短安装路径、精简功能表、与 cmus / mpd + ncmpcpp 的对比、以及指向 docs/ 的索引。
-  边下边播原理、环境要求、启动脚本与环境变量、第三方许可分析、完整免责条款分别
-  移入 `docs/DESIGN.md`、`docs/INSTALL.md`、`docs/LICENSES.md`、`docs/DISCLAIMER.md`。
-- 新增 `docs/INSTALL.md`：环境要求、安装路径、API 服务部署（一键 + 手动）、
-  启动器脚本与两张环境变量表、不用常驻服务的 fish 启动函数、装完先做什么。
-- 新增 `docs/LICENSES.md`、`docs/DISCLAIMER.md`。
-- `docs/USER_GUIDE.md` 补「功能一览」完整表，并在网易云一节写明 cookie 的格式要求
-  （手动填写时要写 `k=v; k=v`，不要整段粘贴 `Set-Cookie`）。
-- **改正 `docs/DESIGN.md` 里一处关于内存的错误断言**。原文写「边下边播不额外吃内存，
-  写进环形缓冲、不在内存里拼装整首歌」，实际 `StreamingBuffer` 是**只追加不回收**的
-  字节缓冲（要支持 `Seek` 就得留着已读字节）。实测往缓冲里塞 64 MiB、RSS 就涨 64 MiB
-  （1:1），所以放几十 MB 的 Hi-Res 时内存会按曲目体积线性上涨。已在文档中如实说明，
-  README 的内存对比脚注也加了边界提示。
+- **README split into a face version** (295 → 129 lines): keeping only a one-line slogan, three core selling points,
+  the shortest install path, a condensed feature table, the comparison with cmus / mpd + ncmpcpp, and an index pointing to docs/.
+  The streaming-playback principle, requirements, launcher scripts and environment variables, third-party license analysis, and full disclaimer moved into `docs/DESIGN.md`, `docs/INSTALL.md`, `docs/LICENSES.md`, `docs/DISCLAIMER.md` respectively.
+- Added `docs/INSTALL.md`: requirements, install paths, API service deployment (one-shot + manual),
+  launcher scripts and two environment-variable tables, the fish startup function without a resident service, and what to do after installing.
+- Added `docs/LICENSES.md`, `docs/DISCLAIMER.md`.
+- `docs/USER_GUIDE.md` gained a full "features" table, and the NetEase section now states the cookie's format requirement
+  (when filling in manually, write `k=v; k=v`, not pasting a whole `Set-Cookie`).
+- **Corrected a wrong assertion about memory in `docs/DESIGN.md`**. The original said "streaming playback costs no extra memory,
+  writing into a ring buffer without assembling the whole song in memory", while `StreamingBuffer` is actually an **append-only, never-reclaiming**
+  byte buffer (supporting `Seek` requires keeping already-read bytes). Measured: pushing 64 MiB into the buffer raises RSS by 64 MiB
+  (1:1), so playing tens of MB of Hi-Res makes memory grow linearly with track size. Now stated honestly in the doc,
+  and the README's memory-comparison footnote gained a boundary note.
 
-### 其它
+### Other
 
-- `scripts/license-stats.py` 改用 `cargo metadata` 取 `license` 字段。原先直接读
-  `$CARGO_HOME/registry/src/<name>-<version>/Cargo.toml`，于是「读不到」的数量随本机
-  缓存漂移——同一份 `Cargo.lock`，一次跑出 26 个读不到、一次跑出 102 个，数字没法复核。
-  现在结果只取决于 `Cargo.lock`：468 个依赖中 455 个宽松许可、13 个 `MPL-2.0`、0 个读不到。
+- `scripts/license-stats.py` now uses `cargo metadata` to get the `license` field. It previously read
+  `$CARGO_HOME/registry/src/<name>-<version>/Cargo.toml` directly, so the "unreadable" count drifted with the local
+  cache — the same `Cargo.lock` once yielded 26 unreadable and once 102, numbers impossible to verify.
+  Now the result depends only on `Cargo.lock`: of 468 dependencies, 455 permissive, 13 `MPL-2.0`, 0 unreadable.
 
 ## [0.3.4] - 2026-09-25
 
-### 新增
+### Added
 
-- **输出设备可选**：设置页最后一项「输出设备」显示**实际打开的那张卡**，可在
-  「系统默认」与枚举到的设备之间切换（写进配置文件的 `audio_device`）。
-  这条是为一种很常见的故障准备的：进度条在走、状态是「播放中」，但一点声音都没有
-  ——声音被送到了另一张卡。现在不用去翻系统配置也能看出来。切换设备会停一下当前
-  这首，新设备就绪后自动按原位置续播；**新设备打不开就继续用原来那张**，只提示一句，
-  不会把播放弄哑。
+- **Selectable output device**: the settings page's last item "output device" shows **the card actually opened**, switchable between
+  "system default" and the enumerated devices (written to the config's `audio_device`).
+  This is prepared for a very common failure: the progress bar moves and the state is "playing", but there's no sound
+  — the sound was sent to another card. Now it's visible without digging into system config. Switching devices pauses the current
+  track briefly, then resumes at the original position once the new device is ready; **if the new device can't open, it keeps using the old one**, with one notice,
+  not muting playback.
 
-  候选列表筛过两道：ALSA 会把自己定义的所有 PCM 都报成设备（本机实测 52 项，大半是
-  `lavrate` / `samplerate` / `jack` / `oss` 这类插件），这里只留「能给出默认输出配置」
-  的，再排除 `null`（Discard all samples——它能打开、能「正常播放」，只是把所有采样
-  丢掉，是「播放中却没声音」的另一种成因），最后按名字去重。
+  The candidate list is filtered twice: ALSA reports all the PCMs it defines as devices (measured 52 on this machine, mostly
+  `lavrate` / `samplerate` / `jack` / `oss` plugins), so it keeps only those "able to give a default output configuration",
+  then excludes `null` (Discard all samples — it opens and "plays normally", just discarding all samples, another cause of
+  "playing but no sound"), and finally deduplicates by name.
 
-  「系统默认」显示 `default` 那张卡的自述名（如
-  `Default ALSA Output (currently PipeWire Media Server)`），而不是 cpal 硬编码的
-  "Default Audio Device"——后者看不出声音实际交给了谁。
+  "System default" shows the `default` card's self-described name (like
+  `Default ALSA Output (currently PipeWire Media Server)`) rather than cpal's hardcoded
+  "Default Audio Device" — the latter doesn't show who the sound was actually handed to.
 
-### 修复
+### Fixed
 
-- **「播放中却没声音」能自证清白**：原先遇到这种情况完全无从下手——设备打开正常、
-  解码正常、状态是播放中，而错误信息一个都没有。现在界面上直接摆出实际设备名，
-  排查只需看一眼。根因实测是系统侧：`/etc/asound.conf` 把 ALSA 的 `default` 写死成
-  `card 2`，而那张卡已经不是用户听的那张 USB 声卡了（卡号会变，写死数字迟早出事），
-  于是声音进了没人接的板载口。又因为用的是 `type hw`（独占），它连 PipeWire 都绕
-  过去了——`pactl list sink-inputs` 里根本看不到这个程序。
+- **"Playing but no sound" can now prove its innocence**: previously there was no way to start on this — the device opened fine,
+  decoding was fine, the state was playing, and there was not one error message. Now the UI directly shows the actual device name, so
+  troubleshooting takes one look. The measured root cause is on the system side: `/etc/asound.conf` hardcoded ALSA's `default` to
+  `card 2`, and that card was no longer the USB sound card the user listened on (card numbers change, so hardcoding a number will eventually bite),
+  so the sound went to an onboard port with nothing plugged in. And because it used `type hw` (exclusive), it even bypassed PipeWire —
+  the program didn't appear in `pactl list sink-inputs` at all.
 
 ## [0.3.3] - 2026-09-24
 
-### 新增
+### Added
 
-- **系统托盘**：启动时注册为 `org.kde.StatusNotifierItem`，Quickshell / waybar /
-  KDE 等状态栏会显示图标，悬停显示当前曲目，**右键弹出菜单**（播放 / 暂停、
-  上一首、下一首，走 `com.canonical.dbusmenu`）。**自适配**，三层降级都静默跳过、
-  不影响播放：没有图形会话（既无 `WAYLAND_DISPLAY` 也无 `DISPLAY`）→ 完全不连
-  D-Bus；没有 session bus → 跳过；状态栏没提供 `org.kde.StatusNotifierWatcher` →
-  注册调用失败后放弃。不需要时用 `--no-tray` 或配置里的 `tray = false` 关闭
-  （**重启生效**）。图标是内嵌的（源 `assets/tray.svg`，运行时缩放到 22 / 64 两个
-  尺寸），不依赖系统图标主题。
-- **托盘右键菜单**必须给 `Menu` 属性一个**真实对象路径**。SNI 规范里 `/` 表示
-  「无菜单」，但实测 Quickshell 会据此把右键整个跳过（`hasMenu` 为假），
-  于是「点了没反应」——所以这里注册了 `/StatusNotifierItem/menu` 并实现
-  `com.canonical.dbusmenu`。左键的 `activate()` 仍按用户要求留空。
-- **托盘菜单里的「最小化 / 显示窗口」**：把 TUI 从平铺布局里收起来（音乐照常播），
-  再点一次放回去。终端程序没法自己最小化窗口（xdg-shell 没有这个请求），只能借
-  compositor 的 IPC——走 niri 的 `toggle-window-minimized`。**怎么找到自己的窗口**
-  是这里唯一的难点：niri 给的 `pid` 是**终端模拟器**的（kitty 等），匹配不上，所以
-  启动时用 OSC 0 把终端标题设成 `kugou-tui`，之后按标题**精确**匹配找回窗口
-  （不能用 `contains`：实测有浏览器标签页的标题里也带着 `kugou-tui`，会把浏览器
-  最小化掉）。只有检测到 `NIRI_SOCKET` 时这一项才出现在菜单里——不是 niri 就整项
-  不出现，而不是置灰。
+- **System tray**: registers as `org.kde.StatusNotifierItem` at startup, so status bars like Quickshell / waybar /
+  KDE show an icon, hovering shows the current track, and **right-click pops a menu** (play / pause,
+  previous, next, via `com.canonical.dbusmenu`). **Self-adapting**, with three degradation levels all skipped silently,
+  not affecting playback: no graphical session (neither `WAYLAND_DISPLAY` nor `DISPLAY`) → not connecting to
+  D-Bus at all; no session bus → skip; the status bar doesn't provide `org.kde.StatusNotifierWatcher` →
+  give up after the registration call fails. Disable with `--no-tray` or `tray = false` in the config
+  (**takes effect on restart**). The icon is embedded (source `assets/tray.svg`, scaled at runtime to 22 / 64
+  sizes), independent of the system icon theme.
+- **The tray context menu** must give the `Menu` property a **real object path**. In the SNI spec `/` means
+  "no menu", but measured, Quickshell skips right-click entirely based on it (`hasMenu` is false),
+  so "clicking does nothing" — so this registers `/StatusNotifierItem/menu` and implements
+  `com.canonical.dbusmenu`. The left-click `activate()` is still left empty as the user requested.
+- **"Minimize / show window" in the tray menu**: collapses the TUI out of the tiling layout (music keeps playing),
+  and clicking again restores it. A terminal program can't minimize its own window (xdg-shell has no such request), so it can only borrow the
+  compositor's IPC — going through niri's `toggle-window-minimized`. **How to find its own window**
+  is the only hard part here: the `pid` niri gives is the **terminal emulator**'s (kitty etc.), which won't match, so
+  at startup it sets the terminal title to `kugou-tui` with OSC 0, and afterwards matches the window back by title **exactly**
+  (`contains` can't be used: measured, some browser tabs have titles containing `kugou-tui`, which would minimize the browser
+  instead). This item appears in the menu only when `NIRI_SOCKET` is detected — if not niri, the whole item
+  doesn't appear, rather than being grayed out.
 
-### 修复
+### Fixed
 
-- **TUI 画面被音频后端的报错污染（乱码）**：libjack / libasound 会**直接往 fd 2
-  写报错**，例如 `jack server is not running or cannot be started`、
-  `JackShmReadWritePtr::~JackShmReadWritePtr - Init not done for -1, skipping unlock`、
-  `ALSA lib pcm_oss.c:404 ... Cannot open device /dev/dsp`。TUI 在 alternate screen 上
-  时，这些字符直接打在 ratatui 画好的界面里，而**增量重绘只写「内容变了的单元格」**
-  ——屏幕上的第三方字符不在任何 buffer 里，永远不会被覆盖，于是残留成一片乱码。
-  **窗口越窄越明显**：报错行会被终端折行成多行，而最大化时一行就够、几乎看不出来。
-  现在进入 TUI 之前把 stderr 接到日志文件（`logger::redirect_stderr_to_log`，
-  用 `dup2`）：画面干净了，报错仍留在日志里——排查「没声音」时它正是关键线索。
-- **概念版音源下，从云端歌单播放只能听到试听**：`Song::source` 解析时填的是默认值
-  `Kugou`，而 `stamp_songs()` 只覆盖了 5 个 `*_tracks_all` 方法——歌单**首屏**为了
-  「先出界面」直接调 `ApiClient::user_playlist_tracks`，绕过了盖章，于是这批歌被当成
-  标准版的歌，取链请求打到标准版端口；两平台 token 不通用，标准版只能给 60 秒试听。
-  现在 `SourceKind` 多一个公开的 `stamp()`，首屏结果补盖一次。
-  （来自 [@ccchenyulin](https://github.com/ccchenyulin) 的修复）
-- **自定义字母键会抢走输入框的按键**：`[keymap]` 的自定义键位表在模式判断**之前**
-  拦截，于是把 `seek_forward` 绑到 `l` 之后，搜索框里就打不出 `l` 了。现在输入态下
-  无修饰的字符键优先交给输入框（`ctrl+` / `alt+` 组合仍走自定义表）。顺带两处：
-  新建歌单弹窗改用 `TextInput`（自带光标 / Delete / Home / End）并显示真实光标；
-  帮助面板与界面里的「按 R 重试」这类提示会按 `[keymap]` 改写后再显示。
-  （来自 [@ccchenyulin](https://github.com/ccchenyulin) 的修复）
+- **The TUI screen polluted by audio-backend errors (garbage)**: libjack / libasound **write errors directly to fd 2**,
+  e.g. `jack server is not running or cannot be started`,
+  `JackShmReadWritePtr::~JackShmReadWritePtr - Init not done for -1, skipping unlock`,
+  `ALSA lib pcm_oss.c:404 ... Cannot open device /dev/dsp`. When the TUI is on the alternate screen,
+  these characters are printed directly into the interface ratatui drew, and **incremental redraw only writes "cells whose content changed"**
+  — the third-party characters on screen aren't in any buffer and are never overwritten, so they linger as garbage.
+  **The narrower the window, the more obvious**: an error line wraps into multiple rows, while maximized it's one row and nearly invisible.
+  Now, before entering the TUI, stderr is redirected to the log file (`logger::redirect_stderr_to_log`,
+  using `dup2`): the screen is clean, and the errors remain in the log — when troubleshooting "no sound" they are exactly the key clue.
+- **Under the concept-edition source, playing from a cloud playlist only gave previews**: `Song::source` parsing filled the default
+  `Kugou`, while `stamp_songs()` covered only 5 `*_tracks_all` methods — the playlist **first screen**, to "get the UI up first",
+  called `ApiClient::user_playlist_tracks` directly, bypassing the stamp, so this batch of songs was treated as
+  standard-edition songs and stream requests went to the standard-edition port; the two platforms' tokens aren't interchangeable, so the standard edition could only give 60-second previews.
+  Now `SourceKind` has a public `stamp()`, and the first screen's result gets one extra stamp.
+  (Fix from [@ccchenyulin](https://github.com/ccchenyulin))
+- **Custom letter keys stole input-box keys**: the `[keymap]` custom keybinding table intercepted **before** the mode check,
+  so after binding `seek_forward` to `l`, you couldn't type `l` in the search box. Now in input mode
+  unmodified character keys go to the input box first (`ctrl+` / `alt+` combinations still go through the custom table). Two related fixes:
+  the new-playlist dialog now uses `TextInput` (with its own cursor / Delete / Home / End) and shows a real cursor;
+  and prompts like "press R to retry" in the help panel and UI are rewritten by `[keymap]` before display.
+  (Fix from [@ccchenyulin](https://github.com/ccchenyulin))
 
-### 文档
+### Docs
 
-- README 首屏的界面示意图从 ASCII 手绘换成**真实终端截图**（`assets/screenshot-0.3.3.jpg`，
-  950×1021，JPEG 压到 175 KB）。
+- README's first-screen interface diagram changed from hand-drawn ASCII to a **real terminal screenshot** (`assets/screenshot-0.3.3.jpg`,
+  950×1021, JPEG compressed to 175 KB).
 
 ## [0.3.2] - 2026-09-24
 
-### 修复
+### Fixed
 
-- **`f` 没法通过 `[keymap]` 重绑**：`parse_key` 里 F1–F12 那条判的是「长度 ≤ 3 且
-  以 `f` 开头」，`f` 也满足，于是 `f[1..]` 是空串、解析失败、整条返回 `None`。
-  结果是**只有 `f`（歌手地区筛选）**在配置里绑不上，其余单字母都行。写「帮助面板
-  里的键都真绑过」那条测试时才发现的——测试第一次跑就挂在它上面。
-- `scripts/kugou-api-install` 用 `git clone --depth 1` 拉默认分支的 tip，而 README
-  要求固定到验证过的提交；两处说法不一致，且浅克隆里根本 `checkout` 不到那个 SHA。
-  现在改用 `git fetch --depth 1 origin <sha>` 只拉那一个提交（实测 1 秒内完成，
-  `.git` 仅 416K），并且**已装好的那份也会检查**——HEAD 与钉的提交不一致时给出
-  提示与切换命令，但不擅自切。
-- `scripts/kugou-api-install` 的 `start_kugou` 没把安装目录传给 `kugou-api`。
-  `KUGOU_API_ROOT` 与 `KUGOU_API_DIR` 是两套变量，ROOT 非默认值时会「装在一处、
-  从另一处起」。
-- `kugou-api-install` 的用法注释里写着 `qqmusic`，但实现只支持 kugou 与 netease
-  ——那条示例按下去只会得到「未知音源」。
+- **`f` couldn't be rebound via `[keymap]`**: in `parse_key`, the F1–F12 branch checks "length ≤ 3 and
+  starts with `f`", which `f` also satisfies, so `f[1..]` is an empty string, parsing fails, and the whole thing returns `None`.
+  The result: **only `f`** (artist region filter) couldn't be bound in the config, while other single letters could. Found while writing the "keys in the help panel are really bound" test
+  — the test hung on it the first time it ran.
+- `scripts/kugou-api-install` used `git clone --depth 1` to fetch the default branch's tip, while the README
+  required pinning to a verified commit; the two disagreed, and a shallow clone can't `checkout` that SHA at all.
+  Now it uses `git fetch --depth 1 origin <sha>` to fetch just that one commit (measured: completes within 1 second,
+  `.git` only 416K), and **checks an already-installed copy too** — when HEAD doesn't match the pinned commit it gives a
+  hint and the switch command, without switching on its own.
+- `scripts/kugou-api-install`'s `start_kugou` didn't pass the install directory to `kugou-api`.
+  `KUGOU_API_ROOT` and `KUGOU_API_DIR` are two variable sets, so with a non-default ROOT it would "install in one place,
+  start from another".
+- `kugou-api-install`'s usage comment said `qqmusic`, while the implementation supports only kugou and netease
+  — that example would only yield "unknown source".
 
-### 新增
+### Added
 
-- **`scripts/kugou-api` 补齐 restart、PID 管理与启动预检**：预检会补 `node_modules`
-  （自动 `npm install --omit=dev`）与客户端二进制（自动 `cargo build --release`）；
-  参数按「环境变量 > 配置文件 > 默认值」取值；后台启动后打印 PID、日志路径与访问
-  地址；新增 `restart`；端口被占用与「已在运行」分开判。详见脚本头部注释。
+- **`scripts/kugou-api` gains restart, PID management, and a startup precheck**: the precheck fills in `node_modules`
+  (automatic `npm install --omit=dev`) and the client binary (automatic `cargo build --release`);
+  parameters are resolved by "environment variables > config file > defaults"; after a background start it prints the PID, log path, and access
+  address; a new `restart`; and port-in-use is distinguished from "already running". See the script header comment for details.
 
-### 文档
+### Docs
 
-- **`[keymap]`（自定义键位）此前在文档里一个字都没有**。CONFIGURATION.md 新增
-  「自定义键位」一节：段写法、按键名规则、59 个可用动作名（按用途分组，已与
-  `action_from_name` 逐字核对）、三种非法条目各自的日志文案。
-- 补上 5 个「能按但任何地方都没写」的键位：`E` / `J` / `K`（音源页的设为默认与
-  调优先级——调整音源优先级的唯一入口）进帮助面板，`Home` / `End`（`g` / `G` 的
-  别名）进 KEYBINDINGS.md。
-- README 安装步骤 1 现在把 `scripts/kugou-api-install` 列为推荐路径，并点明
-  KuGouMusicApi 是**独立仓库**（无 submodule、无 vendor），本地没有就跑不起来；
-  CONTRIBUTING 的手动 clone 也补上了提交固定。
+- **`[keymap]` (custom keybindings) had not one word in the docs before**. CONFIGURATION.md gains
+  a "Custom keybindings" section: section syntax, key-name rules, 59 available action names (grouped by use, checked character by character against
+  `action_from_name`), and the log text for each of the three kinds of illegal entries.
+- Added 5 keybindings that "can be pressed but are written nowhere": `E` / `J` / `K` (the source page's set-default and
+  priority-adjust — the only entry for adjusting source priority) into the help panel, and `Home` / `End` (`g` / `G`'s
+  aliases) into KEYBINDINGS.md.
+- README's install step 1 now lists `scripts/kugou-api-install` as the recommended path, and points out that
+  KuGouMusicApi is an **independent repository** (no submodule, no vendor) that must be present locally; CONTRIBUTING's manual clone also gained commit pinning.
 
 ## [0.3.1] - 2026-09-24
 
-### 修复
+### Fixed
 
-- **可视化空态把「已停止」说成「已暂停」**：那里只判「有没有当前曲目」，于是
-  `Stopped` 也显示「已暂停 —— 按 Space 继续」。可两者按 Space 的后果不同：停止是
-  **从头播**，暂停是**接着播**。按下去的下一秒界面就在骗人。现在分开说。
-- 侧边栏「清理缓存」的键位和目录名粘成一个词（`C清理 kugou-tui`）。改成 `[C] 的
-  方括号写法，和状态栏的「[?] 帮助 [q] 退出」一致。
+- **The visualizer's empty state called "stopped" "paused"**: it judged only "is there a current track", so
+  `Stopped` also showed "paused — press Space to continue". But the two differ in what Space does: stop is
+  **play from the start**, pause is **continue**. The next second after pressing, the UI lies. Now they're stated separately.
+- The sidebar's "clear cache" keybinding and directory name were stuck together into one word (`C清理 kugou-tui`). Changed to the `[C]`
+  bracket style, consistent with the status bar's "[?] help [q] quit".
 
 ## [0.3.0] - 2026-09-24
 
-> **行为变化**：启动时不再打印「已连接」——那一刻一个请求都还没发过，接口全挂也
-> 照样这么说。现在只陈述配置与登录态，连通性由真实请求的结果驱动（侧边栏
-> 「连接」区块标题显示 已连通 / 未连通 / 未验证）。
+> **Behavior change**: startup no longer prints "connected" — at that moment not one request has been sent, and it would say the same
+> even if every interface were down. Now it states only the config and login state, and connectivity is driven by the result of real requests (the sidebar's
+> "connection" block title shows connected / disconnected / unverified).
 >
-> 另外，列表载入失败时面板会显示「载入失败：… · 按 R 重试」，而不是永远停在
-> 「载入中…」。
+> Also, when a list fails to load the panel shows "load failed: … · press R to retry", rather than staying on
+> "loading…" forever.
 
-### 新增
+### Added
 
-- **瞬时网络故障自动重试**。本机走 fake-IP 代理，网络快慢波动大：一次连接被拒、
-  一次响应体读到一半断掉，都会让请求直接失败，而这类失败**换个时刻重发就成功**。
-  代价最实在的是取播放地址那条路——`song_stream_url` 会逐个试多个候选
-  (hash, 音质)，某个候选因为一次抖动失败就被跳过；全抖过去之后，用户看到的是
-  「没有可用的播放地址（可能需要 VIP 或已下架）」，一个和真实原因无关的结论。
-  现在读接口会自动重试：**总 3 次尝试（首次 + 2 次重试），间隔 300ms → 900ms**。
-  - **重试**：传输层断在连接或读体上（连接被拒 / 连接被重置 / 响应体截断），
-    以及 HTTP 408 / 429 / 5xx。
-  - **不重试**：**超时**（已经等满 15 秒，说明对端卡住而不是抖了一下，再等两轮
-    是拿用户的时间换一个大概率相同的结果）；业务错误码（服务回了话，重发还是
-    这个答复）；其它 4xx；200 却返回非 JSON（内容问题，不是传输问题）。
-- **写接口显式不重试**（`get_json_mutating` / `get_json_uncached_mutating`）。
-  重试的前提是「重发不改变结果」，而写操作不满足：`/playlist/del` 第一次其实删
-  成功了、只是响应在路上丢了的话，重发会得到「歌单不存在」——用户看到失败提示，
-  而歌单其实已经没了。收藏 / 移出 / 删歌单 / 新建歌单 / 领 VIP 六处改用不重试的
-  变体；其余读接口维持自动重试。
-- **帮助面板可滚动**（`?` 打开）：`CHEATSHEET` 有 38 条，而 34 行的终端只放得下
-  26 条；面板又是模态的、按键全被吞掉，于是最后 12 条——Space / `n`·`p` /
-  `←`·`→` / `+`·`-` / `m` / `r` / `l` / `[`·`]` / `W`，也就是**整块播放控制**
-  ——在常见尺寸下永远看不到。现在支持 `j`/`k`、`↑`/`↓`、`PgUp`/`PgDn`、`g`/`G`，
-  底部固定显示「第 N-M 条 / 共 38 条」，内容放得下时这一行不出现。
+- **Automatic retry on transient network failures**. This machine goes through a fake-IP proxy with large latency swings: one connection refused,
+> or a response body cut off mid-read, fails the request directly, and such failures **succeed on a resend at another moment**.
+  The costliest is the stream-resolution path — `song_stream_url` tries multiple candidates
+  (hash, quality) one by one, and a candidate skipped due to one hiccup means after all hiccup, the user sees
+  "no playable address available (may require VIP or be delisted)", a conclusion unrelated to the real cause.
+  Now read interfaces retry automatically: **3 attempts total (first + 2 retries), 300 ms → 900 ms apart**.
+  - **Retried**: transport-layer breaks at connect or body read (connection refused / reset / truncated body),
+    and HTTP 408 / 429 / 5xx.
+  - **Not retried**: **timeouts** (already waited the full 15 seconds, meaning the peer is stuck rather than hiccuping; two more rounds
+    trade the user's time for a most likely identical result); business error codes (the service responded, resending gets the same
+    answer); other 4xx; 200 with non-JSON (a content problem, not a transport problem).
+- **Write interfaces explicitly don't retry** (`get_json_mutating` / `get_json_uncached_mutating`).
+  Retrying presupposes "resending doesn't change the result", which writes don't satisfy: if `/playlist/del` actually deleted
+  successfully the first time and only the response was lost in transit, resending gets "playlist doesn't exist" — the user sees a failure message,
+  while the playlist is actually gone. Favorite / remove / delete playlist / create playlist / claim VIP, six places, use the non-retrying
+  variants; other read interfaces keep automatic retry.
+- **The help panel is scrollable** (`?` to open): `CHEATSHEET` has 38 entries, while a 34-row terminal fits only
+  26; and the panel is modal, swallowing all keys, so the last 12 — Space / `n`·`p` /
+  `←`·`→` / `+`·`-` / `m` / `r` / `l` / `[`·`]` / `W`, that is **the entire playback control block**
+  — were never visible at common sizes. Now it supports `j`/`k`, `↑`/`↓`, `PgUp`/`PgDn`, `g`/`G`,
+  with the bottom always showing "entries N-M / 38 total", hidden when the content fits.
 
-### 修复
+### Fixed
 
-- **接口挂掉时列表永远停在「载入中…」**：`loading` 原本只在成功路径
-  （`replace()`）里清零，11 处置位没有任何失败出口。于是请求一失败，面板就一直
-  转圈——状态栏报着错，面板里还在转，用户既不知道失败了、也不知道该按什么。
-  现在失败会收掉「载入中」并把原因落到面板上（「载入失败：… · 按 R 重试」）。
-  受影响：歌单广场、歌手、排行榜、云端歌单、搜索、歌单/歌手/榜单的歌曲列表。
-- **启动时无条件打印「已连接」**：这句话在启动路径上发出，那一刻一个请求都还
-  没发过，接口全挂也照样这么说——用户看到「已连接」就把网络问题排除掉了，
-  然后往别处找原因。现在启动只陈述配置与登录态
-  （`音源 酷狗概念版 · 127.0.0.1:3001（已登录）`），连通性改由真实请求的结果
-  驱动：侧边栏「连接」区块标题显示 `已连通` / `未连通` / `未验证`，第一次请求
-  成功时才改口说「已连接」。注意业务错误码（需要登录、页码越界…）算**连通**——
-  它恰恰证明服务是通的，只有连接被拒 / 超时才算连不上。
-- **「我的资料」取不到资料时只写日志**：首页会永久停在「加载中…」，用户分不清
-  是失败还是慢。现在显示失败原因，并给一个可点的重试入口（账号区任意位置）。
-- 歌单 / 歌手 / 榜单的歌曲列表标题不再挂「（载入中…）」：面板正文本来就会显示
-  「载入中…」，标题再挂一次是重复；而载入失败时那个后缀会留在标题上撒谎。
-- **帮助面板的列宽改成从数据算**：原来写死 `14 / Min(20) / 6`，于是「功能」列
-  吃掉所有剩余宽度、把「分类」推到弹窗最右边，中间空出二十几列；「按键」列写死
-  14 而最长的键名（`Tab / S-Tab`）只有 11 列。现在两列都按最长的那条算，空档
-  没了；窄到放不下三列时「分类」整列让位（它是分组标签，不影响「这个键干嘛」），
-  而不是把「按键」挤成 0 宽——30 列的终端上原先只剩「功能」一列可见。
-- `right_click_at` 的文档注释写着「**不做上下文菜单**」，函数体却调
-  `open_context_menu()`。注释改成与实现一致（右键 = 键盘 `;`）。
-- **歌词取失败不再说成「暂无歌词」**。原来失败时会塞一份空歌词进去，面板于是渲染
-  成「暂无歌词」——那是在替这首歌断言「**它本来就没有歌词**」，用户据此就会去
-  别处找原因。现在走独立的 `Loaded::LyricFailed`，面板显示「载入失败：<原因>」。
-  空歌词（请求成功但内容为空）仍然照常说「暂无歌词」，两者不再混为一谈。
-  顺带：歌词请求也吃到了自动重试（实测注入 503 时会重试两次才放弃）。
-  不走 `Loaded::Failed` 是刻意的——那条路会往状态栏写错误，而歌词失败不影响播放，
-  每切一首歌闪一条太吵。
+- **Lists stayed on "loading…" forever when the interface was down**: `loading` was originally cleared only on the success path
+  (`replace()`), and 11 places set it with no failure exit. So once a request failed, the panel kept spinning — the status bar reported
+  an error, the panel kept spinning, and the user neither knew it failed nor what to press. Now a failure clears "loading" and puts the reason
+  on the panel ("load failed: … · press R to retry"). Affected: playlist plaza, artists, rankings, cloud playlists, search, and the song lists of playlists/artists/rankings.
+- **Startup unconditionally printed "connected"**: this was emitted on the startup path, at which point not one request had been sent,
+  and it would say the same even if every interface were down — the user sees "connected" and rules out a network problem,
+  then looks elsewhere. Now startup states only the config and login state
+  (`source kugou concept edition · 127.0.0.1:3001 (logged in)`), and connectivity is driven by the result of real requests:
+  the sidebar's "connection" block title shows `connected` / `disconnected` / `unverified`, and only on the first successful
+  request does it change to "connected". Note that business error codes (login required, page out of range…) count as **connected** —
+  they actually prove the service is up; only connection refused / timeout count as unreachable.
+- **"My profile" only wrote a log when it couldn't fetch the profile**: the home page would stay on "loading…" forever, and the user couldn't tell
+  whether it failed or was slow. Now it shows the failure reason, with a clickable retry entry (anywhere in the account area).
+- The song-list titles for playlists / artists / rankings no longer carry "(loading…)": the panel body already shows
+  "loading…", so a second one on the title is redundant; and on load failure that suffix would stay on the title lying.
+- **The help panel's column widths now compute from the data**: they were hardcoded `14 / Min(20) / 6`, so the "function" column
+  ate all remaining width, pushing "category" to the far right of the dialog with twenty-odd blank columns in between; and the "key" column was hardcoded
+  14 while the longest key name (`Tab / S-Tab`) is only 11 columns. Now both columns compute from the longest entry, so the gap is
+  gone; and when too narrow for three columns the "category" column yields entirely (it's a group label that doesn't affect "what this key does"),
+  rather than squeezing "key" to 0 width — on a 30-column terminal previously only the "function" column was visible.
+- `right_click_at`'s doc comment said "**no context menu**", while the body called
+  `open_context_menu()`. The comment now matches the implementation (right-click = keyboard `;`).
+- **A lyric fetch failure no longer says "no lyrics"**. Previously a failure stuffed in an empty lyric, and the panel rendered
+  "no lyrics" — that asserts on the song's behalf "**it has no lyrics**", sending the user to look elsewhere. Now it goes through
+  the separate `Loaded::LyricFailed`, and the panel shows "load failed: <reason>". Empty lyrics (request succeeded but content is empty) still
+  say "no lyrics" as usual, and the two are no longer conflated. Related: lyric requests also get automatic retry (measured: injecting 503 makes it retry twice before giving up).
+  Not going through `Loaded::Failed` is deliberate — that path writes an error to the status bar, and a lyric failure doesn't affect playback,
+  so flashing one on every track change is too noisy.
 
 ## [0.2.0] - 2026-09-22
 
-> **破坏性变更**：删掉了「歌词」「封面」两个标签页，数字键 `8` / `9` 改给音源与设置；
-> `1`–`7` 与 `0` 的落点不变。详见下面「删除」一节。
+> **Breaking change**: removed the "lyrics" and "cover" tabs, and reassigned number keys `8` / `9` to sources and settings;
+> the targets of `1`–`7` and `0` are unchanged. See the "Removed" section below.
 
-### 新增
+### Added
 
-- **设置页**（`,` 打开，也可点侧边栏最后一项）：主题、音质、播放模式、刷新
-  间隔、歌词偏移、每页条数、缓存上限、16 色模式、歌词面板、侧边导航、
-  下载目录、封面铺满方式。↑↓ 选择，←→ / Enter 改值，鼠标点击选中、再点一次改值。
-  改完立即写入 `config.toml`，不等退出时保存。
-- **6 套主题**：冷蓝 / 石墨 / 日落 / 森林 / 霓虹 / 暗紫（`config.theme`）。
-  每套都有真彩与 16 色两个版本；16 色版只换主色与选中底色，语义色
-  （成功 / 警告 / 错误）不随主题变。
-- **单曲下载**（`W`）：把当前播放歌曲保存到 `config.download_dir`
-  （默认 `~/Music`，设置页里改）。文件名 `<歌手> - <歌名>.<ext>`，
-  扩展名从 URL 末段推断；已存在的文件不覆盖。
-- **逐字歌词（卡拉 OK 效果）**：解析 KRC 的每字时间戳，当前行按 已唱 /
-  **正在唱** / 未唱 三态着色，唱到哪亮到哪。拿不到逐字信息（纯 LRC 或这行没有
-  逐字标记）时退回整行高亮。
-  注意 KRC 的写法是 `<偏移,时长,0>字` ——**标记在字前面**（不是 `字<...>`）。
-- **分块并发下载**：`/song/url` 拿到的直链若支持 Range，就分最多 4 块并发
-  下载；不支持或文件太小则退回单连接。实测 128kbps 单曲 1.41s → 1.10s。
-- **播放时预取下一首**：当前这首开播后，后台把队列下一首下到缓存，切歌秒开。
-- **`cover_fill` 配置项**：首页那块大封面怎么铺满区域，可选 `crop`（默认，
-  居中裁剪）、`stretch`（拉伸铺满）、`fit`（完整显示、左右留白）。封面区是
-  「多少列 × 多少行」，换算成像素后几乎永远不是正方形，而专辑封面多是正方形——
-  铺满 / 不变形 / 不裁剪三者只能取两个，这个开关让你自己挑。
-  见 [docs/CONFIGURATION.md](docs/CONFIGURATION.md)。
-- **每日领取概念版 VIP**：酷狗概念版自带「每天领一天 VIP」的机制，现在做成了
-  自动的——登录成功后、切到概念版音源时、启动时各试一次，**一天只领一次**
-  （日期记在会话里）。流程照 MoeKoeMusic：先领一天（`/youth/day/vip`），
-  隔 500ms 再升级成「畅听 VIP」（`/youth/day/vip/upgrade`）。
-  「我的资料」里多一行状态（`领取今日 VIP · 按 V` / `领取中…` / `今日 VIP 已领取`），
-  快捷键 `V` 或**鼠标点那一行**都能触发。**只在概念版音源下显示**——这是概念版
-  专属接口，标准版账号调不通，摆一个按了没用的入口比不摆更糟。
-  接口带风控，失败提示会把「反复失败请到手机端领取」放在最前面（状态栏按宽度
-  截断，写在后面就看不到了）。
+- **Settings page** (open with `,`, or click the sidebar's last item): theme, quality, playback
+  mode, refresh interval, lyric offset, page size, cache limit, 16-color mode, lyric panel, side navigation,
+  download directory, and cover fill mode. ↑↓ to select, ←→ / Enter to change, mouse click to select, click again to change.
+  Saved to `config.toml` immediately, without waiting for exit.
+- **6 themes**: cool blue / graphite / sunset / forest / neon / dark purple (`config.theme`).
+  Each has a truecolor and a 16-color version; the 16-color version changes only the primary color and selection background, while semantic colors
+  (success / warning / error) don't vary by theme.
+- **Track download** (`W`): saves the currently playing song to `config.download_dir`
+  (default `~/Music`, changeable on the settings page). Filename `<artist> - <title>.<ext>`,
+  with the extension inferred from the URL's last segment; existing files aren't overwritten.
+- **Per-character lyrics (karaoke effect)**: parses KRC's per-character timestamps, coloring the current line by
+  sung / **singing** / unsung, lighting up as it's sung. When per-character information is unavailable (plain LRC or this line has no
+  per-character markers) it falls back to whole-line highlight.
+  Note KRC's format is `<offset,duration,0>char` — **the marker comes before the character** (not `char<...>`).
+- **Chunked concurrent download**: if the direct link from `/song/url` supports Range, it downloads in up to 4 concurrent
+  chunks; if unsupported or the file is too small, it falls back to a single connection. Measured: a 128kbps track 1.41s → 1.10s.
+- **Prefetch the next track during playback**: after the current one starts, the background downloads the queue's next track into the cache, so track changes are instant.
+- **`cover_fill` config item**: how the big cover on the home page fills its area, choosing from `crop` (default,
+  center crop), `stretch` (stretch to fill), `fit` (full display, letterboxed). The cover area is
+  "how many columns × how many rows", which converted to pixels is almost never square, while album art usually is —
+  fill / no distortion / no cropping, only two of the three, and this switch lets you pick.
+  See [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+- **Daily concept-edition VIP claim**: Kugou's concept edition has a built-in "claim one day of VIP per day" mechanism, now made
+  automatic — attempted after a successful login, on switching to the concept-edition source, and at startup, **once per day**
+  (the date is recorded in the session). The flow follows MoeKoeMusic: first claim one day (`/youth/day/vip`),
+  then after 500 ms upgrade to "unlimited-listening VIP" (`/youth/day/vip/upgrade`).
+  "My profile" gains a status line (`claim today's VIP · press V` / `claiming…` / `today's VIP already claimed`),
+  triggered by the `V` shortcut or by **clicking that line**. **Shown only under the concept-edition source** — this is a concept-edition
+  exclusive interface that standard-edition accounts can't call, and a dead entry point is worse than none.
+  The interface is rate-limited; on failure the prompt puts "repeated failures, claim on mobile" first (the status bar truncates
+  by width, so writing it later makes it invisible).
 
-### 变更
+### Changed
 
-- **删掉「歌词」与「封面」两个标签页**：首页（左右分栏）已经有封面和歌词，
-  列表页右下角也有歌词面板，这两页是重复的第三、第四处。主区空间还给首页与列表。
-- **首页移到侧边栏第一项**：原先「正在播放」组排在「发现 / 我的」之后，
-  首页作为默认落点却要往下数七行才看得到。现在该组整体置顶。
-- **数字键 8 / 9 改给「音源」与「设置」**：删页后如果让后面的标签顺延，
-  `0`（可视化）会被顶到 `8`、音源与设置也跟着挪，肌肉记忆全乱。现在把
-  `可视化` 留在下标 9（仍是 `0` 键），空出来的 8、9 两格给原先够不到的
-  音源与设置：**1–7 与 0 一个都没动**。
-- **逐字歌词改成仿 Apple Music**：原先每个字只有「未唱 / 正在唱 / 已唱」三档，
-  推进是硬跳的。现在按每个字**自己的进度**（`LyricWord::progress_at`）在底色与
-  强调色之间插值，边界字取两色之间的过渡，看上去是渐变扫过。配套三点：
-  - 非当前行按离当前行的距离**线性变暗**（新增主题色 `lyric_far`），当前行才突出；
-  - 去掉「正在唱」的下划线——逐字推进时它会在字之间跳，比不做还闹；
-  - 歌词真的显示在屏幕上**且**正在播放时，刷新提到 ~30fps（原先只有可视化页提速）。
-    5fps 下再精细的插值也是五格一跳。不看歌词时一点都不额外费电，简易模式
-    （`lite_mode`）仍然不做任何提速。
-  - 16 色模式没有中间色阶可插，`mix` 自动退回两端取一，行为等价于原来的三档离散。
-    想更接近 Apple Music 的观感需要真彩终端（`basic_color = false`）。
+- **Removed the "lyrics" and "cover" tabs**: the home page (split left/right) already has the cover and lyrics,
+  and list pages have a lyric panel in the bottom right, so these two were the third and fourth duplicates. The main area's space is returned to the home page and lists.
+- **The home page moved to the sidebar's first item**: previously the "now playing" group came after "discover / mine",
+  so the home page as the default landing point took seven rows down to see. Now the group is at the top.
+- **Number keys 8 / 9 reassigned to "sources" and "settings"**: after removing pages, if the later tabs shifted up,
+  `0` (visualizer) would be pushed to `8`, and sources and settings would move too, wrecking muscle memory. Now
+  `visualizer` stays at index 9 (still the `0` key), and the freed 8 and 9 go to the previously unreachable
+  sources and settings: **1–7 and 0 are all untouched**.
+- **Per-character lyrics changed to imitate Apple Music**: previously each character had only three levels, "unsung / singing / sung",
+  advancing in hard jumps. Now each character interpolates between the base and accent colors by **its own progress**
+  (`LyricWord::progress_at`), with boundary characters taking the transition between the two colors, looking like a gradient sweep. Three supporting changes:
+  - Non-current lines **dim linearly** with distance from the current line (new theme color `lyric_far`), so only the current line stands out;
+  - Removed the "singing" underline — it jumps between characters as the per-character progress advances, more distracting than not having it;
+  - When lyrics are actually on screen **and** playing, refresh is raised to ~30fps (previously only the visualizer page sped up).
+    At 5fps even a fine interpolation is a jump every five cells. When not watching lyrics it costs nothing extra, and lite mode
+    (`lite_mode`) still does no speedup at all.
+  - 16-color mode has no intermediate levels to interpolate, so `mix` automatically falls back to picking one of the two ends, equivalent to the original three-level discrete behavior.
+    To get closer to Apple Music's look you need a truecolor terminal (`basic_color = false`).
 
-- **可视化改成真频谱**：原先画的是 28 格时域音量历史，被拉伸铺满整宽、
-  柱子之间没有空隙，动起来是一整片此起彼伏的墙。现在对音频线程采集的
-  采样做 FFT 后按**对数**分 64 个频段（40Hz–16kHz），柱子 1 列 + 1 列空隙。
-- **滚轮一次滚一行**（原来是 3 行）。
-- **封面渲染交给 `ratatui-image`**：不再自己往 stdout 写 kitty 转义序列，
-  改由 widget 写进 ratatui 的 Buffer——内容不变时一个字节都不重发。
-  依赖 `ratatui-image` 11.x，`rust-version` 提到 1.86。
-- **README 的界面图换成真实截图**：原先那张是手绘的，停留在「5 个标签、无分组、
-  无数字键」的版本，与实际界面早已不符，却标注着「实际画面」。现在由模拟后端
-  （歌单广场 + 歌单歌曲 + 逐字歌词 + 一段 ffmpeg 生成的**静音**音频）驱动程序渲染
-  出 108×30 的真实画面——数据是合成的，不含任何真实音乐内容，也不会再和代码脱节。
+- **The visualizer changed to a real spectrum**: it previously drew a 28-cell time-domain volume history, stretched to fill the full width,
+  with no gaps between bars, so when moving it was a whole wall of peaks and troughs. Now it FFTs the samples captured on the audio thread and splits into 64 frequency bands
+  by **log scale** (40Hz–16kHz), with 1 column per bar + 1 column gap.
+- **The wheel scrolls one line at a time** (previously 3 lines).
+- **Cover rendering handed to `ratatui-image`**: no longer writing kitty escape sequences to stdout itself,
+  but letting the widget write into ratatui's Buffer — not one byte resent when the content is unchanged.
+  Depends on `ratatui-image` 11.x, `rust-version` raised to 1.86.
+- **README's interface image changed to a real screenshot**: the previous one was hand-drawn, stuck at "5 tabs, no grouping,
+  no number keys", long out of sync with the actual UI, yet labeled "actual screen". Now a mock backend
+  (playlist plaza + playlist songs + per-character lyrics + a **silent** audio track generated by ffmpeg) drives the program to render
+  a real 108×30 screen — the data is synthesized, containing no real music content, and will no longer drift from the code.
 
-### 关于播放等待
+### About playback waiting
 
-**边下边播已经做了**：取到直链后先攒够 128 KB（约 8 秒音频）就开播，剩下的在后台
-继续下并同时落盘缓存，所以等待是「攒开头」而不是「下完整首」。
+**Streaming playback is already done**: after resolving the direct link it accumulates 128 KB (~8 seconds of audio) and starts playing, with the rest downloading in the background
+while being cached to disk, so the wait is "accumulate the beginning", not "download the whole song".
 
-剩下的等待由**音质档位**决定：`high`（Hi-Res）单曲实测 65 MB，按 1.9 MB/s 单连接
-要 34 秒——这是文件大小的物理限制。分块并发下载（最多 4 块）+ 预取队列下一首能
-把切歌压到秒开，同一首第二次播放直接命中缓存。想更快只能降音质
-（`flac` ~30 MB / `320` ~10 MB）。
+The remaining wait is determined by the **quality tier**: `high` (Hi-Res) measured 65 MB per track, which at 1.9 MB/s on a single connection
+takes 34 seconds — a physical limit of file size. Chunked concurrent download (up to 4 chunks) + prefetching the queue's next track can
+bring track changes to instant, and the second play of the same track hits the cache directly. To go faster you can only lower the quality
+(`flac` ~30 MB / `320` ~10 MB).
 
-> 流式缓冲的读指针跑到还没下到的位置时会阻塞等数据，表现是声音停一下再继续。
+> When the streaming buffer's read pointer reaches a position not yet downloaded, it blocks waiting for data, showing as a brief pause in the sound.
 
-### 修复
+### Fixed
 
-- **`s` / `a` / `d` 报「当前没有选中的歌曲」**：这些动作原先只认「焦点在歌曲列表
-  那一栏」，焦点停在歌单 / 歌手 / 排行榜的**上半部分**、或在**队列页**时就拿不到歌。
-  新增 `selected_song()` 按「队列选中 → 当前页歌曲列表 → 队列当前 → 正在播放」依次
-  回退，所以收藏（`s`）、加入队列（`a`）、从云端歌单移出（`d`）在更多位置都能用。
-  也修了它在队列没选中时直接放弃的问题。
-- **侧边栏点「音源」没反应**：点击走的是 `Tab::from_number`，那是数字键映射、
-  只覆盖前 10 页，而音源排第 11 位 → 得到 `None`，什么都不做。鼠标现在不受
-  键盘那十个键的限制。
-- **VIP / 下架歌曲拿不到播放地址**（多处，逐条修）：
-  - `/privilege/lite` 必须用 **GET + `hash` 参数**。服务端读的是顶层 `hash`
-    （逗号分隔可传多个），不是 `resource` 数组；用 POST + `resource` 会得到
-    `error_code 20010 "hash and AlbumAudioID is empty"`，而 20010 被我们的客户端
-    当成「需要登录」，整条路径静默失效 —— 日志里那句「需要登录」跟登录态无关。
-  - **概念版必须传 `ppage_id=356753938`**（单个）。不传时服务端用的默认三段值
-    `356753938,823673182,967485191` 会让下架歌返回 `status=3`。标准版忽略客户端
-    传的值（用自己硬编码），所以统一传它对两种平台都安全。
-  - **绝不传 `album_audio_id`**：实测带它时服务端**只按它取歌、忽略 hash**——
-    固定一个 aid 配三个不同 hash 返回的是同一个 URL，会**静默播成另一首歌**。
-    MoeKoeMusic 也只传 hash 定位。
-  - **候选逐个试、单个失败不中断**：某组合返回 502 时不再让整条流程失败。
-  - `status=3` 的文案修正：它不是「无版权/下架」，而是「文件标识与账号权限
-    不匹配」，原文案会误导用户以为歌下架了。
-- **终端能力探测会吞掉整个键盘**：`Picker::from_query_stdio()` 发查询后阻塞读
-  stdin，而那个读没有自身超时；终端不回应时（tmux、部分终端、某些 SSH）线程
-  永远卡在 `stdin().read()`，之后所有按键都被它吃掉。改为只看环境变量。
-  顺带把探测结果（协议类型 + 单元格像素尺寸）写进日志：封面显示不对时，
-  先看这一条就知道是不是根本没命中图形协议。
-- **首页封面「没有完全填满」**：根因不是没放大，而是**框和图的形状对不上**。
-  `ratatui-image` 的三种 `Resize`（`Fit` / `Scale` / `Crop`）**全都保持宽高比**——
-  `Scale` 并不是「拉伸到区域一样大」，它只是「允许放大」，仍然等比。而封面区
-  的像素比例（约 1.5:1）与方形封面永远对不上，于是不管选哪个都留黑边。
-  现在按目标区域的像素尺寸先裁剪/缩放图片本身（等价 CSS `object-fit: cover`），
-  再交给协议渲染，做到真正铺满。
-- **侧边栏里按 `↑` `↓` / `j` `k` 跳到了错误的页**：移动走的是 `Tab::ALL`
-  （数字键落点），而侧边栏**显示**的是 `Tab::SIDEBAR_ORDER`，两者顺序不同——
-  从「队列」往下按会跳到「歌词」，可屏幕上下一个明明写着「首页」。首/末项跳转
-  （`g` / `G`）同理。现在统一按显示顺序走，鼠标点击的命中区也改成按显示顺序解释。
-- **`0` 键按下去没有任何反应**：键位表的分支写的是 `'1'..='9'`，把 `0` 漏掉了。
-  侧边栏印着「0 可视化」、文档写着「1–9、0」、`Tab::number_key()` 也照常返回
-  `'0'`——界面和文档一起骗人，而且不会报错。现在 `0`-`9` 全部可用。
-- **文档里两处快捷键写错**：设置页把歌词面板标成 `y`（实际是 `l`）、侧边导航标成
-  `b`（实际是 `\`）；帮助面板与 KEYBINDINGS 还宣称数字键能「在列表内跳到第 N 项」，
-  但那个功能并不存在（焦点通常在歌曲列表上，真做出来反而会让最常用的「按数字切页」
-  失效）。已按实际行为改正。
-- **播放条右侧那段被提前截断**：那段宽度是按**字符数**算的，而截断是按**显示宽度**
-  做的——「下一首 <中文歌名>」里歌名一个字占两列，算出来的宽度明显偏小，于是
-  明明还有空间也被截成「下一首 WE GO · 播放中 · …」。改用 `display_width` 计算。
-  （是为 README 抓真实截图时才看出来的：截图里那个省略号很显眼。）
+- **`s` / `a` / `d` reported "no song currently selected"**: these actions previously recognized only "focus is in the song list
+  column", so when focus was on the **upper part** of a playlist / artist / ranking, or on the **queue page**, no song could be obtained.
+  Added `selected_song()` which falls back through "queue selection → current page's song list → queue current → now playing", so
+  favoriting (`s`), adding to queue (`a`), and removing from a cloud playlist (`d`) work in more places.
+  Also fixed it giving up directly when the queue had no selection.
+- **Clicking "sources" in the sidebar did nothing**: the click went through `Tab::from_number`, a number-key mapping
+  covering only the first 10 pages, while sources is 11th → got `None`, doing nothing. The mouse is now free of
+  the keyboard's ten-key limit.
+- **VIP / delisted songs couldn't get a playback address** (several places, fixed one by one):
+  - `/privilege/lite` must use **GET + a `hash` parameter**. The server reads the top-level `hash`
+    (comma-separated, multiple allowed), not a `resource` array; using POST + `resource` gets
+    `error_code 20010 "hash and AlbumAudioID is empty"`, and 20010 was treated by our client
+    as "login required", silently failing the whole path — the log's "login required" had nothing to do with login state.
+  - **The concept edition must pass `ppage_id=356753938`** (a single one). Without it the server uses the default three-segment value
+    `356753938,823673182,967485191`, making delisted songs return `status=3`. The standard edition ignores the client-
+    passed value (using its own hardcoded one), so passing it uniformly is safe for both platforms.
+  - **Never pass `album_audio_id`**: measured, with it the server **takes the song by it alone and ignores hash** —
+    fixing one aid with three different hashes returns the same URL, **silently playing a different song**.
+    MoeKoeMusic also passes only hash for locating.
+  - **Try candidates one by one; a single failure doesn't abort**: when one combination returns 502, the whole flow no longer fails.
+  - Corrected the `status=3` text: it isn't "no copyright / delisted" but "file identifier doesn't match account permissions"; the original text misled users into thinking the song was delisted.
+- **Terminal capability detection swallowed the whole keyboard**: `Picker::from_query_stdio()` blocked reading
+  stdin after sending a query, and that read had no timeout of its own; when the terminal doesn't respond (tmux, some terminals, some SSH) the thread
+  hangs forever in `stdin().read()`, after which all keypresses are eaten by it. Changed to reading only environment variables.
+  Also wrote the detection result (protocol type + cell pixel size) into the log: when the cover displays wrong,
+  one look tells you whether the graphics protocol wasn't hit at all.
+- **The home cover "isn't completely filled"**: the root cause isn't that it isn't scaled up, but that **the box and the image shapes don't match**.
+  `ratatui-image`'s three `Resize` modes (`Fit` / `Scale` / `Crop`) **all preserve the aspect ratio** —
+  `Scale` isn't "stretch to the area's size", it just "allows upscaling", still proportional. And the cover area's
+  pixel ratio (~1.5:1) never matches square cover art, so whichever is chosen leaves black bars.
+  Now it crops/scales the image itself by the target area's pixel size (equivalent to CSS `object-fit: cover`),
+  then hands it to the protocol renderer, achieving a true fill.
+- **Pressing `↑` `↓` / `j` `k` in the sidebar jumped to the wrong page**: movement went through `Tab::ALL`
+  (number-key targets), while the sidebar **displays** `Tab::SIDEBAR_ORDER`, and the two orders differ —
+  pressing down from "queue" jumped to "lyrics", while the next one on screen clearly says "home". First/last item jumps
+  (`g` / `G`) likewise. Now they uniformly follow display order, and the mouse click's hit zone is interpreted by display order too.
+- **Pressing `0` did nothing at all**: the keybinding table's branch wrote `'1'..='9'`, omitting `0`.
+  The sidebar printed "0 visualizer", the docs said "1–9, 0", and `Tab::number_key()` returned `'0'` as usual — the UI and docs lied together, and no error.
+  Now `0`-`9` all work.
+- **Two shortcuts written wrong in the docs**: the settings page labeled the lyric panel `y` (actually `l`), and side navigation
+  `b` (actually `\`); the help panel and KEYBINDINGS also claimed number keys could "jump to item N in a list",
+  but that feature doesn't exist (focus is usually on the song list, and actually implementing it would break the most common "press a number to switch page").
+  Corrected to match actual behavior.
+- **The right segment of the playback bar was truncated early**: that segment's width was computed by **character count**,
+  while truncation was done by **display width** — in "next <Chinese title>" each character of the title occupies two columns, so the computed width was clearly too small, and
+  space that clearly existed was truncated to "next WE GO · playing · …". Changed to compute with `display_width`.
+  (Spotted only while capturing the real screenshot for the README: that ellipsis was very conspicuous.)
 
-### 文档
+### Docs
 
-以下都是**过期或被功能改动落下**的说法，已按当前代码改正：
+The following were **outdated or left behind by feature changes**, corrected to match the current code:
 
-- **「边下边播没做」**：README、FAQ、CHANGELOG 三处都还写着「先下载再解码，
-  不是边下边播」。实际上早已实现（攒够 128 KB 就开播）。顺带补上它的真正限制：
-  读指针跑到未下到的位置会阻塞，以及**续播上次位置时不走流式**（会先下完）。
-- **Rust 版本**：README / CONTRIBUTING / 一处源码注释写 1.85，实际 `rust-version`
-  是 **1.86**（由 `ratatui-image` 11.x 决定）。
-- **Node 版本**：写「16+」，上游 `engines` 实际是 `>=12`。
-- **平台**：写「linux-macos-windows」，但 `zbus` 在 Windows 上要求 `async-io`
-  而这里只开了 `tokio`，所以 Windows 编译不过。改成 `linux`，并在文档里说明。
-- **内存**：README 写 14 MiB、DESIGN/CONFIGURATION 写 13.8/16.8 MiB，四处互相
-  对不上。重新实测（VmRSS）：空数据 14.2、已登录首页 15.3、歌单页 15.8、
-  播放中 16.9 MiB。
-- **体积与依赖数**：6.7 MiB → **6.8 MiB**；`Cargo.lock` 468 → **469** 个包。
-- **快速上手的「按 `2` 进歌单广场」**：数字键调整后歌单是 `3`，`2` 是搜索。
-- **第三方许可表**：数字过期（427/21/13/7），且声称「由脚本自动提取」而脚本根本
-  没进仓库。现在按 `scripts/license-stats.py` 重算为 429 / 13 / 26，并**把脚本
-  真的提交进来**，以后可重新生成。
-- **终端要求**：写「256 色」，但主题与逐字渐变需要真彩（24 位）才完整。
+- **"Streaming playback isn't done"**: README, FAQ, and CHANGELOG all still said "download first, then decode,
+  not streaming playback". It was in fact already implemented (starts playing after 128 KB). Also added its real limitation:
+  the read pointer blocking at an undownloaded position, and that **resuming the last position doesn't go through streaming** (it downloads fully first).
+- **Rust version**: README / CONTRIBUTING / one source comment said 1.85, while the actual `rust-version`
+  is **1.86** (determined by `ratatui-image` 11.x).
+- **Node version**: wrote "16+", while upstream `engines` is actually `>=12`.
+- **Platform**: wrote "linux-macos-windows", but `zbus` on Windows requires `async-io`
+  while this enables only `tokio`, so Windows doesn't compile. Changed to `linux`, with an explanation in the docs.
+- **Memory**: README said 14 MiB, DESIGN/CONFIGURATION said 13.8/16.8 MiB, four places disagreeing.
+  Re-measured (VmRSS): empty data 14.2, logged-in home 15.3, playlist page 15.8,
+  playing 16.9 MiB.
+- **Size and dependency count**: 6.7 MiB → **6.8 MiB**; `Cargo.lock` 468 → **469** packages.
+- **Quick-start's "press `2` to open the playlist plaza"**: after the number-key change the playlist is `3`, and `2` is search.
+- **Third-party license table**: the numbers were outdated (427/21/13/7), and it claimed "extracted automatically by a script" while the script wasn't
+  in the repo at all. Now recomputed as 429 / 13 / 26 per `scripts/license-stats.py`, and **the script actually committed**,
+  so it can be regenerated later.
+- **Terminal requirement**: wrote "256 colors", but the themes and per-character gradient need truecolor (24-bit) to be complete.
 
 ## [0.1.0] - 2026-09-20
 
-首个可用版本，已发布至 https://github.com/sijin-xb/kugou-tui
+First usable version, released at https://github.com/sijin-xb/kugou-tui
 
-### 新增
+### Added
 
-- **MPRIS 桌面集成**：注册为 `org.mpris.MediaPlayer2.kugou-tui`。
-  状态栏 / 媒体控件 / `playerctl` 可直接控制并显示封面；支持拖进度条（SetPosition）。
-  没有 D-Bus 时自动跳过，不影响播放。
+- **MPRIS desktop integration**: registers as `org.mpris.MediaPlayer2.kugou-tui`.
+  The status bar / media controls / `playerctl` can control directly and show the cover; supports dragging the progress bar (SetPosition).
+  Skipped automatically without D-Bus, not affecting playback.
 
-- **音频可视化**：导航第 6 个标签页（按 `6` 进入）。
-  数据取自音频线程在透传采样时记录的真实峰值——**不是随机动画**：
-  静音会掉到底，鼓点会顶到头。带「快起慢落」缓动与峰值保持。
-- **歌词译文 / 音译**：解析 KRC 里 `[language:base64]` 标签（官方未记载），
-  按行挂到歌词上。请求格式由 `fmt=lrc` 改为 `fmt=krc`——译文只存在于 KRC。
+- **Audio visualization**: the navigation's 6th tab (enter with `6`).
+  Data comes from the real peaks the audio thread records while passing samples through — **not a random animation**:
+  silence drops to the bottom, drum hits push to the top. With "fast rise, slow fall" easing and peak hold.
+- **Lyric translations / transliterations**: parses the `[language:base64]` tag in KRC (undocumented officially),
+  attaching to lyrics by line. The request format changed from `fmt=lrc` to `fmt=krc` — translations exist only in KRC.
 
-### 修复
+### Fixed
 
-- **音源不再回退**：顶层 `api_base` 与 `sources.active` 是两个各自独立持久化的
-  字段，启动时未对齐，导致「退出前是概念版、重启变回标准版」，需手动按 `v`。
-  已在 `Config::load()` 与 `merge_cli()` 之间统一（命令行 `--api-base` 仍可覆盖单次会话）。
-- **搜索结果歌名为空**：`/search` 返回的歌名字段是 `FileName`（大写 F/N），
-  候选键名里只有小写 `filename`，大小写不匹配导致全部显示 `-`。
-- **可视化页方向键完全无响应**：`move_selection` 里可视化分支写在最前面，
-  抢在 `(_, Focus::Sidebar)` 之前，导致该页连侧边栏切换标签都不响应。已移到最后。
-- **音源档案被污染**：`sync_active_source()` 曾把运行时 `api_base` 回写进音源档案，
-  用 `--api-base` 临时指向别处后会永久改坏该音源地址。已改为只同步 cookie / dfid。
+- **The source no longer falls back**: the top-level `api_base` and `sources.active` are two independently persisted
+  fields, unaligned at startup, causing "concept edition before exit, standard edition after restart", needing a manual `v`.
+  Unified between `Config::load()` and `merge_cli()` (the command-line `--api-base` can still override a single session).
+- **Empty song titles in search results**: `/search`'s title field is `FileName` (capital F/N),
+  while the candidate key list had only lowercase `filename`, so the case mismatch made everything show `-`.
+- **The visualizer page's arrow keys did nothing at all**: in `move_selection` the visualizer branch was written first,
+  ahead of `(_, Focus::Sidebar)`, so that page didn't even respond to sidebar tab switching. Moved to last.
+- **Source profile pollution**: `sync_active_source()` used to write the runtime `api_base` back into the source profile,
+  so pointing elsewhere temporarily with `--api-base` permanently corrupted that source's address. Changed to syncing only cookie / dfid.
 
-### 变更
+### Changed
 
-- 依赖的 KuGouMusicApi 锁定到 `a5a9801`（上游活跃，接口字段会变）。
-- 修正过时的「酷狗 ↔ 网易云」注释——网易云音源早已移除，实际是「酷狗 ↔ 酷狗概念版」。
+- The depended-on KuGouMusicApi is locked to `a5a9801` (upstream is active and interface fields change).
+- Corrected an outdated "Kugou ↔ NetEase" comment — the NetEase source was long removed, and it's actually "Kugou ↔ Kugou concept edition".
 
-### 已知限制
+### Known limitations
 
-- 歌词译文只在服务端 KRC 带 `[language:]` 标签时才有，部分歌曲没有。
-- `/artist/lists` 偶发返回上游 502，此时需手动 `R` 刷新（尚未加重试）。
+- Lyric translations exist only when the server's KRC carries a `[language:]` tag, and some songs don't.
+- `/artist/lists` occasionally returns an upstream 502, requiring a manual `R` refresh (retry not yet added).

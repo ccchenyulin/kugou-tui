@@ -1,130 +1,116 @@
-# 键位与操作
+# Keybindings and Controls
 
-### 快捷键
+### Shortcuts
 
-按键分两种模式。**输入框获得焦点时**（搜索框、新建歌单输入框），字母键会原样插入文本
-而不是触发快捷键——否则就没法搜带 `q`、`j` 的歌名了。按 `Esc` 退出输入态。
+Keys have two modes. **When an input box has focus** (search box, new-playlist input), letter keys insert text instead of triggering shortcuts — otherwise you couldn't search for songs with `q` or `j` in the name. Press `Esc` to leave input mode.
 
-**全局与导航**
+**Global and Navigation**
 
-| 按键 | 功能 |
+| Key | Action |
 |---|---|
-| `q` / `Q` | 退出 / 强制退出 |
-| `?` / `F1` | 帮助面板（38 条放不完，见下） |
-| `\` | 显示 / 隐藏侧边栏 |
-| `1`–`9`、`0` | 切换标签页 |
-| `,` | 打开设置页（等同 `9`） |
-| `v` | 打开音源页（等同 `8`） |
-| `Tab` / `Shift+Tab` | 轮转焦点区域 |
-| `j` / `k` 或 `↓` / `↑` | 上下移动 |
-| `g` / `G` 或 `Home` / `End` | 跳到首行 / 末行 |
-| `PgUp` / `PgDn` | 翻页 |
-| `Enter` | 播放选中歌曲 / 进入 |
-| `Esc` | 返回上一层 |
+| `q` / `Q` | Quit / force quit |
+| `?` / `F1` | Help panel (38 entries don't fit, see below) |
+| `\` | Show / hide sidebar |
+| `1`–`9`, `0` | Switch tabs |
+| `,` | Open settings page (same as `9`) |
+| `v` | Open sources page (same as `8`) |
+| `Tab` / `Shift+Tab` | Rotate focus between panes |
+| `j` / `k` or `↓` / `↑` | Move up / down |
+| `g` / `G` or `Home` / `End` | Jump to first / last row |
+| `PgUp` / `PgDn` | Page up / down |
+| `Enter` | Play selected song / enter |
+| `Esc` | Go back one level |
 
-> 数字键的落点是：`1` 首页、`2` 搜索、`3` 歌单、`4` 歌手、`5` 排行榜、
-> `6` 云端、`7` 队列、`8` 音源、`9` 设置、`0` 可视化。
+> Number-key targets: `1` Home, `2` Search, `3` Playlists, `4` Artists, `5` Charts, `6` Cloud, `7` Queue, `8` Sources, `9` Settings, `0` Visualization.
 >
-> 侧边栏的**显示顺序**与它不同（「正在播放」组排在最前，首页是侧边栏第一项），
-> 所以每行前面都标了数字键，照着按不会错。在侧边栏里按 `↑` `↓` / `j` `k`
-> 走的是**显示顺序**，与屏幕上看到的一致。
+> The sidebar's **display order** differs (the "Now Playing" group comes first; Home is the first sidebar item), so each row is prefixed with its number key — follow those and you can't go wrong. In the sidebar, `↑` `↓` / `j` `k` follow **display order**, matching what you see on screen.
 
-**播放**
+**Playback**
 
-| 按键 | 功能 |
+| Key | Action |
 |---|---|
-| `Space` | 播放 / 暂停 |
-| `n` / `p` | 下一首 / 上一首 |
-| `←` / `→` | 快退 / 快进 5 秒 |
-| `+` / `-` | 音量 ±5% |
-| `m` | 静音开关 |
-| `r` | 循环播放模式（顺序 → 列表循环 → 单曲循环 → 随机） |
-| `l` | 歌词面板开关 |
-| `[` / `]` | 歌词延后 / 提前 100 ms |
-| `y` | 切换音质（下一首生效） |
-| `W` | 下载当前播放的歌曲到设置里的目录 |
+| `Space` | Play / pause |
+| `n` / `p` | Next / previous track |
+| `←` / `→` | Rewind / forward 5 seconds |
+| `+` / `-` | Volume ±5% |
+| `m` | Toggle mute |
+| `r` | Loop mode (order → list loop → single loop → shuffle) |
+| `l` | Toggle lyrics panel |
+| `[` / `]` | Delay / advance lyrics by 100 ms |
+| `y` | Switch quality (takes effect on next track) |
+| `W` | Download current track to the directory set in settings |
 
-**队列与云端**
+**Queue and Cloud**
 
-| 按键 | 功能 |
+| Key | Action |
 |---|---|
-| `;` | 打开**歌曲右键菜单**（也可用鼠标右键） |
-| `a` / `i` | 加入队列 / 插播下一首 |
-| `A` | 把当前列表**全部**加入队列 |
-| `x` / `X` | 从队列移除选中 / 清空队列（需确认） |
-| `o` | 正序 ↔ 倒序（默认倒序，最后一首在最上） |
-| `s` / `S` | 收藏单曲到云端 / 同步整个队列 |
-| `d` / `D` | 从云端歌单移除 / 删除歌单（需确认） |
-| `N` | 新建云端歌单 |
-| `L` | 扫码登录 |
-| `V` | 领取今日概念版 VIP（仅概念版音源，见下） |
-| `R` | 刷新当前列表 |
-| `/` | 聚焦搜索框 |
-| `b` / `c` | 排行榜 / 云端歌单 |
-| `f` | 歌手地区筛选（在歌手页） |
-| `Enter` / `E` / `K` / `J` | 音源页：启用·禁用 / 设为默认 / 优先级上移 / 下移（在音源页） |
-| `C` | 清空音频缓存（需确认） |
-| `M` | 搜索结果加载更多（追加下一页） |
+| `;` | Open the **song context menu** (or right-click) |
+| `a` / `i` | Add to queue / insert next |
+| `A` | Add the **entire** current list to the queue |
+| `x` / `X` | Remove selected from queue / clear queue (needs confirm) |
+| `o` | Ascending ↔ descending (default descending, last track on top) |
+| `s` / `S` | Favorite track to cloud / sync entire queue |
+| `d` / `D` | Remove from cloud playlist / delete playlist (needs confirm) |
+| `N` | New cloud playlist |
+| `L` | QR login |
+| `V` | Claim today's Concept Edition VIP (Concept source only, see below) |
+| `R` | Refresh current list |
+| `/` | Focus search box |
+| `b` / `c` | Charts / cloud playlists |
+| `f` | Artist region filter (on artist page) |
+| `Enter` / `E` / `K` / `J` | Sources page: enable·disable / set default / priority up / down (on sources page) |
+| `C` | Clear audio cache (needs confirm) |
+| `M` | Load more search results (append next page) |
 
-> `x` / `X` 作用于播放队列，需要先把焦点切到队列面板（按 `Tab` 轮转）。
-> `d` / `D` 作用于云端歌单，需要先在「云端」标签页选中一个歌单。
+> `x` / `X` act on the play queue — focus the queue pane first (rotate with `Tab`).
+> `d` / `D` act on cloud playlists — select a playlist on the "Cloud" tab first.
 >
-> 音源页那四个键只在该页有效（`8` 或 `v` 进入），页脚也印着同样的提示。
-> **调整优先级会决定同一条搜索里多个音源结果的先后**，`E` 则是把选中的音源设为
-> 启动时的默认音源。
+> The four sources-page keys work only on that page (reach it with `8` or `v`); the footer prints the same hint. **Changing priority decides the order of multiple source results within one search**; `E` sets the selected source as the default on startup.
 >
-> `V` 领的是**酷狗概念版**的每日 VIP（概念版自带这个机制）。当前音源是标准版时
-> 它只会提示你按 `v` 切过去——那是概念版专属接口，标准版账号调不通。登录后与
-> 切到概念版时会**自动领一次**，一天只领一次；`V` 是手动重试的入口，
-> 「我的资料」里那一行也可以直接点。
+> `V` claims the **KuGou Concept Edition** daily VIP (Concept Edition provides this mechanism). When the current source is Standard, it only prompts you to switch with `v` — that's a Concept-exclusive endpoint a Standard account can't call. It **claims once automatically** after login and on switching to Concept Edition, once per day; `V` is the manual retry, and the row in "My Profile" is also clickable.
 
-### 鼠标操作
+### Mouse Actions
 
-| 操作 | 效果 |
+| Action | Effect |
 |---|---|
-| 单击列表行 | 选中该行并把焦点切到该面板 |
-| 双击列表行 | 激活（等同 `Enter`） |
-| **右键列表行** | 弹出**歌曲菜单**（等同 `;`），见下方 |
-| 滚轮 | 在光标所在列表上移动选中 |
-| 单击侧边栏标签 | 切换标签页（按**显示顺序**命中，与数字键无关） |
-| 单击进度条 | 跳转到对应时间 |
-| **单击歌词行** | **跳到这一句的起始时间**（译文/音译行也一样跳到它那一句） |
-| 单击设置项 | 选中；**再点一次**改值 |
+| Click a list row | Select that row and focus its pane |
+| Double-click a list row | Activate (same as `Enter`) |
+| **Right-click a list row** | Open the **song menu** (same as `;`), see below |
+| Scroll wheel | Move selection in the list under the cursor |
+| Click a sidebar tab | Switch tab (hit by **display order**, independent of number keys) |
+| Click the progress bar | Seek to that time |
+| **Click a lyric line** | **Jump to that line's start time** (translation/transliteration lines jump to their line too) |
+| Click a setting item | Select; **click again** to change the value |
 
-> 点歌词行跳转时会**带上歌词偏移**：当前行是按「播放位置 − `lyric_offset_ms`」
-> 算出来的，所以跳转目标是 `该句时间 + lyric_offset_ms`。偏移为 0 时看不出差别，
-> 调过偏移的人一眼就能发现「跳过去正好差一句」。
+> Clicking a lyric line to jump **includes the lyric offset**: the current line is computed as "playback position − `lyric_offset_ms`", so the jump target is `line time + lyric_offset_ms`. Invisible at offset 0, but anyone who has adjusted the offset will immediately notice the jump landing exactly one line off.
 
-### 歌曲右键菜单
+### Song Context Menu
 
-对光标所在的歌曲按 `;` 或**鼠标右键**：
+Press `;` on the song under the cursor, or **right-click**:
 
 ```
-╭──《稻香》────────────╮
-│ > 播放        Enter  │
-│   加入队列      a    │
-│   插播下一首    i    │
-│   收藏到云端    s    │
-│   下载到本地    W    │
-╰──────────────────────╯
+╭──《稻香》─────────────────╮
+│ > Play              Enter │
+│   Add to queue          a │
+│   Insert next           i │
+│   Favorite to cloud     s │
+│   Download locally      W │
+╰───────────────────────────╯
 ```
 
-每一项都标出了对应的键位——菜单只是把键位集中到光标处，**不是另一套交互**，
-所以菜单里不会出现没有对应键位的操作。在播放队列里时，「加入队列」会换成
-「从队列移除」（对已在队列里的歌再加一次没有意义）。
+Every item shows its corresponding key — the menu only gathers the keys at the cursor, it is **not a separate interaction**, so it never contains an action with no key. In the play queue, "Add to queue" becomes "Remove from queue" (adding a track already in the queue again is pointless).
 
-`↑` `↓` 选择、`Enter` 执行、`1`-`5` 直接选中、`Esc` 关闭。
+`↑` `↓` to select, `Enter` to execute, `1`-`5` to select directly, `Esc` to close.
 
-### 帮助面板
+### Help Panel
 
-`?` 打开。全部快捷键共 38 条，34 行的终端一次只放得下 26 条，所以面板可以滚动：
+Opened with `?`. There are 38 shortcuts total; a 34-line terminal fits only 26 at a time, so the panel scrolls:
 
-| 按键 | 功能 |
+| Key | Action |
 |---|---|
-| `j` / `k`、`↑` / `↓` | 上下滚动一行 |
-| `PgUp` / `PgDn` | 翻页（步长 = 可见行数 - 1，留一行重叠当锚点） |
-| `g` / `G` | 跳到首条 / 末条 |
-| `?` / `Esc` | 关闭 |
+| `j` / `k`, `↑` / `↓` | Scroll one line up / down |
+| `PgUp` / `PgDn` | Page (step = visible lines − 1, one line of overlap as an anchor) |
+| `g` / `G` | Jump to first / last entry |
+| `?` / `Esc` | Close |
 
-底部会显示「第 N-M 条 / 共 38 条」；内容一次放得下时这一行不出现。
-面板是模态的：滚动与关闭之外，其它按键一律吞掉，不会误操作到下面的列表。
+The bottom shows "entry N-M / 38 total"; this line is hidden when everything fits. The panel is modal: apart from scrolling and closing, all other keys are swallowed, so you can't accidentally operate the list underneath.

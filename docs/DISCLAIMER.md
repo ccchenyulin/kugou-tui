@@ -1,27 +1,15 @@
-# 免责声明与合规提示
+# Disclaimer and Compliance Notes
 
-使用本项目前请务必阅读。精简版见 [README](../README.md#许可与免责)，本页是完整条款。
+Read this before using the project. For a short version see [README](../README.md#license-and-disclaimer); this page has the full terms.
 
-1. **仅供学习与技术研究的自用工具**，不提供、不托管、不分发任何音乐内容。
+1. **A personal-use tool for learning and technical research only.** It provides, hosts, and distributes no music content.
 
-2. **接口协议来自第三方逆向项目**：本项目内嵌的酷狗接口实现（签名、设备指纹、KRC 歌词
-   解密、扫码登录、云歌单读写）逐项对照开源项目
-   [KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi) 移植，另保留了调用该服务的
-   `--api node` 回退路径。本项目不拥有任何音乐版权，也不对这些接口的可用性、稳定性与
-   合法性负责。
+2. **The API protocols come from a third-party reverse-engineering project**: this project's embedded KuGou API implementation (signing, device fingerprint, KRC lyric decryption, QR login, cloud playlist read/write) is ported item by item against the open-source project [KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi), and it also retains the `--api node` fallback path that calls that service. This project owns no music copyright and is not responsible for the availability, stability, or legality of these APIs.
 
-3. **第三方服务合规风险**：酷狗（KuGou / 腾讯音乐娱乐集团）的相关服务受其用户协议与
-   当地法律法规约束。通过非官方接口访问可能违反其服务条款，存在账号被限制或终止的风险。
-   本项目仅作为客户端，用你的账号访问酷狗自己的服务（内嵌后端），或访问你本机的
-   接口服务（`--api node`），不鼓励、不协助任何形式的批量下载、传播或商业使用。
+3. **Third-party service compliance risk**: KuGou's (KuGou / Tencent Music Entertainment Group) related services are governed by their user agreements and local laws and regulations. Accessing them through unofficial APIs may violate their terms of service, with the risk of account restriction or termination. This project acts only as a client, using your account to access KuGou's own services (embedded backend), or accessing the API service on your own machine (`--api node`); it does not encourage or assist any form of bulk downloading, distribution, or commercial use.
 
-4. **版权**：请尊重音乐版权，支持正版。播放过程中产生的缓存文件请在合理期限内清除
-   （默认缓存上限 512 MiB，超出自动回收）。
+4. **Copyright**: Respect music copyright and support legitimate copies. Clear cache files produced during playback within a reasonable period (default cache cap 512 MiB, recycled automatically when exceeded).
 
-5. **地域与法律**：禁止在违反当地法律法规的前提下使用本项目。使用者因使用本项目
-   产生的一切后果，由使用者自行承担。
+5. **Region and law**: Do not use this project in violation of local laws and regulations. All consequences arising from the use of this project are borne by the user.
 
-6. **隐私**：登录凭据（cookie）仅保存在你本机的配置文件中（权限 `0600`），
-   除访问酷狗官方域名（内嵌后端）或你自己部署的本机接口服务（`--api node`）外，
-   不会发送到任何地方。日志里的 `token` / `userid` / `dfid` / `mid` 一律脱敏。
-   本项目无任何遥测。
+6. **Privacy**: Login credentials (cookie) are stored only in your local config file (permissions `0600`) and are not sent anywhere except to KuGou's official domain (embedded backend) or a local API service you deploy yourself (`--api node`). The `token` / `userid` / `dfid` / `mid` in logs are always redacted. This project has no telemetry.

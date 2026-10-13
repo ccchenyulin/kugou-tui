@@ -1,56 +1,58 @@
-# 安装
+# Installation
 
-本文是 [README](../README.md) 的展开版：环境要求、各平台的安装路径、第三方 API 服务怎么部署、
-启动器脚本与环境变量、装完先做什么。
+This expands on [README](../README.md): requirements, per-platform install paths, third-party API
+service deployment, launcher scripts and environment variables, and what to do after installing.
 
-**先看这一句**：接口实现**内嵌在二进制里**，默认路径（`--api native`）**不需要 Node.js**。
-只有走 `--api node` 回退（或网易云音源）时，才需要本机有一个第三方 API 服务
-（见「[部署第三方 API 服务](#部署第三方-api-服务)」）。
+**Read this first**: the API implementation is **embedded in the binary**; the default path
+(`--api native`) **needs no Node.js**. A local third-party API service is only needed for the
+`--api node` fallback (or the Netease source) — see
+"[Deploying the third-party API service](#deploying-the-third-party-api-service)".
 
 ---
 
-## 环境要求
+## Requirements
 
-| 项目 | 要求 |
+| Item | Requirement |
 |---|---|
-| Node.js | **仅 `--api node` 回退需要**，≥ 12（含 npm），用于运行 KuGouMusicApi。`--api native` 与 `--no-default-features` 构建都不需要 |
-| Rust 工具链 | 1.90+（edition 2024）。下限由**依赖**顶上去（`quantette` 要 1.90），不是本项目代码决定的 |
-| 音频输出 | rodio 支持的后端：Linux 是 ALSA / PipeWire / PulseAudio，Windows 是 WASAPI，macOS 是 CoreAudio |
-| 终端 | 支持 UTF-8；**真彩（24 位）** 才有完整的主题配色与逐字渐变，老终端可加 `--basic-color` 退回 16 色 |
-| 操作系统 | **Linux**（主力，在 CachyOS 上实测）、**Windows 10/11 x86_64**、**macOS**（CI 覆盖但未真机长期使用） |
-| 构建依赖（Linux） | `alsa-lib` 开发头文件 + `pkg-config`（`cpal` 通过 `alsa-sys` 链接它）。Debian/Ubuntu 是 `libasound2-dev pkg-config`，Arch 是 `alsa-lib`。桌面发行版一般已有，**干净的容器 / 服务器上没有** |
-| 构建依赖（Windows） | 只需 MSVC 工具链。**不需要 CMake、NASM 或 OpenSSL** |
-| 构建依赖（macOS） | 只需 Xcode 命令行工具（`xcode-select --install`） |
-| D-Bus（可选） | 有 session bus 时自动启用 MPRIS 与系统托盘；没有则跳过，不影响播放。Windows 上相关代码不参与编译 |
-| 系统托盘（可选） | 需要状态栏提供 `org.kde.StatusNotifierWatcher`（Quickshell / waybar / KDE 都有）。面板后启动也不要紧——托盘线程每 5 秒重试注册 |
+| Node.js | **Only needed for the `--api node` fallback**, ≥ 12 (with npm), to run KuGouMusicApi. Not needed for `--api native` or `--no-default-features` builds |
+| Rust toolchain | 1.90+ (edition 2024). The floor comes from a **dependency** (`quantette` requires 1.90), not this project's code |
+| Audio output | Backends supported by rodio: ALSA / PipeWire / PulseAudio on Linux, WASAPI on Windows, CoreAudio on macOS |
+| Terminal | UTF-8; **true color (24-bit)** for full theme colors and per-character gradients. Older terminals can fall back to 16 colors with `--basic-color` |
+| OS | **Linux** (primary; tested on CachyOS), **Windows 10/11 x86_64**, **macOS** (covered by CI, not long-term real-hardware use) |
+| Build deps (Linux) | `alsa-lib` dev headers + `pkg-config` (`cpal` links it via `alsa-sys`). Debian/Ubuntu: `libasound2-dev pkg-config`; Arch: `alsa-lib`. Usually present on desktop distros, **not in clean containers / servers** |
+| Build deps (Windows) | MSVC toolchain only. **No CMake, NASM or OpenSSL** |
+| Build deps (macOS) | Xcode command line tools only (`xcode-select --install`) |
+| D-Bus (optional) | With a session bus, MPRIS and the system tray are enabled automatically; without it they are skipped and playback is unaffected. On Windows this code is not compiled |
+| System tray (optional) | Requires a status bar providing `org.kde.StatusNotifierWatcher` (Quickshell / waybar / KDE all have it). Starting after the panel is fine — the tray thread retries registration every 5 seconds |
 
 ---
 
-## 安装路径
+## Install paths
 
-### 路径一：`cargo install`（crates.io）
+### Path 1: `cargo install` (crates.io)
 
 ```bash
 cargo install kugou-tui
-kugou-tui --api native      # 内嵌后端，不需要 Node
+kugou-tui --api native      # embedded backend, no Node needed
 ```
 
-内嵌后端**开箱即用**，没有「首次准备服务」这一步。想用 Node 回退（或跑网易云音源）时
-才需要下面这套：首次启动会自己把接口服务准备好并拉起（下载钉住的上游提交 →
-`npm install --omit=dev` → 起服务，实测约 25 秒），之后每次启动探到端口就复用。
+The embedded backend works out of the box, with no first-time service setup. Only the Node fallback
+(or the Netease source) needs the setup below: the first launch prepares and starts the API service
+itself (download the pinned upstream commit → `npm install --omit=dev` → start, ~25 seconds in
+testing), and later launches reuse it once the port is detected.
 
-| 项 | 说明 |
+| Item | Notes |
 |---|---|
-| 首次启动（仅 `--api node`） | 需要网络。想提前做完：`kugou-tui --api node --api-start`（它拉起的服务留在后台，`--api-stop` 停） |
-| 服务装在哪 | 优先 `/usr/share/kugou-tui/api/kugou`（发行包）与已存在的 `~/KuGouMusicApi`，都没有才装到 `~/.local/share/kugou-tui/api/kugou` |
-| 想自己管服务 | 配置 `api_auto_start = false`，或 `--no-api-start` |
-| 退出行为 | 自己拉起的实例随退出停止，不留常驻 node；已在跑的（你或别的实例起的）不动 |
-| 想彻底去掉引导代码 | `cargo install kugou-tui --no-default-features`（关掉 `node-bootstrap` feature，二进制里不含下载器 / npm / spawn node 的代码） |
+| First launch (only `--api node`) | Needs network. To do it ahead of time: `kugou-tui --api node --api-start` (the service it starts stays in the background; `--api-stop` stops it) |
+| Where the service is installed | Prefers `/usr/share/kugou-tui/api/kugou` (distro package) and an existing `~/KuGouMusicApi`; only if neither exists does it install to `~/.local/share/kugou-tui/api/kugou` |
+| Managing the service yourself | Set `api_auto_start = false`, or pass `--no-api-start` |
+| Exit behavior | An instance it started stops on exit, leaving no resident node; instances already running (started by you or another instance) are left alone |
+| Removing the bootstrap code entirely | `cargo install kugou-tui --no-default-features` (disables the `node-bootstrap` feature; the binary contains no downloader / npm / node-spawn code) |
 
-> 这条路拿不到仓库里的 `scripts/*`（它们不是 crate 的一部分）。要那套一键脚本就用下面的
-> 预编译包。
+> This path does not include the repo's `scripts/*` (they are not part of the crate). For that
+> one-shot script set, use the prebuilt package below.
 
-### 路径二：从源码构建
+### Path 2: Build from source
 
 ```bash
 git clone https://github.com/sijin-xb/kugou-tui.git
@@ -59,107 +61,115 @@ cargo build --release
 ./target/release/kugou-tui --help
 ```
 
-release 产物约 **11.7 MiB**（`opt-level="z"` + fat LTO + strip）。Windows 上把二进制路径换成
-`.\target\release\kugou-tui.exe`，前置与脚本见「[在 Windows 上构建与运行](#在-windows-上构建与运行)」。
+The release artifact is about **11.7 MiB** (`opt-level="z"` + fat LTO + strip). On Windows, replace
+the binary path with `.\target\release\kugou-tui.exe`; prerequisites and scripts are in
+"[Building and running on Windows](#building-and-running-on-windows)".
 
-### 路径三：预编译二进制（GitHub Release）
+### Path 3: Prebuilt binaries (GitHub Release)
 
-[Releases](https://github.com/sijin-xb/kugou-tui/releases) 里三个平台都有，内容一致
-（二进制 + 脚本 + 全部文档）：
+[Releases](https://github.com/sijin-xb/kugou-tui/releases) has all three platforms, with identical
+contents (binary + scripts + all docs):
 
-| 平台 | 文件 |
+| Platform | File |
 |---|---|
-| Linux x86_64 | `kugou-tui-<版本>-x86_64-unknown-linux-gnu.tar.gz` |
-| Windows x86_64 | `kugou-tui-<版本>-x86_64-pc-windows-msvc.zip` |
-| macOS arm64 | `kugou-tui-<版本>-aarch64-apple-darwin.tar.gz` |
+| Linux x86_64 | `kugou-tui-<version>-x86_64-unknown-linux-gnu.tar.gz` |
+| Windows x86_64 | `kugou-tui-<version>-x86_64-pc-windows-msvc.zip` |
+| macOS arm64 | `kugou-tui-<version>-aarch64-apple-darwin.tar.gz` |
 
-> Intel Mac 没有预编译包（CI runner 是 arm64），从源码构建即可。
+> Intel Macs have no prebuilt package (the CI runner is arm64); build from source.
 
-**Linux**：
+**Linux**:
 
 ```bash
-tar xzf kugou-tui-<版本>-x86_64-unknown-linux-gnu.tar.gz
-cd kugou-tui-<版本>-x86_64-unknown-linux-gnu
+tar xzf kugou-tui-<version>-x86_64-unknown-linux-gnu.tar.gz
+cd kugou-tui-<version>-x86_64-unknown-linux-gnu
 
-# 二进制与脚本都链进 PATH。`scripts/kugou-tui` 与二进制同名，链过去要改名
+# Link the binary and scripts into PATH. `scripts/kugou-tui` has the same name as the binary, so rename it when linking
 mkdir -p ~/.local/bin
 ln -s "$PWD/kugou-tui"                 ~/.local/bin/kugou-tui
 ln -s "$PWD/scripts/kugou-api"         ~/.local/bin/kugou-api
 ln -s "$PWD/scripts/kugou-api-install" ~/.local/bin/kugou-tui-install-api
 ln -s "$PWD/scripts/kugou-tui"         ~/.local/bin/kugou-tui-launch
 
-kugou-tui-install-api kugou   # 一次性：拉取并配置接口服务
-kugou-tui                     # 开播
+kugou-tui-install-api kugou   # one-time: fetch and configure the API service
+kugou-tui                     # start playing
 ```
 
-**Windows**：
+**Windows**:
 
 ```powershell
-Expand-Archive kugou-tui-<版本>-x86_64-pc-windows-msvc.zip -DestinationPath .
-cd kugou-tui-<版本>-x86_64-pc-windows-msvc
-.\scripts\kugou-api-install.ps1   # 一次性
-.\scripts\kugou-tui.ps1           # 开播
+Expand-Archive kugou-tui-<version>-x86_64-pc-windows-msvc.zip -DestinationPath .
+cd kugou-tui-<version>-x86_64-pc-windows-msvc
+.\scripts\kugou-api-install.ps1   # one-time
+.\scripts\kugou-tui.ps1           # start playing
 ```
 
-**macOS**（脚本是 bash，用法同 Linux）：
+**macOS** (scripts are bash, same usage as Linux):
 
 ```bash
-tar xzf kugou-tui-<版本>-aarch64-apple-darwin.tar.gz
-cd kugou-tui-<版本>-aarch64-apple-darwin
+tar xzf kugou-tui-<version>-aarch64-apple-darwin.tar.gz
+cd kugou-tui-<version>-aarch64-apple-darwin
 ./scripts/kugou-api-install kugou
 ./scripts/kugou-tui
 ```
 
-> 包是自足的（含脚本与文档），但**不含接口服务本身**：`kugou-api-install` 需要
-> `node` / `npm` / `git` 与网络（它要 clone 服务并装依赖）。
+> The package is self-contained (includes scripts and docs) but **does not include the API service
+> itself**: `kugou-api-install` needs `node` / `npm` / `git` and network (it clones the service and
+> installs dependencies).
 >
-> Windows 的 zip 里同时带着 bash 版脚本（方便 Git Bash / WSL）；反过来 Linux / macOS 的
-> tarball 里没有 PowerShell 脚本。
+> The Windows zip also carries the bash scripts (for Git Bash / WSL); the Linux / macOS tarballs do
+> not include PowerShell scripts.
 
-### 路径四：AUR（计划中，尚未上架）
+### Path 4: AUR (planned, not yet published)
 
 ```bash
-paru -S kugou-tui          # 或 yay -S kugou-tui
+paru -S kugou-tui          # or yay -S kugou-tui
 ```
 
-目标形态是「装完直接 `kugou-tui` 就能听」：包把**接口服务连同生产依赖**放进
-`/usr/share/kugou-tui/api/kugou/`，程序会优先用它，因此不需要再跑一次 npm install。
+The target is "install and just run `kugou-tui`": the package puts the **API service with its
+production dependencies** into `/usr/share/kugou-tui/api/kugou/`, which the program prefers, so no
+npm install is needed.
 
-> 之所以能把服务打进包里，是因为它**不往自己目录写任何文件**（源码里没有 `writeFile` /
-> `mkdirSync`），从只读目录跑完全正常——这条是实测过的。
+> Bundling the service is possible because it **writes no files into its own directory** (no
+> `writeFile` / `mkdirSync` in the source), so running it from a read-only directory works fine —
+> verified in practice.
 >
-> 网易云那份服务不在包里（只在用网易云音源时才需要），仍走 `kugou-tui-install-api netease`。
+> The Netease service is not bundled (only needed for the Netease source); use
+> `kugou-tui-install-api netease`.
 
 ---
 
-## 在 Windows 上构建与运行
+## Building and running on Windows
 
-日常使用**不需要手动起服务**：`scripts/` 下的 PowerShell 脚本对应 Unix 侧的 bash 脚本。
+Day-to-day use **needs no manual service start**: the PowerShell scripts under `scripts/` mirror the
+bash scripts on Unix.
 
-| Windows | Unix 侧对应 | 干什么 |
+| Windows | Unix counterpart | Purpose |
 |---|---|---|
-| `scripts/kugou-api-install.ps1` | `kugou-api-install` | 拉取接口服务 + 装依赖（只需一次） |
-| `scripts/kugou-tui.ps1` | `kugou-tui` | 启动器：需要服务时确保它在跑，然后进播放器 |
-| `scripts/kugou-api.ps1` | `kugou-api` | 服务启停管理：`start` / `stop` / `restart` / `status` / `logs` |
-| `scripts/build-windows.ps1` | `make-release-tarball` | 构建 + 打包 zip |
+| `scripts/kugou-api-install.ps1` | `kugou-api-install` | Fetch the API service + install dependencies (once) |
+| `scripts/kugou-tui.ps1` | `kugou-tui` | Launcher: ensures the service is running when needed, then starts the player |
+| `scripts/kugou-api.ps1` | `kugou-api` | Service lifecycle: `start` / `stop` / `restart` / `status` / `logs` |
+| `scripts/build-windows.ps1` | `make-release-tarball` | Build + package the zip |
 
-这几个脚本**只依赖 PowerShell 5.1**（Windows 自带），不需要额外装 pwsh 7。它们与启动器
-共用同一套 PID 文件（缓存目录里的 `api-<实例>.pid`，内容 `<PID> <端口>`），所以启动器拉起的
-实例，`kugou-api.ps1` 认得出、停得掉——不必去任务管理器按名字猜着杀 node。
+These scripts **depend only on PowerShell 5.1** (bundled with Windows); no separate pwsh 7 needed.
+They share the launcher's PID files (`api-<instance>.pid` in the cache directory, containing
+`<PID> <port>`), so instances the launcher started are recognized and stoppable by
+`kugou-api.ps1` — no guessing node processes by name in Task Manager.
 
-### 1. 装工具链
+### 1. Install the toolchain
 
-| 要装的东西 | 怎么装 |
+| What | How |
 |---|---|
-| Rust | [rustup.rs](https://rustup.rs) → 默认选 `x86_64-pc-windows-msvc` |
-| MSVC 工具链 | Visual Studio 生成工具，勾「使用 C++ 的桌面开发」；或装了 VS 就有 |
+| Rust | [rustup.rs](https://rustup.rs) → choose `x86_64-pc-windows-msvc` |
+| MSVC toolchain | Visual Studio Build Tools, check "Desktop development with C++"; or you already have it with VS |
 | Node.js | [nodejs.org](https://nodejs.org) |
-| Git | [git-scm.com](https://git-scm.com)，安装脚本要用它 clone |
+| Git | [git-scm.com](https://git-scm.com); the install script uses it to clone |
 
-> **不需要 CMake / NASM / OpenSSL**：Windows 上 TLS 走系统自带的 SChannel 而不是 rustls
-> （后者的 `aws-lc-sys` 是 C 代码，要 CMake + NASM）。见 `Cargo.toml` 里 `cfg(windows)` 的注释。
+> **No CMake / NASM / OpenSSL needed**: on Windows, TLS uses the system's SChannel instead of rustls
+> (whose `aws-lc-sys` is C code requiring CMake + NASM). See the `cfg(windows)` comment in
+> `Cargo.toml`.
 
-### 2. 构建
+### 2. Build
 
 ```powershell
 git clone https://github.com/sijin-xb/kugou-tui.git
@@ -167,34 +177,35 @@ cd kugou-tui
 cargo build --release
 .\target\release\kugou-tui.exe --help
 
-.\scripts\build-windows.ps1        # 打包：dist\kugou-tui-<版本>-x86_64-pc-windows-msvc.zip
+.\scripts\build-windows.ps1        # package: dist\kugou-tui-<version>-x86_64-pc-windows-msvc.zip
 ```
 
-### 3. 拉取接口服务（只需一次）
+### 3. Fetch the API service (once)
 
 ```powershell
 .\scripts\kugou-api-install.ps1
-# 等价于：clone 到 %USERPROFILE%\KuGouMusicApi → 钉到验证过的提交 → npm install --omit=dev
+# equivalent to: clone to %USERPROFILE%\KuGouMusicApi → pin to the verified commit → npm install --omit=dev
 
-.\scripts\kugou-api-install.ps1 -Dir D:\apps\KuGouMusicApi   # 换目录
-.\scripts\kugou-api-install.ps1 netease                      # 网易云音源
+.\scripts\kugou-api-install.ps1 -Dir D:\apps\KuGouMusicApi   # custom directory
+.\scripts\kugou-api-install.ps1 netease                      # Netease source
 ```
 
-### 4. 开播
+### 4. Start playing
 
 ```powershell
 .\scripts\kugou-tui.ps1
-.\scripts\kugou-tui.ps1 -s 海阔天空      # 参数原样透传给播放器
+.\scripts\kugou-tui.ps1 -s 海阔天空      # arguments passed through to the player verbatim
 
-.\scripts\kugou-tui.ps1 --dry-run        # 只打印决策，不启动任何东西
+.\scripts\kugou-tui.ps1 --dry-run        # only prints decisions, starts nothing
 # 配置        : C:\Users\you\AppData\Roaming\kugou-tui\config.toml
 # 当前音源    : kugou_concept
 # 接口后端    : native
 # 接口服务    : 不需要（内嵌后端（--api native）在进程内实现酷狗接口，不需要 Node.js）
 ```
 
-默认的 `--api native` 不需要本机服务，启动器直接进播放器。只有 `--api node` 才会走
-「检查 → 拉起 → 等待就绪」（约 20 秒超时），那时 dry-run 打的是端口与目录：
+The default `--api native` needs no local service, so the launcher goes straight to the player. Only
+`--api node` runs the "check → start → wait ready" flow (~20 s timeout), and only then does dry-run
+print the port and directory:
 
 ```powershell
 .\scripts\kugou-tui.ps1 --dry-run --api node
@@ -204,46 +215,48 @@ cargo build --release
 # 服务在跑吗  : 没起
 ```
 
-也可以完全手动，两个终端各跑一条（仅在 `--api node` 路径上需要）：
+Or fully manually, one command per terminal (only needed on the `--api node` path):
 
 ```powershell
 cd $env:USERPROFILE\KuGouMusicApi; $env:PORT=3000; node app.js
 .\target\release\kugou-tui.exe
 ```
 
-### 5. 终端要求
+### 5. Terminal requirements
 
-**用 Windows Terminal，不要用旧的「命令提示符」窗口。** 程序需要
-`ENABLE_VIRTUAL_TERMINAL_PROCESSING`（交替屏幕、真彩、鼠标上报）与 UTF-8 输出，
-Windows Terminal 默认满足；老 conhost 在中文与颜色上会有明显残缺。
+**Use Windows Terminal, not the legacy "Command Prompt" window.** The program needs
+`ENABLE_VIRTUAL_TERMINAL_PROCESSING` (alternate screen, true color, mouse reporting) and UTF-8
+output, which Windows Terminal provides by default; the old conhost is visibly broken for CJK text
+and colors.
 
-封面在 Windows Terminal 里会退回**半块字符画**（它不支持 Kitty / iTerm2 图形协议，程序探测
-不到就自动降级，属预期行为；想省掉这份开销可以开 `lite_mode`）。装了 Nerd Font 的话加一个
-环境变量，图标才不会退成 ASCII：
+Album art falls back to **half-block character art** in Windows Terminal (it does not support the
+Kitty / iTerm2 graphics protocol; the program detects this and downgrades automatically — expected
+behavior; enable `lite_mode` to skip that cost). With a Nerd Font installed, set one environment
+variable so icons don't fall back to ASCII:
 
 ```powershell
 $env:KUGOU_TUI_NERD_FONT = "1"
 ```
 
-### 6. 与 Linux 的功能差异
+### 6. Feature differences from Linux
 
-| 能力 | Linux | Windows |
+| Capability | Linux | Windows |
 |---|---|---|
-| 播放、搜索、歌词、封面、缓存 | ✅ | ✅ 相同 |
-| MPRIS（桌面媒体控件、`playerctl`） | ✅ | ❌ D-Bus 接口，Windows 没有 |
-| 系统托盘（StatusNotifierItem） | ✅ | ❌ 同上 |
-| 最小化窗口 | ✅ 仅 niri 下（入口在**托盘菜单**里） | ❌ 走 compositor IPC，无对应实现 |
-| 配置文件位置 | `~/.config/kugou-tui/config.toml` | `%APPDATA%\kugou-tui\config.toml` |
-| 缓存与日志位置 | `~/.cache/kugou-tui/` | `%LOCALAPPDATA%\kugou-tui\` |
-| 启动器 / 服务安装器 | `scripts/` 下的 bash 版 | `scripts/` 下的 `.ps1` 版（功能对应） |
+| Playback, search, lyrics, album art, cache | ✅ | ✅ same |
+| MPRIS (desktop media controls, `playerctl`) | ✅ | ❌ D-Bus interface, absent on Windows |
+| System tray (StatusNotifierItem) | ✅ | ❌ same as above |
+| Minimize window | ✅ niri only (entry in the **tray menu**) | ❌ uses compositor IPC, no equivalent |
+| Config file location | `~/.config/kugou-tui/config.toml` | `%APPDATA%\kugou-tui\config.toml` |
+| Cache and log location | `~/.cache/kugou-tui/` | `%LOCALAPPDATA%\kugou-tui\` |
+| Launcher / service installer | bash versions under `scripts/` | `.ps1` versions under `scripts/` (feature-matched) |
 
-三条 ❌ 都是**降级而不是故障**：相关代码不参与编译，界面上也不会出现点了没反应的入口。
-用 `--print-config` 可以确认（会打印「系统托盘 : 不可用（windows 无 D-Bus）」）。
+All three ❌ are **degradations, not failures**: the code is not compiled and no dead entries appear
+in the UI. Confirm with `--print-config` (prints "系统托盘 : 不可用（windows 无 D-Bus）").
 
-### 7. 改代码时怎么确认没弄坏 Windows
+### 7. Checking you haven't broken Windows when changing code
 
-CI 里有一栏 `windows-latest`，每次推送都会真的在 Windows 上跑 clippy + test + build + 打包。
-本地想先查一遍（不需要 Windows 机器）：
+CI has a `windows-latest` job that runs clippy + test + build + packaging on real Windows on every
+push. To check locally first (no Windows machine needed):
 
 ```bash
 rustup target add x86_64-pc-windows-msvc
@@ -251,15 +264,16 @@ cargo check  --target x86_64-pc-windows-msvc --all-targets
 cargo clippy --target x86_64-pc-windows-msvc --all-targets -- -D warnings
 ```
 
-最后一步链接需要 MSVC 工具链，Linux 上跑到 `error: linker link.exe not found` 就说明 Rust 侧
-全部通过了。每处平台分支为什么存在，见 [MAINTENANCE.md](MAINTENANCE.md) 的「平台分支在哪」。
+The final link step needs the MSVC toolchain; on Linux, reaching
+`error: linker link.exe not found` means everything on the Rust side passed. For why each platform
+branch exists, see "where the platform branches are" in [MAINTENANCE.md](MAINTENANCE.md).
 
 ---
 
-## 在 macOS 上构建与运行
+## Building and running on macOS
 
-**支持等级：代码走与 Linux 同一套 `cfg(unix)` 分支，CI 在 `macos-latest` 上跑
-clippy + test + build，但没有在真机长期使用过。**
+**Support level: the code uses the same `cfg(unix)` branches as Linux; CI runs clippy + test + build
+on `macos-latest`, but it has not been used long-term on real hardware.**
 
 ```bash
 git clone https://github.com/sijin-xb/kugou-tui.git
@@ -269,190 +283,206 @@ cd kugou-tui && cargo build --release
 ./scripts/kugou-tui
 ```
 
-`aws-lc-sys`（随 rustls 引入）是 C 代码，靠 Xcode 的 clang 编译；macOS 不需要 ALSA 那套依赖，
-也不需要额外装 CMake。
+`aws-lc-sys` (pulled in with rustls) is C code, compiled by Xcode's clang; macOS does not need the
+ALSA dependencies or a separate CMake.
 
-> **脚本刻意避开了 GNU 专有的东西**（macOS 自带 BSD 工具链 + bash 3.2）：不用
-> `readlink -f`、`dirname --`、`seq`、`setsid`、`ss`、`declare -A`。替代写法与原因写在脚本
-> 文件头的「可移植性」一节，改脚本前先读那段。
+> **The scripts deliberately avoid GNU-specific tools** (macOS ships the BSD toolchain + bash 3.2):
+> no `readlink -f`, `dirname --`, `seq`, `setsid`, `ss`, or `declare -A`. The replacements and
+> rationale are in the "portability" section at the top of the script files — read it before editing
+> them.
 >
-> 目录对齐了 `dirs` 在 macOS 上的取值（`~/Library/Application Support` 与 `~/Library/Caches`，
-> **不是** `~/.config` / `~/.cache`）——不对齐的话启动器会去找一个永远不存在的 `config.toml`。
+> Directories match `dirs`' values on macOS (`~/Library/Application Support` and
+> `~/Library/Caches`, **not** `~/.config` / `~/.cache`) — otherwise the launcher would look for a
+> `config.toml` that never exists.
 >
-> 从浏览器下载的 tar 解出来的二进制带 `com.apple.quarantine` 属性，而包里没有签名，直接跑会被
-> Gatekeeper 杀掉（终端只显示 `Killed: 9`，看起来像程序自己的 bug）。启动器会检测并提示；
-> 手动处理是 `xattr -d com.apple.quarantine ./kugou-tui`。
+> A binary extracted from a browser-downloaded tarball carries the `com.apple.quarantine`
+> attribute; the package is unsigned, so running it directly gets killed by Gatekeeper (the terminal
+> only shows `Killed: 9`, which looks like a bug in the program itself). The launcher detects and
+> warns; the manual fix is `xattr -d com.apple.quarantine ./kugou-tui`.
 
-### 与 Linux 的差异
+### Differences from Linux
 
-| 项目 | macOS 上的表现 |
+| Item | Behavior on macOS |
 |---|---|
-| 音频后端 | CoreAudio（cpal 自动选），不需要配设备 |
-| MPRIS / 系统托盘 | **不可用**（D-Bus 接口，macOS 默认无 session bus）；启动时写一条 WARN 然后跳过 |
-| 最小化窗口 | 不可用（走 niri 的 compositor IPC，`NIRI_SOCKET` 不存在时入口直接不出现） |
-| 配置文件 | `~/Library/Application Support/kugou-tui/config.toml`（**不是** `~/.config`） |
-| 缓存与日志 | `~/Library/Caches/kugou-tui/` |
-| 默认下载目录 | `~/Music` |
-| 封面 | iTerm2 走图形协议；Terminal.app 退回半块字符画（预期行为） |
-| Nerd Font 探测 | 没有 fontconfig，`fc-list` 探测一律落空 → 退 ASCII。装了 Nerd Font 就设 `KUGOU_TUI_NERD_FONT=1` |
+| Audio backend | CoreAudio (chosen automatically by cpal); no device setup needed |
+| MPRIS / system tray | **Unavailable** (D-Bus interface; macOS has no session bus by default); logs a WARN at startup and skips |
+| Minimize window | Unavailable (uses niri's compositor IPC; the entry simply doesn't appear when `NIRI_SOCKET` is absent) |
+| Config file | `~/Library/Application Support/kugou-tui/config.toml` (**not** `~/.config`) |
+| Cache and logs | `~/Library/Caches/kugou-tui/` |
+| Default download directory | `~/Music` |
+| Album art | iTerm2 uses the graphics protocol; Terminal.app falls back to half-block character art (expected) |
+| Nerd Font detection | No fontconfig, so `fc-list` detection always fails → ASCII fallback. With a Nerd Font installed, set `KUGOU_TUI_NERD_FONT=1` |
 
 ---
 
-## 部署第三方 API 服务
+## Deploying the third-party API service
 
-> **这一节只在你要用 `--api node` 回退（或网易云音源）时才需要。**
-> 默认的内嵌后端（`--api native`）把接口实现在进程内，不碰这一节。
+> **This section is only needed for the `--api node` fallback (or the Netease source).** The default
+> embedded backend (`--api native`) implements the API in-process and does not touch any of this.
 
-**`cargo install` 装的、或用过预编译包 / AUR 的，这一节基本不用看**——程序启动时会自己
-探活、缺了就装好并拉起。下面这套是给「要手动控制」和「要装网易云那份服务」的人准备的。
+**If you installed via `cargo install`, or used a prebuilt package / AUR, you can mostly skip this
+section** — the program probes the service at startup and installs and starts it if missing. The
+rest is for those who want manual control or the Netease service.
 
-酷狗接口的**协议**来自独立仓库 [KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi)
-（本仓库没有 submodule，也没有 vendor 目录）；内嵌后端是照它逐项移植的纯 Rust 实现，
-`--api node` 回退则是直接跑那个 Node 服务。
+The Kugou API **protocol** comes from the standalone repo
+[KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi) (this repo has no submodule and no vendor
+directory); the embedded backend is a pure-Rust port of it, while the `--api node` fallback runs
+that Node service directly.
 
-### 一键
+### One-shot
 
 ```bash
 ./scripts/kugou-api-install kugou
 ```
 
-它会 clone 到 `~/KuGouMusicApi`、`npm install`，然后调 `scripts/kugou-api start` 把标准版
-（:3000）与概念版（:3001）两个实例都拉起来。不带参数运行会列出各音源的仓库、**钉住的提交**
-与当前运行状态。
+It clones to `~/KuGouMusicApi`, runs `npm install`, then calls `scripts/kugou-api start` to bring up
+both the standard (:3000) and concept (:3001) instances. Run without arguments to list each source's
+repo, **pinned commit**, and current running state.
 
-### 手动
+### Manual
 
 ```bash
 git clone https://github.com/MakcRe/KuGouMusicApi.git
 cd KuGouMusicApi
-git checkout a5a98013cce79fe0ae2ad65fc84b68176ebcfc1e   # 钉到验证过的提交
+git checkout a5a98013cce79fe0ae2ad65fc84b68176ebcfc1e   # pin to the verified commit
 npm install
-npm start          # 注意是 npm start，不是 npm run dev
+npm start          # note: npm start, not npm run dev
 ```
 
-> **为什么要钉提交**：上游是活跃仓库，接口字段会变，跟 master 可能某天就解析不出歌名或歌词。
-> 这个提交号在 `scripts/kugou-api-install` 里也有一份，脚本按它做浅取
-> （`git fetch --depth 1 origin <sha>`）。换验证过的提交时两处一起改。
+> **Why pin the commit**: upstream is an active repo and API fields change, so master may one day
+> fail to parse song titles or lyrics. The same commit hash is in `scripts/kugou-api-install`, which
+> shallow-fetches it (`git fetch --depth 1 origin <sha>`). When changing the verified commit, update
+> both places.
 >
-> **概念版（lite）**要带 `platform=lite` 启动：`platform=lite PORT=3001 npm start`。
-> 不加这个环境变量，概念版搜索拿不到正确结果。
+> **Concept (lite)** must be started with `platform=lite`: `platform=lite PORT=3001 npm start`.
+> Without this environment variable, concept-version search returns wrong results.
 >
-> `npm run dev` 走的是 nodemon（一个 devDependency），只装过生产依赖的环境里会直接失败。
+> `npm run dev` uses nodemon (a devDependency) and fails outright in an environment with only
+> production dependencies installed.
 
-服务默认监听 `http://127.0.0.1:3000`，验证：`curl -s "http://127.0.0.1:3000/register/dev"`。
-**只用酷狗标准版的话，起这一个实例就够了。**
+The service listens on `http://127.0.0.1:3000` by default; verify with
+`curl -s "http://127.0.0.1:3000/register/dev"`. **For the Kugou standard version alone, this one
+instance is enough.**
 
-### 网易云音源
+### Netease source
 
-走另一套服务（NeteaseCloudMusicApi），需要单独部署，方式与配置见
-[USER_GUIDE.md](USER_GUIDE.md#网易云音源)。
+Uses a different service (NeteaseCloudMusicApi) that must be deployed separately; see
+[USER_GUIDE.md](USER_GUIDE.md#netease-source) for how and how to configure it.
 
 ---
 
-## 启动器脚本（可选）
+## Launcher scripts (optional)
 
-| 脚本 | 作用 |
+| Script | Purpose |
 |---|---|
-| `scripts/kugou-tui` | 启动播放器；**需要**本机 API 服务时，没起就自动拉起并等待就绪 |
-| `scripts/kugou-api` | 一次拉起**两个** API 实例（标准版 + 概念版） |
+| `scripts/kugou-tui` | Start the player; when a local API service **is** needed, starts it and waits for readiness if not running |
+| `scripts/kugou-api` | Start **both** API instances (standard + concept) at once |
 
-> `scripts/kugou-tui` 认后端：默认的 `--api native` 把酷狗接口实现在进程内，本机不需要
-> KuGouMusicApi、也不需要 Node.js，启动器直接进播放器，**不探端口、不拉进程**。只有
-> `--api node`（或配置里 `api_backend = "node"`）才会走下面的「检查 → 拉起 → 等待就绪」。
-> 网易云与汽水音源的接口不在内嵌实现里，照旧需要本机服务（汽水直连公网，是唯一例外）。
+> `scripts/kugou-tui` is backend-aware: the default `--api native` implements the Kugou API
+> in-process and goes straight to the player, **without probing ports or spawning processes**. Only
+> `--api node` (or `api_backend = "node"` in the config) runs the "check → start → wait ready" flow
+> below. The Netease and Soda sources' APIs are not in the embedded implementation and still need a
+> local service (Soda connects directly to the public internet, the sole exception).
 
 ```bash
 ln -s "$PWD/scripts/kugou-tui" "$PWD/scripts/kugou-api" ~/.local/bin/
 
-kugou-api start     # 启动两个实例（已在跑的会跳过），打印 PID / 日志路径 / 访问地址
-kugou-api status    # 查看状态（端口被别人占着也会如实说明）
-kugou-api logs      # 跟随日志（`kugou-api logs lite` 跟概念版）
-kugou-api restart   # 先停再起（改了端口/配置后用它）
-kugou-api stop      # 停止（按 PID 精确停止）
-kugou-api help      # 完整说明
+kugou-api start     # start both instances (already-running ones are skipped); prints PID / log path / URL
+kugou-api status    # show status (reports honestly if the port is held by someone else)
+kugou-api logs      # follow logs (`kugou-api logs lite` follows the concept version)
+kugou-api restart   # stop then start (use after changing ports/config)
+kugou-api stop      # stop (precise, by PID)
+kugou-api help      # full documentation
 ```
 
-`start` 之前会做一轮预检，缺什么补什么：`node`、KuGouMusicApi 目录、`node_modules`（缺了自动
-`npm install --omit=dev`）、客户端二进制（缺了自动 `cargo build --release`）。任一步失败都会
-带着明确原因终止，不留半死不活的进程。不想让它碰编译就设 `KUGOU_API_SKIP_BUILD=1`
-（`stop` / `status` 本来就不触发编译）。
+`start` runs a preflight pass and fills in what's missing: `node`, the KuGouMusicApi directory,
+`node_modules` (auto `npm install --omit=dev` if missing), the client binary (auto
+`cargo build --release` if missing). Any failure aborts with a clear reason, leaving no half-dead
+process. To stop it from touching compilation, set `KUGOU_API_SKIP_BUILD=1` (`stop` / `status` never
+trigger compilation anyway).
 
-参数按**环境变量 > 配置文件 > 默认值**取值。配置文件是可选的
-`<配置根>/kugou-tui/api.env`（Linux 是 `~/.config/kugou-tui/api.env`，macOS 是
-`~/Library/Application Support/kugou-tui/api.env`，两者都可用 `KUGOU_TUI_CONFIG_DIR` 覆盖），
-每行一个 `KEY=VALUE`。例：`KUGOU_STANDARD_PORT=3100 kugou-api restart`。
+Arguments resolve as **environment variable > config file > default**. The config file is an
+optional `<config root>/kugou-tui/api.env` (Linux: `~/.config/kugou-tui/api.env`; macOS:
+`~/Library/Application Support/kugou-tui/api.env`; both overridable via `KUGOU_TUI_CONFIG_DIR`),
+one `KEY=VALUE` per line. Example: `KUGOU_STANDARD_PORT=3100 kugou-api restart`.
 
-`kugou-api` 认这些：
+`kugou-api` recognizes:
 
-| 变量 | 默认值 | 说明 |
+| Variable | Default | Notes |
 |---|---|---|
-| `KUGOU_API_DIR` | `/usr/share/kugou-tui/api/kugou`（软件包提供时）或 `$HOME/KuGouMusicApi` | 服务所在目录 |
-| `KUGOU_API_SYSTEM_ROOT` | `/usr/share/kugou-tui/api` | 软件包放服务的位置（给非 `/usr` 前缀的打包用） |
-| `KUGOU_API_LOG_DIR` | `$XDG_CACHE_HOME/kugou-tui` | 日志与 PID 文件目录 |
-| `KUGOU_API_HOST` | `127.0.0.1` | 监听地址 |
-| `KUGOU_STANDARD_PORT` | `3000` | 标准版端口 |
-| `KUGOU_LITE_PORT` | `3001` | 概念版端口 |
-| `KUGOU_API_BIN` | `<仓库>/target/release/kugou-tui`，不存在则用 `PATH` 上的 | 客户端二进制路径 |
-| `KUGOU_API_SKIP_BUILD` | 空 | 设为 `1` 跳过编译预检 |
-| `KUGOU_API_CONFIG` | `$XDG_CONFIG_HOME/kugou-tui/api.env` | 配置文件路径 |
+| `KUGOU_API_DIR` | `/usr/share/kugou-tui/api/kugou` (when provided by the package) or `$HOME/KuGouMusicApi` | Service directory |
+| `KUGOU_API_SYSTEM_ROOT` | `/usr/share/kugou-tui/api` | Where the package places the service (for packaging with a non-`/usr` prefix) |
+| `KUGOU_API_LOG_DIR` | `$XDG_CACHE_HOME/kugou-tui` | Log and PID file directory |
+| `KUGOU_API_HOST` | `127.0.0.1` | Listen address |
+| `KUGOU_STANDARD_PORT` | `3000` | Standard version port |
+| `KUGOU_LITE_PORT` | `3001` | Concept version port |
+| `KUGOU_API_BIN` | `<repo>/target/release/kugou-tui`, or the one on `PATH` if absent | Client binary path |
+| `KUGOU_API_SKIP_BUILD` | empty | Set to `1` to skip the build preflight |
+| `KUGOU_API_CONFIG` | `$XDG_CONFIG_HOME/kugou-tui/api.env` | Config file path |
 
-`scripts/kugou-tui`（启动器）认另一组：
+`scripts/kugou-tui` (the launcher) recognizes another set:
 
-| 变量 | 默认值 | 说明 |
+| Variable | Default | Notes |
 |---|---|---|
-| `KUGOU_API_BACKEND` | 配置文件里的 `api_backend`，再退到 `native` | 与程序同名变量一致。`native` 时启动器不碰本机服务；`--api <node\|native>` 参数优先于它 |
-| `KUGOU_API_BASE` | **不设置** | 设了才给程序传 `--api-base` 并拿它探活；不设时让程序读配置里选中的音源 |
-| `KUGOU_API_DIR` | `$HOME/KuGouMusicApi` | 服务所在目录，用于自动拉起（仅 `--api node` 时用得上） |
-| `KUGOU_API_LOG` | `$XDG_CACHE_HOME/kugou-tui/api.log` | 服务日志路径 |
-| `KUGOU_TUI_BIN` | 自动探测 | 手动指定二进制路径。默认先找 `脚本目录/../target/release/kugou-tui`，再找 `PATH` 上的 |
-| `API_PORT` | `3000` | 自动拉起服务时用的端口 |
+| `KUGOU_API_BACKEND` | `api_backend` from the config, falling back to `native` | Same variable as the program's. With `native` the launcher never touches a local service; `--api <node\|native>` takes precedence over it |
+| `KUGOU_API_BASE` | **unset** | Only when set does it pass `--api-base` to the program and probe with it; unset, it lets the program read the source selected in the config |
+| `KUGOU_API_DIR` | `$HOME/KuGouMusicApi` | Service directory, used for auto-start (only relevant on `--api node`) |
+| `KUGOU_API_LOG` | `$XDG_CACHE_HOME/kugou-tui/api.log` | Service log path |
+| `KUGOU_TUI_BIN` | auto-detected | Manually specify the binary path. Defaults to `script_dir/../target/release/kugou-tui`, then the one on `PATH` |
+| `API_PORT` | `3000` | Port used when auto-starting the service |
 
-`kugou-tui --dry-run` 会打印它算出的后端与是否需要服务，排查「为什么它没起服务 / 为什么它起了服务」时用：
+`kugou-tui --dry-run` prints the computed backend and whether a service is needed; use it to debug
+"why didn't it start the service / why did it start one":
 
 ```
 接口后端    : native
 接口服务    : 不需要（内嵌后端（--api native）在进程内实现酷狗接口，不需要 Node.js）
 ```
 
-### 不想让 node 常驻？
+### Avoiding a resident node
 
-只有在 `--api node` 回退路径上才会有 node 进程；默认的 `--api native` 根本不拉它，
-这一节可以跳过。
+A node process only exists on the `--api node` fallback path; the default `--api native` never
+spawns it, so you can skip this section.
 
-`scripts/kugou-tui` 用 `setsid` 把服务留在后台、退出时**不回收**（为了下次开播秒起）。
-不想留常驻进程的话，两种做法：
+`scripts/kugou-tui` uses `setsid` to leave the service in the background and does **not** reclaim it
+on exit (so the next launch starts instantly). To avoid a resident process, two options:
 
-- 直接用程序内建的引导：`kugou-tui` 每次启动探一次端口，没有就拉起，**退出时只停自己拉起的
-  那个**（脚本起的不动）。想常驻就用 `--api-start` / `--api-stop`。
-- 想在启动前顺手 `git pull` 更新服务代码（程序不做这件事），写个 shell 函数把
-  「pull → 缺依赖就装 → 没跑就起 → 进播放器 → 退出时收掉自己起的」串起来即可。三段的关键
-  写法：fish 里用 `env PORT=$port nohup node app.js --port=$port &`（不要 `setsid`，否则
-  `$last_pid` 拿到的是 setsid 而不是 node，`kill` 杀不到真正的服务）。
-
----
-
-## 装完先做什么
-
-**不登录也能听歌**，搜索和云端歌单才需要账号。
-
-1. 启动：`kugou-tui`（默认内嵌后端，不需要先准备任何服务）。
-2. 按 **`3`** 进歌单广场 → `Enter` 打开一个歌单 → 移动光标 → `Enter` 播放。
-
-> 只有走 `--api node` 回退路径时才需要先确认 KuGouMusicApi 在跑
-> （`curl -s http://127.0.0.1:3000/`）；启动器会自动把它拉起来。
-
-数字键落点：`1` 首页、`2` 搜索、`3` 歌单、`4` 歌手、`5` 排行榜、`6` 云端、`7` 队列、
-`8` 音源、`9` 设置、`0` 可视化（完整表见 [KEYBINDINGS.md](../KEYBINDINGS.md)）。想搜歌按 `2`，
-首次需要按 `L` 扫码登录。
-
-> 首次启动会自动获取设备指纹 `dfid` 并写入配置（取播放直链需要它），不需要你做任何事。
+- Use the program's built-in bootstrap: `kugou-tui` probes the port once per launch, starts the
+  service if absent, and **on exit stops only the instance it started** (ones started by the script
+  are untouched). Use `--api-start` / `--api-stop` for a resident service.
+- To also `git pull` the service code before launch (the program doesn't do this), write a shell
+  function chaining "pull → install deps if missing → start if not running → enter the player →
+  collect on exit what you started". The key detail in the third step: in fish use
+  `env PORT=$port nohup node app.js --port=$port &` (not `setsid`, otherwise `$last_pid` is
+  setsid's, not node's, and `kill` misses the real service).
 
 ---
 
-## 相关
+## What to do after installing
 
-- 快捷键全表：[KEYBINDINGS.md](../KEYBINDINGS.md)
-- 界面布局与音源配置：[USER_GUIDE.md](USER_GUIDE.md)
-- 配置文件每一项：[CONFIGURATION.md](CONFIGURATION.md)
-- 装完出问题：[FAQ.md](FAQ.md)
-- 排查「内存只涨不落」：`KUGOU_TUI_MEM_TRACE=1 kugou-tui`，日志里每 5 秒一行 RSS
+**You can listen without logging in**; only search and cloud playlists need an account.
+
+1. Launch: `kugou-tui` (default embedded backend; no service to prepare).
+2. Press **`3`** for the playlist square → `Enter` to open a playlist → move the cursor → `Enter`
+   to play.
+
+> Only on the `--api node` fallback do you need to first confirm KuGouMusicApi is running
+> (`curl -s http://127.0.0.1:3000/`); the launcher starts it automatically.
+
+Number-key map: `1` Home, `2` Search, `3` Playlists, `4` Artists, `5` Charts, `6` Cloud, `7` Queue,
+`8` Sources, `9` Settings, `0` Visualizer (full table in [KEYBINDINGS.md](../KEYBINDINGS.md)). To
+search, press `2`; the first time you need to press `L` to scan a QR code and log in.
+
+> The first launch automatically fetches the device fingerprint `dfid` and writes it to the config
+> (needed to get playback direct links); nothing for you to do.
+
+---
+
+## See also
+
+- Full keybinding table: [KEYBINDINGS.md](../KEYBINDINGS.md)
+- UI layout and source configuration: [USER_GUIDE.md](USER_GUIDE.md)
+- Every config file field: [CONFIGURATION.md](CONFIGURATION.md)
+- Problems after installing: [FAQ.md](FAQ.md)
+- Debugging "memory only grows, never drops": `KUGOU_TUI_MEM_TRACE=1 kugou-tui`, one RSS line every
+  5 seconds in the log

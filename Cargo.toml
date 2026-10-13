@@ -14,7 +14,7 @@ edition = "2024"
 # 也别为了压低它去退依赖：ratatui-image 8.x 只认 ratatui 0.29，会和这里的 0.30
 # 编出两份 ratatui（不兼容，渲染不进同一个 Frame）。
 rust-version = "1.90"
-description = "轻量级酷狗音乐命令行 TUI 播放器（接口内嵌，无需 Node.js；保留 Node 服务回退）"
+description = "Lightweight Kugou Music terminal TUI player (interface embedded, no Node.js; keeps a Node service fallback)"
 license = "MIT"
 repository = "https://github.com/sijin-xb/kugou-tui"
 keywords = ["tui", "music", "kugou", "player", "cli"]
@@ -30,7 +30,7 @@ path = "src/main.rs"
 #
 # `--no-default-features` 能编出一个彻底不含这段代码的二进制：没有下载器、没有
 # `npm` 调用、没有 `Command::new("node")`。想验证「这个二进制永远不可能拉起
-# Node」时可以这么编（见 README「构建」一节）。
+# Node」时可以这么编（见 README 的 Install 一节）。
 default = ["node-bootstrap"]
 node-bootstrap = []
 
