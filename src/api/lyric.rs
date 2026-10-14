@@ -165,10 +165,8 @@ pub(crate) async fn fetch_lyric_via<S: LyricSource>(source: &S, song: &Song) -> 
             continue;
         }
 
-        // 候选的**元数据**（singer/song/duration）不可信：实测 July 纯音乐
-        // 《Letter That Writing in the Wind》拿到一条候选，元数据三项全对，
-        // 正文却是 Mc小贱杰的说唱。KRC 正文头部自带的 `[hash:]` 才是这条歌词
-        // 真正归属的音频，据此再校验一次。没有 `[hash:]` 标签的不据此否决。
+        // Second gate: the candidate metadata checked above can be wrong; the
+        // KRC body carries the authoritative audio hash. See `krc_hash_matches`.
         if !krc_hash_matches(&text, song) {
             skipped_mismatched += 1;
             continue;
@@ -276,21 +274,11 @@ fn text_matches_any_singer(candidate: &str, song: &Song) -> bool {
 
 /// KRC 正文头部自带的 `[hash:]` 是否与本曲（含 `extra_hashes`）一致。
 ///
-/// # 为什么需要它
+/// 候选的 `singer`/`song`/`duration` 可以整体错标，KRC 正文里的 `[hash:]` 才是
+/// 这条歌词真正归属的音频，因此比元数据更权威。
 ///
-/// `/search/lyric` 候选的**元数据**（singer/song/duration）不可信。实测 July 的
-/// 纯音乐《Letter That Writing in the Wind》：候选 id=30903331 元数据写着
-/// `singer=July, song=바람에 쓰는 편지（本曲韩文名）, duration=243000`——时长、
-/// 歌手、歌名三项全对，`duration_matches` 与 `candidate_identity_matches` 都放行，
-/// 但它的 KRC 正文是 `[ar:Mc小贱杰][ti:说唱][hash:90e67ade...]`，内容完全是另一首。
-///
-/// KRC 的 `[hash:]` 指向该歌词真实对应的音频，是比候选元数据更权威的归属证据。
-///
-/// # 没有标签时不否决
-///
-/// 实测《晴天》有一条**正确**候选（id=274944371）正文只有 `[ti:晴天][ar:周杰伦]`，
-/// 没有 `[hash:]`。强制要求 hash 会把这类正确歌词误杀成「暂无歌词」，所以
-/// 「没有 hash」按「未知」处理、不据此否决，只否决**有 hash 且对不上**的。
+/// 没有 `[hash:]` 标签时返回 true（不否决）：存在没有 hash 的正确歌词，强制要求
+/// 会把它们误杀成「暂无歌词」。只有**有 hash 且对不上**才拒绝。
 fn krc_hash_matches(krc_text: &str, song: &Song) -> bool {
     let Some(candidate) = krc_tag_value(krc_text, "hash") else {
         return true;
@@ -1583,18 +1571,8 @@ mod tests {
         );
     }
 
-    /// **回归测试**：候选的**元数据**（singer/song/duration）可以全是错的，
-    /// 但 KRC 正文里的 `[hash:]` 才是这条歌词真正归属的音频。
-    ///
-    /// 实测 July 的纯音乐《Letter That Writing in the Wind》：候选 id=30903331
-    /// 元数据写着 `singer=July, song=바람에 쓰는 편지（本曲韩文名）, duration=243000`
-    /// ——时长、歌手、歌名三项全对，`duration_matches` 与 `candidate_identity_matches`
-    /// 两道校验都放行。可它的 KRC 正文头部是
-    /// `[ar:Mc小贱杰][ti:说唱][hash:90e67ade...]`，内容完全是另一首说唱。
-    /// 校验用的元数据本身不可信，拦不住它。
-    ///
-    /// 正文里的 `[hash:]` 指向该歌词真实对应的音频：本曲 hash 是
-    /// `6AF00FBD...`，这条却写 `90e67ade...`，据此拒绝。
+    /// KRC 内部 `[hash:]` 与本曲不符的候选必须跳过，即便候选元数据
+    /// （singer/song/duration）全对——元数据本身可以错标。
     #[tokio::test]
     async fn candidate_with_mismatched_krc_hash_is_skipped() {
         struct Source {
@@ -1653,8 +1631,7 @@ mod tests {
         );
     }
 
-    /// 没有 `[hash:]` 标签的候选不能被 hash 校验误杀——实测《晴天》有一条
-    /// 正确候选（id=274944371）正文只有 `[ti:晴天][ar:周杰伦]`，没有 hash。
+    /// 没有 `[hash:]` 标签的候选不能因此被拒——存在没有 hash 的正确歌词。
     #[tokio::test]
     async fn candidate_without_krc_hash_is_kept() {
         struct Source;
