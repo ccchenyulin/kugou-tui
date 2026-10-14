@@ -12,6 +12,10 @@
 - **文档合并为单份 README**：`docs/` 下 9 个文件、根 `CONTRIBUTING.md`、`KEYBINDINGS.md` 与 `tools/kat/README.md` 删除，内容并入 `README.md`。
 - CI 跳过纯文档、`LICENSE`、`assets/` 改动。
 
+### 修复
+
+- **歌词抓错（改用 KRC 内部 hash 校验归属）**：候选歌词的元数据可能整体错标——实测 July 纯音乐《Letter That Writing in the Wind》的候选写着正确的歌手、歌名与时长，正文却是另一首说唱。现按 KRC 正文自带的 `[hash:]` 校验归属：有该标签且与本曲不符的候选跳过；没有该标签的不据此否决（实测存在无 hash 的正确候选）。
+
 ## [0.6.2] - 2026-10-11
 
 ### 变更

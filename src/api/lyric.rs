@@ -164,6 +164,16 @@ pub(crate) async fn fetch_lyric_via<S: LyricSource>(source: &S, song: &Song) -> 
         if lyric.is_empty() {
             continue;
         }
+
+        // 候选的**元数据**（singer/song/duration）不可信：实测 July 纯音乐
+        // 《Letter That Writing in the Wind》拿到一条候选，元数据三项全对，
+        // 正文却是 Mc小贱杰的说唱。KRC 正文头部自带的 `[hash:]` 才是这条歌词
+        // 真正归属的音频，据此再校验一次。没有 `[hash:]` 标签的不据此否决。
+        if !krc_hash_matches(&text, song) {
+            skipped_mismatched += 1;
+            continue;
+        }
+
         attach_translations(&mut lyric, &text);
         // 剔掉「歌名 - 歌手」标题行与制作人员名单行——它们不是歌词，
         // 但酷狗常把它们当作普通定时行塞进 KRC（《记忆停留》开头十几秒全是名单）。
@@ -262,6 +272,63 @@ fn text_matches_any_singer(candidate: &str, song: &Song) -> bool {
     song.singers
         .iter()
         .any(|singer| text_matches(candidate, &singer.name))
+}
+
+/// KRC 正文头部自带的 `[hash:]` 是否与本曲（含 `extra_hashes`）一致。
+///
+/// # 为什么需要它
+///
+/// `/search/lyric` 候选的**元数据**（singer/song/duration）不可信。实测 July 的
+/// 纯音乐《Letter That Writing in the Wind》：候选 id=30903331 元数据写着
+/// `singer=July, song=바람에 쓰는 편지（本曲韩文名）, duration=243000`——时长、
+/// 歌手、歌名三项全对，`duration_matches` 与 `candidate_identity_matches` 都放行，
+/// 但它的 KRC 正文是 `[ar:Mc小贱杰][ti:说唱][hash:90e67ade...]`，内容完全是另一首。
+///
+/// KRC 的 `[hash:]` 指向该歌词真实对应的音频，是比候选元数据更权威的归属证据。
+///
+/// # 没有标签时不否决
+///
+/// 实测《晴天》有一条**正确**候选（id=274944371）正文只有 `[ti:晴天][ar:周杰伦]`，
+/// 没有 `[hash:]`。强制要求 hash 会把这类正确歌词误杀成「暂无歌词」，所以
+/// 「没有 hash」按「未知」处理、不据此否决，只否决**有 hash 且对不上**的。
+fn krc_hash_matches(krc_text: &str, song: &Song) -> bool {
+    let Some(candidate) = krc_tag_value(krc_text, "hash") else {
+        return true;
+    };
+    let candidate = candidate.trim().to_ascii_lowercase();
+    if candidate.is_empty() {
+        return true;
+    }
+    let song_hash = song.hash.trim().to_ascii_lowercase();
+    if !song_hash.is_empty() && candidate == song_hash {
+        return true;
+    }
+    song.extra_hashes
+        .values()
+        .any(|hash| hash.trim().to_ascii_lowercase() == candidate)
+}
+
+/// 取出 KRC **头部元信息区**形如 `[key:value]` 的标签值（去 BOM）。
+///
+/// 只扫到第一个定时行（`[1234,567]` 或 `[00:01.00]`，以数字开头）为止——
+/// 元信息标签的键是字母（`id`/`ar`/`ti`/`hash`…），定时行的方括号里以数字开头。
+/// 不设这个边界的话，歌词正文里万一出现 `[hash:...]` 字样会被误当元信息。
+fn krc_tag_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let prefix = format!("[{key}:");
+    for line in text.lines() {
+        let line = line.trim_start_matches('\u{feff}').trim_start();
+        let Some(rest) = line.strip_prefix('[') else {
+            continue;
+        };
+        // 以数字开头的是定时行，元信息区到此结束
+        if rest.starts_with(|ch: char| ch.is_ascii_digit()) {
+            break;
+        }
+        if let Some(value) = line.strip_prefix(prefix.as_str()) {
+            return value.split(']').next();
+        }
+    }
+    None
 }
 
 /// 名称归一化：小写、去掉空白与括号/连接符等标点，便于宽松比对。
@@ -1514,5 +1581,110 @@ mod tests {
             !candidate_identity_matches(Some("别人"), Some("别的歌"), &song),
             "都对不上则拒绝"
         );
+    }
+
+    /// **回归测试**：候选的**元数据**（singer/song/duration）可以全是错的，
+    /// 但 KRC 正文里的 `[hash:]` 才是这条歌词真正归属的音频。
+    ///
+    /// 实测 July 的纯音乐《Letter That Writing in the Wind》：候选 id=30903331
+    /// 元数据写着 `singer=July, song=바람에 쓰는 편지（本曲韩文名）, duration=243000`
+    /// ——时长、歌手、歌名三项全对，`duration_matches` 与 `candidate_identity_matches`
+    /// 两道校验都放行。可它的 KRC 正文头部是
+    /// `[ar:Mc小贱杰][ti:说唱][hash:90e67ade...]`，内容完全是另一首说唱。
+    /// 校验用的元数据本身不可信，拦不住它。
+    ///
+    /// 正文里的 `[hash:]` 指向该歌词真实对应的音频：本曲 hash 是
+    /// `6AF00FBD...`，这条却写 `90e67ade...`，据此拒绝。
+    #[tokio::test]
+    async fn candidate_with_mismatched_krc_hash_is_skipped() {
+        struct Source {
+            candidates: serde_json::Value,
+            bodies: Vec<String>,
+        }
+
+        impl LyricSource for Source {
+            async fn search_lyric(&self, _song: &Song) -> Result<Value> {
+                Ok(self.candidates.clone())
+            }
+
+            async fn lyric_body(&self, lyric_id: &str, _access_key: &str) -> Result<String> {
+                let index = if lyric_id == "wrong" { 0 } else { 1 };
+                Ok(self.bodies[index].clone())
+            }
+        }
+
+        let source = Source {
+            candidates: json!({
+                "status": 1,
+                "candidates": [
+                    // 元数据全对（歌手/歌名/时长都与本曲一致），但正文是别的歌
+                    {"id": "wrong", "accesskey": "k1", "duration": 243000,
+                     "singer": "July", "song": "바람에 쓰는 편지"},
+                    {"id": "right", "accesskey": "k2", "duration": 243000,
+                     "singer": "July", "song": "바람에 쓰는 편지"},
+                ],
+            }),
+            bodies: vec![
+                json!({"status": 200, "decodeContent":
+                    "\u{feff}[ar:Mc小贱杰]\r\n[ti:说唱]\r\n[hash:90e67ade8426e017f71e6def7deb9b44]\r\n[0,1000]第一次喊说唱\n"
+                }).to_string(),
+                json!({"status": 200, "decodeContent":
+                    "\u{feff}[ar:July]\r\n[ti:바람에 쓰는 편지]\r\n[hash:6af00fbd4d444a82c005843eef9dc2d4]\r\n[0,1000]纯音乐，请欣赏\n"
+                }).to_string(),
+            ],
+        };
+
+        let song = Song {
+            name: "Letter That Writing in the Wind (写在风中的信)".to_string(),
+            hash: "6AF00FBD4D444A82C005843EEF9DC2D4".to_string(),
+            duration_ms: 243_722,
+            singers: vec![crate::api::model::Singer {
+                id: 18967,
+                name: "July".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        let lyric = fetch_lyric_via(&source, &song).await.unwrap();
+        assert_eq!(lyric.lines.len(), 1);
+        assert_eq!(
+            lyric.lines[0].text, "纯音乐，请欣赏",
+            "KRC 内部 hash 对不上的候选必须跳过"
+        );
+    }
+
+    /// 没有 `[hash:]` 标签的候选不能被 hash 校验误杀——实测《晴天》有一条
+    /// 正确候选（id=274944371）正文只有 `[ti:晴天][ar:周杰伦]`，没有 hash。
+    #[tokio::test]
+    async fn candidate_without_krc_hash_is_kept() {
+        struct Source;
+        impl LyricSource for Source {
+            async fn search_lyric(&self, _song: &Song) -> Result<Value> {
+                Ok(json!({
+                    "status": 1,
+                    "candidates": [{"id": "ok", "accesskey": "k"}],
+                }))
+            }
+            async fn lyric_body(&self, _id: &str, _key: &str) -> Result<String> {
+                Ok(json!({"status": 200, "decodeContent":
+                    "\u{feff}[ti:晴天]\r\n[ar:周杰伦]\r\n[0,1000]故事的小黄花\n"
+                })
+                .to_string())
+            }
+        }
+
+        let song = Song {
+            name: "晴天".to_string(),
+            hash: "B3A52A7A958BF0AED0EBFBA2E9A818B7".to_string(),
+            duration_ms: 269_000,
+            singers: vec![crate::api::model::Singer {
+                id: 6452,
+                name: "周杰伦".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        let lyric = fetch_lyric_via(&Source, &song).await.unwrap();
+        assert_eq!(lyric.lines[0].text, "故事的小黄花");
     }
 }
