@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""统计依赖的许可分布，用来复核 `docs/LICENSES.md` 里那张表。
+"""统计依赖的许可分布，用来复核 `README.md` 许可一节里那张表。
 
 用法（在仓库根目录）：
 
@@ -15,7 +15,7 @@
   `Cargo.lock`。
 * 只做**分类统计**，不判断许可兼容性。真要严格审查请用 `cargo-deny` / `cargo about`。
 
-依赖变动后重跑一次，把输出里的数字同步到 `docs/LICENSES.md`。
+依赖变动后重跑一次，把输出里的数字同步到 `README.md` 许可一节。
 """
 
 from __future__ import annotations

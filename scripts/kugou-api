@@ -29,6 +29,9 @@
 #   KUGOU_API_DIR        KuGouMusicApi 的目录        默认 /usr/share/kugou-tui/api/kugou
 #                                                     （软件包提供的只读副本，自带依赖），
 #                                                     没有则退回 ~/KuGouMusicApi
+#   KUGOU_API_SYSTEM_ROOT  软件包放置服务的位置        默认 /usr/share/kugou-tui/api
+#                                                     （用于非 /usr 前缀打包）
+#   KUGOU_API_CONFIG    配置文件路径                  默认 <配置根>/kugou-tui/api.env
 #   KUGOU_API_LOG_DIR    日志与 PID 文件目录          默认 <缓存根>/kugou-tui
 #                                                     Linux: ~/.cache/kugou-tui
 #                                                     macOS: ~/Library/Caches/kugou-tui

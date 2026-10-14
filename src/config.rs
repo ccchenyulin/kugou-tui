@@ -167,7 +167,7 @@ pub struct Config {
     /// 块）、不画实时频谱、刷新间隔降到 5fps。听歌本身不受影响。
     ///
     /// 实测正常模式播放中约 16.9 MiB（VmRSS），关掉这几样能再降一截——在低配
-    /// 机器或电池供电时有用。分场景数字见 `docs/DESIGN.md`。
+    /// 机器或电池供电时有用。
     #[serde(default)]
     pub lite_mode: bool,
 

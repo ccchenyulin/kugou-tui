@@ -4,6 +4,13 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/)。
 
+## [未发布]
+
+### 变更
+
+- **许可证从 MIT 改为 AGPL-3.0-or-later**。内嵌的汽水音源 `crates/libresoda` 是 AGPL-3.0-or-later 的非可选 path 依赖、被静态链接进同一个二进制，AGPL §5(c) 要求整个组合作品整体以同一许可授权，原 MIT 声明不成立。根 `LICENSE` 换成 AGPL-3.0 正文（与 `crates/libresoda/LICENSE` 同一份），发行包不再重复附带 `LICENSE-AGPL-3.0.txt`。
+- **文档合并为单份 README**：`docs/` 下 9 个文件、根 `CONTRIBUTING.md`、`KEYBINDINGS.md` 与 `tools/kat/README.md` 全部删除，内容并入 `README.md`（99 行）。相关交叉引用、打包清单与 CI 注释同步更新。
+
 ## [0.6.2] - 2026-10-11
 
 ### 变更
@@ -142,26 +149,26 @@
 
 ## 早期版本
 
-完整历史见 `git log`。
+完整历史见 `git log`。以下只留每个版本的标题级改动。
 
-- **[0.4.7] - 2026-10-02** —— 接口服务自动引导（新增 `src/bootstrap.rs`）：首次启动自行准备并拉起 KuGouMusicApi，先探测并复用已有服务，退出时清理自己启动的实例；新增 `api_auto_start` / `api_dir` 配置与 `--api-start` / `--api-stop`，发布到 crates.io，`cargo install kugou-tui` 可用。同时修掉「按 Space 或 Enter 重试」是空头支票、播完不取消下载任务、mmap 阈值 1 MiB 设得过高导致内存只涨（改 256 KiB）、MPRIS 推送不稳定（`mpris:trackid` 固定、发送失败被吞、Position 走 `PropertiesChanged`）。
-- **[0.4.6] - 2026-09-29** —— 系统托盘升级为完整集成：滚轮调音量与快进、菜单加「退出」、图标随播放状态变化、注册每 5 秒自愈、图标改为双联音符。新增 `audio/resample.rs`，用 rubato sinc 抗混叠重采样，修掉 hi-res 母带比其他客户端「更糙」；另修进度条只能向前拖（无 SEEKTABLE 的 FLAC 无法后退，改为重建解码器）、点歌词总是跳相邻行、多声道、mp4 混入 flac 档位、内存超 100 MB 不回落。
-- **[0.4.5] - 2026-09-29** —— 新增 `audio/downmix.rs`：4.0 声道 FLAC 里歌在最后两个声道，而 rodio 的 `ChannelCountConverter` 只保留前两个，听到的不是这首歌；改为偶/奇声道平均下混成立体声，相关性从 +0.35 升到 +0.998。同时把 `/song/url` 的静默降级如实上报（`quality downgraded: requested flac, server actually gave 128 kbps mp3`），候选音质不再跨版本混用（先按 `album_audio_id` 过滤），打包脚本进入常规 CI。
-- **[0.4.4] - 2026-09-28** —— 拆分 `app/update.rs`（4728 → 2958 行），纯搬移零逻辑改动，先后拆出 `app/navigation.rs` / `playback.rs` / `search.rs` / `cloud.rs` / `settings.rs` / `desktop.rs`，依赖保持星形无互调；新增 Windows 侧服务管理 `scripts/kugou-api.ps1`、`kugou-api logs`、启动器 `--dry-run` 与 node 检查。另修网易云歌单/排行榜静默截断、`;` 无法重绑、歌词翻译整体错行、封面「不变形」模式在退化区域 panic、Windows PowerShell 脚本乱码、并发分页顺序错乱、同一首歌两个流式下载互相破坏、分块下载写坏缓存。
-- **[0.4.3] - 2026-09-27** —— Windows 与 macOS 发布包交给 CI（`release.yml`，支持 `workflow_dispatch` 回填）；新增歌词逐行切换过渡动画（`lyric_anim_ms`，默认 `200`，0 关闭）与点击歌词行跳转；`scripts/make-release-tarball` 兼容 macOS（BSD `readlink`、`shasum -a 256`、bash 3.2）。
-- **[0.4.2] - 2026-09-27** —— 正式支持 Windows（10/11 x86_64）：修掉 `pread`、`libc::dup2`、D-Bus 三处编译错误，修 `~` 展开只认 `HOME` 与 `--print-config` 谎报托盘状态，TLS 后端在 Windows 换系统 SChannel（免 CMake + NASM），新增 `scripts/build-windows.ps1`、`kugou-tui.ps1`、`kugou-api-install.ps1` 与三平台 CI。修正 MSRV 声明 1.86 → 1.90，清掉因此暴露的 29 条 clippy 建议。
-- **[0.4.1] - 2026-09-26** —— 修复程序一运行就独占声卡、麦克风与扬声器失声且退出后不恢复：设置页里名为「Default Audio Device」的设备其实是 ALSA 的 `sysdefault`（`plughw:0` 直连别名），`open_default_sink()` 还会在默认设备打不开时抢占第一个能打开的硬件设备；现在先探测声音服务器，有则只列 `default` / `pipewire` / `pulse`。退出时音频线程的 `join` 改为 3 秒有界等待。
-- **[0.4.0] - 2026-09-26** —— 修复常驻内存涨到上百 MB 不回落：流式缓冲改为只保留读指针附近 4 MiB 尾部窗口，窗口外经 `pread` 回读磁盘，切歌/停止/退出主动取消旧任务（5 次切歌 RSS 323.7 → 3.0 MiB）；修播放位置跳回开头（下载完成不再重载、断流不再当作播完）；下载先写 `.part`，完整才改名。打开歌单时首页改为取最后一页，新增 `docs/MAINTENANCE.md`。
-- **[0.3.10] - 2026-09-25** —— 修复歌手列表只显示第一组（`/artist/lists` 按首字母分组返回，解析把组包装当成了歌手，实际应有 1054 位）与点进歌手零首歌（`/artist/audios` 的 `data` 本身就是歌曲数组）；API 端口上跑着别的服务时给出可读错误 `AppError::NonJsonBody`。新增一键发版 `scripts/release`、构建中间产物回收 `scripts/clean` 与 `docs/RELEASE.md`。
-- **[0.3.9] - 2026-09-25** —— `CONTRIBUTING.md` 新增「Release」一节，把工具脚本必须先提交、上游 commit 在两处固定、发版后必须下载回验等坑写成步骤；修正内存数字（7.0 MiB / 14–17 MiB）；补充「一个上游可能有多种字段布局」。
-- **[0.3.8] - 2026-09-25** —— `kugou-tui-install-api` 改用 `npm install --omit=dev`，不再装一堆用不上的 devDependencies（同机实测：全量 311 个包，仅生产 120 个）；`docs/INSTALL.md` 新增「方式三：预编译包」，Release tarball 起包含三个脚本与全部文档。
-- **[0.3.7] - 2026-09-25** —— 支持「发行版提供的接口服务」：包把服务与生产依赖装进 `/usr/share/kugou-tui/api/<source>`（只读），脚本优先使用，可用 `KUGOU_API_SYSTEM_ROOT` 覆盖。修复全新安装时启动器静默退出（`pipefail` + `set -e` 下 `sed | head` 因配置文件不存在而失败）。
-- **[0.3.6] - 2026-09-25** —— 修复启动器脚本被安装到系统目录后找不到客户端二进制：两个脚本原先只按「脚本目录 `/../target/release/kugou-tui`」定位，复制到 `/usr/bin` 后变成 `/usr/target/...`；现在增加 `PATH` 回退，仍可用 `KUGOU_TUI_BIN` / `KUGOU_API_BIN` 显式指定。
-- **[0.3.5] - 2026-09-25** —— 修复网易云歌单内点歌永远 404（首页路径绕过音源分发，直接调了酷狗的 `/playlist/track/all/new`）、歌单与歌手页歌曲无歌手无专辑且时长 `00:00`（`/playlist/track/all` 与 `/artists` 用 `ar`/`al`/`dt` 而非 `artists`/`album`/`duration`）、云端歌单总报「未登录」（服务端不切分 `Set-Cookie` 里的 `;;`）；写入接口不再重试。README 拆出精简首页版（295 → 129 行），新增 `docs/INSTALL.md`、`docs/LICENSES.md`、`docs/DISCLAIMER.md`。
-- **[0.3.4] - 2026-09-25** —— 新增可选输出设备：设置页最后一项显示**实际打开的声卡**，可在「系统默认」与枚举设备间切换（写入 `audio_device`），切换时短暂暂停后从原位置续播，新设备打不开则继续用旧的；候选列表按「能给出默认输出配置」过滤、排除 `null`、按名去重。「播放但没声音」现在能一眼看出声音交给了谁。
-- **[0.3.3] - 2026-09-24** —— 新增系统托盘：注册为 `org.kde.StatusNotifierItem`，悬停显示当前曲目，右键弹出菜单（`com.canonical.dbusmenu`），三级降级静默跳过；菜单里新增「最小化/显示窗口」，借 niri 的 `toggle-window-minimized`，按 OSC 0 设置的标题精确匹配窗口。修复音频后端错误污染 TUI 画面（进入 TUI 前把 stderr 重定向到日志）。README 换成真实终端截图 `assets/screenshot-0.3.3.jpg`。
-- **[0.3.2] - 2026-09-24** —— 修复 `f` 无法通过 `[keymap]` 重绑（`parse_key` 的 F1–F12 分支把单字母 `f` 也匹配了）；`scripts/kugou-api-install` 改用 `git fetch --depth 1 origin <sha>` 固定上游 commit；`scripts/kugou-api` 新增 restart、PID 管理与启动预检。CONFIGURATION.md 补上 `[keymap]` 自定义快捷键一节。
-- **[0.3.1] - 2026-09-24** —— 修复可视化空态把「已停止」说成「已暂停」（两者 Space 的行为不同：停止是从头播，暂停是继续）；侧边栏「清缓存」快捷键与目录名粘成一个词（`C清理 kugou-tui`），改为 `[C]` 括号风格。
-- **[0.3.0] - 2026-09-24** —— 新增瞬时网络故障自动重试（读接口共 3 次尝试，间隔 300 ms → 900 ms；超时、业务错误码、其他 4xx、200 非 JSON 不重试），写接口显式不重试（`get_json_mutating` / `get_json_uncached_mutating`）；帮助面板可滚动（`j`/`k`、`↑`/`↓`、`PgUp`/`PgDn`、`g`/`G`）；启动不再无条件打印「已连接」，连通性由真实请求结果驱动。
-- **[0.2.0] - 2026-09-22** —— 新增设置页（`,` 打开，立即写回 `config.toml`）、6 套主题、曲目下载（`W`）、逐字歌词（KRC 的 `<offset,duration,0>char`）、分块并发下载（128kbps 实测 1.41s → 1.10s）、下一首预取、`cover_fill` 配置与每日领取概念版 VIP。移除「歌词」「封面」两个标签页，数字键 `8` / `9` 改派给音源与设置（`1`–`7` 与 `0` 不变）。
-- **[0.1.0] - 2026-09-20** —— 首个可用版本：MPRIS 桌面集成（`org.mpris.MediaPlayer2.kugou-tui`）、音频可视化（第 6 个标签，数据来自音频线程记录的真实峰值）、歌词翻译/音译（解析 KRC 的 `[language:base64]` 标签，请求从 `fmt=lrc` 改为 `fmt=krc`）。修复音源回退错乱、搜索结果标题为空（`/search` 的字段是 `FileName`）、可视化页方向键完全无响应、音源 profile 污染。依赖的 KuGouMusicApi 锁定 `a5a9801`。
+- **[0.4.7] - 2026-10-02** —— 接口服务自动引导（`src/bootstrap.rs`），发布到 crates.io。
+- **[0.4.6] - 2026-09-29** —— 系统托盘完整集成；hi-res 母带抗混叠重采样。
+- **[0.4.5] - 2026-09-29** —— 多声道下混；`/song/url` 静默降级如实上报。
+- **[0.4.4] - 2026-09-28** —— 拆分 `app/update.rs`（4728 → 2958 行）；Windows 侧服务管理脚本。
+- **[0.4.3] - 2026-09-27** —— Windows / macOS 发布包交给 CI；歌词过渡动画与点击跳转。
+- **[0.4.2] - 2026-09-27** —— 正式支持 Windows 10/11 x86_64。
+- **[0.4.1] - 2026-09-26** —— 修复运行后独占声卡导致系统失声。
+- **[0.4.0] - 2026-09-26** —— 修复常驻内存涨到上百 MB 不回落（5 次切歌 323.7 → 3.0 MiB）。
+- **[0.3.10] - 2026-09-25** —— 修复歌手列表只显示第一组；新增 `scripts/release`、`scripts/clean`。
+- **[0.3.9] - 2026-09-25** —— 贡献文档新增发版一节。
+- **[0.3.8] - 2026-09-25** —— 接口服务改用 `npm install --omit=dev`；新增「方式三：预编译包」。
+- **[0.3.7] - 2026-09-25** —— 支持发行版提供的接口服务（`/usr/share/kugou-tui/api/<source>`）。
+- **[0.3.6] - 2026-09-25** —— 修复脚本装到系统目录后找不到客户端二进制。
+- **[0.3.5] - 2026-09-25** —— 修复网易云歌单内点歌 404 与字段布局差异；README 拆出精简首页版。
+- **[0.3.4] - 2026-09-25** —— 新增可选输出设备（`audio_device`）。
+- **[0.3.3] - 2026-09-24** —— 新增系统托盘；README 换成真实终端截图。
+- **[0.3.2] - 2026-09-24** —— 修复 `f` 无法通过 `[keymap]` 重绑；固定上游 commit。
+- **[0.3.1] - 2026-09-24** —— 修复可视化空态把「已停止」说成「已暂停」。
+- **[0.3.0] - 2026-09-24** —— 新增瞬时网络故障自动重试（读接口 3 次，写接口不重试）。
+- **[0.2.0] - 2026-09-22** —— 新增设置页、6 套主题、下载、逐字歌词、分块并发下载。
+- **[0.1.0] - 2026-09-20** —— 首个可用版本：MPRIS、可视化、歌词翻译/音译。

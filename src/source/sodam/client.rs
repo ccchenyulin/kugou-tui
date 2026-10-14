@@ -41,7 +41,7 @@ use crate::api::ApiClient;
 ///
 /// 这是一台**共享的第三方服务**：可能限流、可能不可用、token 可能轮换。
 /// 配置里显式填地址就用自己的（自建 libmssdk 或局域网那台）；填 `none`
-/// 可显式关掉签名。详见 `docs/USER_GUIDE.md` 的汽水章节。
+/// 可显式关掉签名。详见 README 的汽水音乐音源一节。
 pub const DEFAULT_SIGNER_URL: &str = "http://222.186.10.201:8921/sign";
 /// 上面那台服务的 token（上游随代码公开）。
 pub const DEFAULT_SIGNER_TOKEN: &str = "05f8089b8c5f60c63f2a6dcfe1028d28ee2725a504f3e59b";

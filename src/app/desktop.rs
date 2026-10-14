@@ -1,6 +1,5 @@
 //! 桌面集成：MPRIS、系统托盘、窗口控制、WebSocket 推送。
 //!
-//! 从 `update.rs` 里切出来的第四块（见 `docs/MAINTENANCE.md` §1.8）。这里的代码
 //! **不碰播放、不碰网络、不改业务状态**：它只把 `AppState` 里的东西翻译成桌面
 //! 组件要的快照，或者发一条 compositor IPC。
 //!

@@ -116,8 +116,8 @@ jobs:
             { echo "二进制自报 $actual，tag 是 $expected —— checkout 的 ref 不对" >&2; exit 1; }
           echo "版本核对通过：$actual"
 
-      # 用仓库里那个脚本，不在这里现拼目录：发行包必须同时带上三个 bash 脚本与
-      # docs/，手工拼很容易漏（0.3.7 那版就漏了）。它不传参数时按 `rustc -vV` 的
+      # 用仓库里那个脚本，不在这里现拼目录：发行包必须同时带上三个 bash 脚本，
+      # 手工拼很容易漏（0.3.7 那版就漏了）。它不传参数时按 `rustc -vV` 的
       # host 取三元组，在 ubuntu runner 上就是 `x86_64-unknown-linux-gnu`，
       # 与本地 `scripts/release` 产出的名字一致。
       - name: 打包
@@ -196,8 +196,8 @@ jobs:
             { echo "二进制自报 $actual，tag 是 $expected —— checkout 的 ref 不对" >&2; exit 1; }
           echo "版本核对通过：$actual"
 
-      # 用仓库里那个脚本，不在这里现拼目录：发行包必须同时带上三个 bash 脚本与
-      # docs/，手工拼很容易漏（0.3.7 那版就漏了）。它已经在 macOS 上跑得通
+      # 用仓库里那个脚本，不在这里现拼目录：发行包必须同时带上三个 bash 脚本，
+      # 手工拼很容易漏（0.3.7 那版就漏了）。它已经在 macOS 上跑得通
       # ——`readlink -f` 与 `sha256sum` 这两处 GNU 专有的东西都换掉了。
       - name: 打包
         run: ./scripts/make-release-tarball

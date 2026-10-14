@@ -83,7 +83,7 @@ pub struct Cli {
     ///
     /// **VIP 整曲与无损才需要它**：没有它时汽水的 App 端点会返回
     /// 「HTTP 200 + 空 body」，表现为 VIP 歌只能拿到 30 秒试听。
-    /// 抓包方式见 `docs/USER_GUIDE.md` 的「汽水音乐音源」一节。
+    /// 抓包方式见 README 的「汽水音乐音源」一节。
     #[arg(long, env = "SODAM_X_HELIOS", value_name = "VALUE")]
     pub sodam_x_helios: Option<String>,
 

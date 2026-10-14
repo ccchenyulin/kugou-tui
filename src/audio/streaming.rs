@@ -164,9 +164,6 @@ impl StreamingBuffer {
     }
 
     /// 测试用：指定一组小水位，好在几 KiB 的负载上验证回收与回读。
-    ///
-    /// 生产参数本身（4 MiB / 1 MiB）的实测数据记在 docs/MAINTENANCE.md 的
-    /// 内存对照实验里——那种量级的对照要在进程外测才算数，不适合塞进单元测试。
     #[cfg(test)]
     pub fn with_window_for_test(
         total: Option<u64>,
