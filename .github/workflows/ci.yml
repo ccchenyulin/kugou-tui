@@ -43,7 +43,15 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+      - "assets/**"
   pull_request:
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+      - "assets/**"
   workflow_dispatch:
 
 # 同一分支连续推送时取消前一次，省额度也省得看一堆过期结果。

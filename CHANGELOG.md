@@ -8,8 +8,8 @@
 
 ### 变更
 
-- **许可证从 MIT 改为 AGPL-3.0-or-later**。内嵌的汽水音源 `crates/libresoda` 是 AGPL-3.0-or-later 的非可选 path 依赖、被静态链接进同一个二进制，AGPL §5(c) 要求整个组合作品整体以同一许可授权，原 MIT 声明不成立。根 `LICENSE` 换成 AGPL-3.0 正文（与 `crates/libresoda/LICENSE` 同一份），发行包不再重复附带 `LICENSE-AGPL-3.0.txt`。
-- **文档合并为单份 README**：`docs/` 下 9 个文件、根 `CONTRIBUTING.md`、`KEYBINDINGS.md` 与 `tools/kat/README.md` 全部删除，内容并入 `README.md`（99 行）。相关交叉引用、打包清单与 CI 注释同步更新。
+- **许可证改为 AGPL-3.0-or-later**（原 MIT）。根 `LICENSE` 换成 AGPL-3.0 正文，发行包不再附带 `LICENSE-AGPL-3.0.txt`。
+- **文档合并为单份 README**：`docs/` 下 9 个文件、根 `CONTRIBUTING.md`、`KEYBINDINGS.md` 与 `tools/kat/README.md` 删除，内容并入 `README.md`。
 
 ## [0.6.2] - 2026-10-11
 

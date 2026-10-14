@@ -81,13 +81,11 @@ cd kugou-tui-<版本>-x86_64-unknown-linux-gnu
 
 ## 开发
 
-提交前跑 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`。CI 三平台只验证不产出二进制，MSRV 1.90 由 `quantette` 顶上去。
-
-改之前先读代码。几条容易踩的：`update.rs` 是唯一改 `AppState` 的地方，异步任务走 `bus.emit(Loaded::…)` 回来；`.ps1` 必须带 UTF-8 BOM，CI 抓不到；三个 bash 启动器脚本要兼容 bash 3.2，别用 `readlink -f` / `seq` / `setsid` / `declare -A`。发版走 `./scripts/release` 的两阶段流程，产物清单在 `scripts/make-release-tarball`。
+提交前跑 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`。发版走 `./scripts/release`。
 
 ## 许可与免责
 
-本项目整体是 **AGPL-3.0-or-later**（© 2026 kugou-tui contributors）。之所以不是 MIT：内嵌的汽水音源 `crates/libresoda` 来自 [sodahub-org/libresoda](https://github.com/sodahub-org/libresoda)（AGPL-3.0-or-later），它是非可选的 path 依赖、被静态链接进同一个二进制，AGPL §5(c) 要求整个组合作品整体以同一许可授权，§6 要求分发二进制时同时提供完整对应源码。另有约 485 KB 的 JS（`crates/libresoda/tools/qishui-signer/security/` 下 5 个文件，经 `include_str!` 编进二进制）与 [qq01-hub/Meting-API](https://github.com/qq01-hub/Meting-API) 逐字节相同，而那条 fork 线没有声明任何许可证——**分发二进制前请先确认这部分的授权**。许可证正文在 `LICENSE`。第三方依赖 521 个（508 宽松 + 13 MPL-2.0），复现用 `python3 scripts/license-stats.py`。
+本项目以 **AGPL-3.0-or-later** 授权，正文见 `LICENSE`。
 
 1. **仅供个人学习与技术研究使用。** 本项目不提供、不托管、不分发任何音乐内容。
 2. **接口协议与内置资源来自第三方逆向工程项目。** 内嵌的酷狗接口实现逐项对照 [KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi) 移植；汽水音源数据层取自 [sodahub-org/libresoda](https://github.com/sodahub-org/libresoda)。本项目不拥有任何音乐版权，也不对这些接口或第三方资源的可用性、稳定性或合法性负责。
