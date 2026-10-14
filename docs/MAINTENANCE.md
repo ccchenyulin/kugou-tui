@@ -1,973 +1,400 @@
-# Maintenance and Troubleshooting Handbook
+# 维护与排障手册
+**什么时候读**：改播放/下载/缓存链路时；用户报「内存只涨不降」「进度条跳回开头」「播着播着跳歌」「缓存里只有半首歌」时；或隔了很久回到项目、想知道模块在哪时。
 
-**When to read this**: when changing the playback/download/cache path; when a user reports
-"memory keeps growing", "the progress bar jumps back to the start", "it skips songs while
-playing", or "there's half a song in the cache"; or when returning to the project after a long
-break and wanting to know where the modules live.
-
-It records **pitfalls and verification methods**, not feature descriptions — for features see
-[README](../README.md) and [docs/USER_GUIDE.md](USER_GUIDE.md), for design trade-offs see
-[docs/DESIGN.md](DESIGN.md).
-
----
-
-## 1. Map
-
-### 1.1 Directory
-
+本文件记录**坑与验证方法**，不描述功能 —— 功能见 [README](../README.md) 与 [docs/USER_GUIDE.md](USER_GUIDE.md)，设计取舍见 [docs/DESIGN.md](DESIGN.md)。
+## 1. 地图
+### 1.1 目录
 ```
 src/
-├─ main.rs            process entry: parse CLI → assemble App → run main loop → exit
-├─ cli.rs             command-line args (precedence: CLI > env vars > config file > defaults)
-├─ config.rs          config read/write, paths (Linux: ~/.config/kugou-tui/, ~/.cache/kugou-tui/;
-│                     Windows: %APPDATA%\\kugou-tui\\, %LOCALAPPDATA%\\kugou-tui\\)
-├─ event.rs           the process-wide single EventBus and the Loaded event enum
-├─ keymap.rs          key → semantic Action; the CHEATSHEET / REBINDABLE lists
-├─ logger.rs          minimal file logging (`tlog!`); DEBUG needs KUGOU_TUI_DEBUG=1
-├─ error.rs           AppError and the "retry or not" criterion
-├─ util.rs            time formatting, random numbers, small helpers
-├─ bootstrap.rs       auto-bootstrap of the local KuGouMusicApi (Node service); with
-│                     `--no-default-features`, bootstrap_disabled.rs takes over (same name
-│                     and signature, everything errors)
-├─ bootstrap_disabled.rs
-├─ mpris.rs           desktop integration: MPRIS (playerctl / DMS, etc.) — **Unix only**, see below
-├─ tray.rs            system tray — **Unix only**, same
-├─ window.rs          niri window control (minimize / show)
-├─ ws.rs              WebSocket service: state / lyric push + remote control (127.0.0.1 only)
-├─ api/               API layer
-│  ├─ traits.rs       unified audio-source interface (sources implement it, app only sees it)
-│  ├─ client.rs       HTTP with retries; AppError classification lives here
-│  ├─ catalog.rs      search / playlists / rankings / artists / fetch playback direct URL
-│  ├─ cloud.rs        account, playlist sync, VIP
-│  ├─ lyric.rs        KRC word-by-word lyric parsing
-│  ├─ model.rs        data models such as Song + tolerant field parsing
-│  ├─ node.rs         `--api node` fallback: implementation via the local KuGouMusicApi
-│  └─ native/         embedded pure-Rust KuGou API (`--api native`, default)
-│     ├─ mod.rs       in-process implementation of the 26 routes, aligned to upstream item by item
-│     ├─ sign.rs      two signature schemes (Android / Web), signKey / signParamsKey
-│     ├─ crypto.rs    RSA / AES / MD5 etc.
-│     ├─ device.rs    device fingerprint (calculateMid / getGuid / randomString)
-│     ├─ krc.rs       KRC lyric decryption
-│     └─ transport.rs construction of outbound requests (URL / params / headers / body)
-├─ audio/             audio subsystem (focus of this doc)
-│  ├─ engine.rs       playback engine owning a dedicated audio thread
-│  ├─ streaming.rs    download-while-playing byte buffer (implements Read + Seek)
-│  ├─ download.rs     download: streaming / whole-track to disk
-│  ├─ cache.rs        disk cache and capacity reclamation
-│  ├─ resample.rs     anti-aliasing resampling of hi-res masters
-│  ├─ downmix.rs      multichannel downmix (see §4 item 12)
-│  ├─ levels.rs       level capture (ring buffer + atomics)
-│  └─ spectrum.rs     FFT spectrum
-├─ source/            audio-source abstraction (Kugou / Kugou Concept / NetEase / Soda)
-│  ├─ mod.rs          SourceKind, per-source profiles and dispatch
-│  ├─ netease.rs      NetEase (via the local NeteaseCloudMusicApi)
-│  └─ sodam/          Soda (direct public network + CDP signing page); data plane from crates/libresoda
-├─ app/               state machine (main thread only)
-│  ├─ mod.rs          App assembly, main loop, exit
-│  ├─ state.rs        AppState: the single source of truth for the UI
-│  ├─ update.rs       event → state change (dispatch + loading layer + result handling, see §1.8)
-│  ├─ navigation.rs   navigation: page switch / focus / selection movement / number keys (split out of update.rs)
-│  ├─ playback.rs     playback control: start / track change / progress / volume / mute / lyric offset
-│  ├─ search.rs       search: submit and paginated append
-│  ├─ cloud.rs        login / source switch / VIP / cloud playlists / account profile
-│  ├─ settings.rs     settings page: candidate values + display text + three interactions (move / click / change value)
-│  ├─ desktop.rs      MPRIS / system tray / window control / WebSocket snapshot
-│  ├─ queue.rs        playback queue and playback modes
-│  └─ session.rs      session persistence (where playback last was)
-└─ ui/                ratatui rendering (read-only state, no mutation)
-   ├─ mod.rs          layout
-   ├─ theme.rs        colors (true color / 16-color variants)
-   ├─ icons.rs        icons (Nerd Font / ASCII variants)
-   ├─ widgets.rs      rendering primitives: list rows, panels, QR codes, etc.
-   └─ views/          sidebar, lists, playback bar, lyrics, help, settings, sources, visualization
-
-crates/
-└─ libresoda/         data plane for Soda music (separate crate, package name libresoda-fork)
-                     search / stream fetch / decryption / playlists / artists / albums / lyrics / CDP QR login,
-                     the same library upstream SodaM uses. `tools/qishui-signer/` holds the scripts
-                     used by the CDP signing page (the js and html under `security/`)
+├─ main.rs  cli.rs  config.rs  event.rs  keymap.rs  logger.rs  error.rs  util.rs
+├─ bootstrap.rs  bootstrap_disabled.rs（`--no-default-features` 接管，同名同签名，全部返回错误）
+├─ mpris.rs  tray.rs（**仅 Unix**）  window.rs（niri 窗口控制）  ws.rs（WebSocket，仅 127.0.0.1）
+├─ api/        traits.rs client.rs catalog.rs cloud.rs lyric.rs model.rs node.rs
+│  └─ native/  mod.rs（26 条路由，逐条对齐上游） sign.rs crypto.rs device.rs krc.rs transport.rs
+├─ audio/      engine.rs streaming.rs download.rs cache.rs resample.rs downmix.rs levels.rs spectrum.rs
+├─ source/     mod.rs netease.rs sodam/（mod.rs client.rs；数据面来自 crates/libresoda）
+├─ app/        mod.rs state.rs update.rs navigation.rs playback.rs search.rs cloud.rs settings.rs desktop.rs queue.rs session.rs
+├─ ui/         mod.rs theme.rs icons.rs widgets.rs views/
+crates/libresoda/  汽水音乐数据面（独立 crate，包名 libresoda-fork），与上游 SodaM 同一个库
+tools/             kat/（KAT 基准脚本）  qishui-signer/（CDP 签名页脚本）
 ```
-
-### 1.2 Threads and ownership
-
+配置路径：Linux `~/.config/kugou-tui/`、`~/.cache/kugou-tui/`；Windows `%APPDATA%\\kugou-tui\\`、`%LOCALAPPDATA%\\kugou-tui\\`。
+### 1.2 线程与归属
 ```
-input thread ──┐
-               ├─→ EventBus ─→ main loop(update.rs) ─→ draw
-async tasks ───┘                      │
-                                      └─→ AppState (main thread only, lock-free)
-audio thread(kugou-audio) ───────────→ atomics (position/duration/volume/state) + EventBus
-ws thread(ws.rs) ────────────────────→ its own current_thread runtime (see 1.9)
+输入线程 ──────┐
+               ├─→ EventBus ─→ 主循环(update.rs) ─→ 绘制
+异步任务 ──────┘                    │
+                                    └─→ AppState（仅主线程，无锁）
+音频线程(kugou-audio) ─────────────→ 原子量(position/duration/volume/state) + EventBus
+ws 线程(ws.rs) ────────────────────→ 自建 current_thread runtime（见 1.9）
 ```
-
-Three iron rules:
-
-1. **Only the main thread mutates `AppState`**, so state has no lock. Don't touch `AppState` from
-   async tasks.
-2. Products of async tasks always **return to the main thread** and are consumed by `update.rs`
-   (`bus.emit(Loaded::…)`).
-3. Between the audio thread and the main thread, **high-frequency data goes through atomics**
-   (position/volume/levels) and **discrete events go through the EventBus** (load finished, track
-   ended, error).
-
-The WebSocket thread is an exception to these three but **does not break** them: it reads the
-`watch` snapshot written by the main loop each tick (read-only), and inbound commands come back to
-the main thread via the `EventBus` — the same path as async tasks.
-
-### 1.3 Data flow for playing a song
-
+三条铁律：**只有主线程改 `AppState`**（所以无锁，异步任务不要碰）；异步任务产物一律**回主线程**由 `update.rs` 消费（`bus.emit(Loaded::…)`）；音频线程与主线程之间**高频数据走原子量**（position/volume/levels）、**离散事件走 EventBus**（加载完成、播完、出错）。WebSocket 线程是这三条的例外但不破坏它们：只读主循环每 tick 写入的 `watch` 快照，入站命令经 `EventBus` 回到主线程。
+### 1.3 播一首歌的数据流
 ```
-User Enter
+用户按 Enter
   └→ App::start_playback(song, start_at_ms)          update.rs
-       ├→ cancel the previous song's still-running streaming download (active_stream.cancel())
-       ├→ audio.mark_loading()                       state immediately becomes "buffering"
+       ├→ 取消上一首仍在跑的流式下载（active_stream.cancel()）
+       ├→ audio.mark_loading()                       状态立刻变「缓冲中」
        ├→ load_cover() / request_lyric()
        └→ request_stream()
-            ├─ cache.find(key) hit ──→ audio.load(AudioSource::File(path), position)
-            └─ miss → fetch direct URL (/song/url, try candidates (hash, quality) one by one)
+            ├─ cache.find(key) 命中 ──→ audio.load(AudioSource::File(path), position)
+            └─ 未命中 → 取直链（/song/url，逐个试候选 (hash, quality)）
                  └→ Loaded::StreamReady
                       └→ App::start_download()
-                           ├─ start_at_ms > 0 → fetch_to() whole track → StreamCached → load(File)
-                           └─ start_at_ms = 0 → start_streaming() (write .part + fill buffer)
-                                └→ 128 KiB accumulated → Loaded::StreamPrerolled
+                           ├─ start_at_ms > 0 → fetch_to() 整轨 → StreamCached → load(File)
+                           └─ start_at_ms = 0 → start_streaming()（写 .part + 填缓冲）
+                                └→ 攒够 128 KiB → Loaded::StreamPrerolled
                                      └→ audio.load(AudioSource::Stream(buffer))
-                                └→ whole track downloaded → rename .part → Loaded::StreamCompleted (finalize only)
+                                └→ 整轨下完 → rename .part → Loaded::StreamCompleted（只做收尾）
 ```
+### 1.4 缓存文件命名
+`{hash}-{quality}.{ext}`，例如 `b3a52a7a…-128.mp3`；不同音质互不覆盖。未完成的文件是同目录、同名 + `.part`，两种形态，`cache.find` 都看不见（有意为之）：
 
-### 1.4 Cache file naming
-
-`{hash}-{quality}.{ext}`, e.g. `b3a52a7a…-128.mp3`; different qualities don't overwrite each other.
-
-Incomplete files are **same directory, same name + a `.part` suffix**; there are two forms, and
-`cache.find` sees neither (intentional, see §3.3):
-
-| Form | Used by |
+| 形态 | 谁用 |
 |---|---|
-| `abc-128.mp3.part` | whole-track download (`fetch_to`: resume, prefetch next track) |
-| `abc-128.mp3.stream.part` | download-while-playing (`start_streaming`) |
+| `abc-128.mp3.part` | 整轨下载（`fetch_to`：续传、预取下一首） |
+| `abc-128.mp3.stream.part` | 边下边播（`start_streaming`） |
 
-**The two forms are deliberately different**: the same song can have both a whole-track download
-(background prefetch) and a streaming download (the user just switched to it) running at once. With
-a shared `.part`, the whole-track download's `File::create` would truncate the bytes the streaming
-one already wrote, and data beyond the buffer window is exactly what's read back from that file via
-`pread` — reading back a hole is noise. Both still end in `.part`, so `cache::is_partial` still
-recognizes them.
+**两种形态刻意分开**：同一首歌可能同时有整轨下载（后台预取）和流式下载在跑；共用一个 `.part` 时整轨下载的 `File::create` 会截掉流式已写入的字节，而窗口外的字节靠 `pread` 从该文件回读 —— 回读到空洞就是噪声。两者都以 `.part` 结尾，`cache::is_partial` 仍能识别。
 
-Also in the same directory are runtime files used by scripts, named by **a convention between the
-two platforms** — change one, change the other:
+同目录还有脚本用的运行期文件，命名是**两个平台之间的约定**，改一边就要改另一边：
 
-| File | Content | Written by / read by |
+| 文件 | 内容 | 写 / 读 |
 |---|---|---|
-| `api-<instance>.pid` | `<PID> <port>` (space-separated) | launcher and `kugou-api` write; `kugou-api stop/status` read |
-| `api-<instance>.log` | the service's stdout (Windows also has `.log.err`) | launcher and `kugou-api` write; `kugou-api logs` read |
+| `api-<instance>.pid` | `<PID> <port>`（空格分隔） | 启动器与 `kugou-api` 写；`kugou-api stop/status` 读 |
+| `api-<instance>.log` | 服务的 stdout（Windows 另有 `.log.err`） | 启动器与 `kugou-api` 写；`kugou-api logs` 读 |
 
-There are only two instance names: `standard` (standard edition / NetEase) and `lite` (Kugou
-Concept edition).
-**Why the PID file carries the port**: with only the PID, an old process whose port was changed
-without a restart makes `status` report "running" on the new port, when it actually listens on the
-old one — hit in practice (see the comment on `pid_of` in `kugou-api`).
-
-### 1.5 Opening a playlist (two-phase load)
-
+实例名只有两个：`standard`（标准版 / 网易云）与 `lite`（酷狗概念版）。PID 文件带端口是因为：只有 PID 时，一个改过端口却没重启的旧进程会让 `status` 在新端口上报「运行中」（见 `kugou-api` 里 `pid_of` 的注释）。
+### 1.5 打开歌单（两段式加载）
 ```
-Open playlist
-  ├→ first_screen_page()          ← decides which page to fetch first (consistent with sort_descending)
-  │     └→ fetch one page → Loaded::PlaylistTracks → set_songs_sorted(…, descending)
-  │           (when displaying descending, `set_songs_sorted` reverses this page)
-  ├→ needs_full_fetch()           ← whether the full table still needs filling in
-  └→ concurrently fetch all remaining pages in the background → Loaded::PlaylistTracks (full-table overwrite)
+打开歌单
+  ├→ first_screen_page()          ← 决定先取哪一页（与 sort_descending 一致）
+  │     └→ 取一页 → Loaded::PlaylistTracks → set_songs_sorted(…, descending)
+  ├→ needs_full_fetch()           ← 整表是否还需要补全
+  └→ 后台并发取完剩余页 → Loaded::PlaylistTracks（整表覆盖）
 ```
+**首屏页必须与显示方向一致**：默认降序 → 最后一页的内容出现在最上方，所以首屏必须取最后一页；否则用户先看到列表中段的歌，几秒后整表到达时画面整屏翻转。「还有没有更多」不能用本页是否满来判断（见 §5「列表分页」）。
+### 1.6 平台分支在哪
 
-Two rules worth remembering:
-
-* **The first-screen page must match the display direction**. Default is descending → the last
-  page's content appears at the top, so the first screen must fetch the last page; otherwise the
-  user first sees songs from the middle of the list, and when the full table arrives a few seconds
-  later the screen flips wholesale.
-* **"Is there more" cannot be judged by whether this page is full** (see §5 "List pagination").
-
----
-
-### 1.6 Where the platform branches are
-
-There are only a handful of `cfg`s in the code, but each corresponds to a real difference, easy to
-miss when changing things. The list:
-
-| Location | Difference | Why it can't be unified |
+| 位置 | 差异 | 为什么不能统一 |
 |---|---|---|
-| `[target.'cfg(windows)']` / `[target.'cfg(unix)']` in `Cargo.toml` | TLS backend (SChannel / rustls), `zbus`, `libc`, `windows-sys` | rustls on Windows drags in `aws-lc-sys`, which needs CMake + NASM installed; D-Bus doesn't exist on Windows |
-| `audio/streaming.rs` | `read_at` wraps: Unix `pread` / Windows `seek_read` | Windows has no `pread` |
-| `logger.rs` | stderr redirect: Unix `dup2` / Windows `SetStdHandle` | Windows has no fd table |
-| `main.rs`, `app/mod.rs`, `app/update.rs` | `mpris` / `tray` modules, fields, sync logic | see above (D-Bus) |
-| `config.rs`, `app/settings.rs` | paths all go through `dirs`; only `~` expansion needs an extra fallback | no `HOME` on Windows |
-| `ui/icons.rs` | Nerd Font detection via `fc-list`, absent on Windows → falls back to ASCII + `KUGOU_TUI_NERD_FONT` override | there the font list is in the registry |
-| `api/model.rs`, `event.rs`, `keymap.rs` | three `#[cfg_attr(not(unix), allow(dead_code))]` | those items are only constructed by MPRIS; keeping `allow` rather than cfg-ing them out keeps the enum/model shape identical on both sides, so downstream `match` needs no platform branches |
-| `scripts/*` (bash) | no platform branches; instead **only constructs available on both** | the scripts run the same on Linux and macOS; per-item differences in §1.7 |
-| `scripts/*.ps1` | `$env:OS -eq 'Windows_NT'` check (`-WindowStyle` etc. exist only on Windows) | `$IsWindows` is a PowerShell 6+ automatic variable, and Windows ships 5.1 |
+| `Cargo.toml` 的 `[target.'cfg(windows)']` / `[target.'cfg(unix)']` | TLS 后端（SChannel / rustls）、`zbus`、`libc`、`windows-sys` | Windows 上 rustls 拖入 `aws-lc-sys`，需装 CMake + NASM；Windows 没有 D-Bus |
+| `audio/streaming.rs` | `read_at` 包装：Unix `pread` / Windows `seek_read` | Windows 没有 `pread` |
+| `logger.rs` | stderr 重定向：Unix `dup2` / Windows `SetStdHandle` | Windows 没有 fd 表 |
+| `main.rs`、`app/mod.rs`、`app/update.rs` | `mpris` / `tray` 模块、字段、同步逻辑 | 同上（D-Bus） |
+| `config.rs`、`app/settings.rs` | 路径都走 `dirs`；只有 `~` 展开需要额外回退 | Windows 没有 `HOME` |
+| `ui/icons.rs` | Nerd Font 检测走 `fc-list`，Windows 没有 → 回退 ASCII + `KUGOU_TUI_NERD_FONT` 覆盖 | 那边的字体列表在注册表里 |
+| `api/model.rs`、`event.rs`、`keymap.rs` | 三处 `#[cfg_attr(not(unix), allow(dead_code))]` | 这些项只被 MPRIS 构造；用 `allow` 而非 cfg 掉，是为了枚举/模型形状两边一致，下游 `match` 不需平台分支 |
+| `scripts/*`（bash） | 无平台分支；只**使用两边都有的构造** | 脚本在 Linux 与 macOS 上跑同一套，见 §1.7 |
+| `scripts/*.ps1` | `$env:OS -eq 'Windows_NT'` 判断（`-WindowStyle` 等只在 Windows 有） | `$IsWindows` 是 PowerShell 6+ 自动变量，而 Windows 自带 5.1 |
 
-Verifying the Windows side **doesn't need a Windows machine** (for the compile-time-checkable part):
-
+验证 Windows 侧**不需要 Windows 机器**（编译期可查的部分）：
 ```bash
 rustup target add x86_64-pc-windows-msvc
 cargo check   --target x86_64-pc-windows-msvc --all-targets
 cargo clippy  --target x86_64-pc-windows-msvc --all-targets -- -D warnings
 ```
+`--all-targets` 也会查测试代码；**最后的链接步骤需要 Windows 或 MSVC 工具链**，在 Linux 上报 `error: linker link.exe not found` 就说明 Rust 侧全部通过。运行期部分由 `.github/workflows/ci.yml` 覆盖：**Linux / Windows / macOS 三条 lane** 各跑 `clippy -D warnings + test`，**不要删** —— 路径展开、配置目录、缓存文件命名只有真跑才暴露；macOS lane 与 Linux 共用 `cfg(unix)`，但 `dirs` 给的是 `~/Library/...`，音频走 CoreAudio，且没有 `fc-list`。这三条 lane **只做验证**（没有 `cargo build --release`、不出发布包、不上传产物）；三平台发布产物由 `release.yml` 在打标签时产出。
+### 1.7 启动器脚本：跨平台约定
+`scripts/` 下的 bash 脚本在 Linux 与 macOS 上跑**同一套**；PowerShell 那些只在 Windows 有意义（发布 zip 里也带 bash 的，供 Git Bash / WSL 用）。
 
-`--all-targets` also checks test code. **The final link step needs Windows or the MSVC toolchain**;
-on Linux, reaching `error: linker link.exe not found` means the Rust side fully passed (dependencies
-and the crate itself all compiled; only linking remains).
-
-The runtime part is covered by `.github/workflows/ci.yml`: **Linux / Windows / macOS three lanes**
-each run `clippy -D warnings + test`. **Don't delete it** — path expansion, config directories, and
-cache file naming only surface when actually run. The macOS lane matters for the same reason: it
-shares the `cfg(unix)` branch with Linux, but `dirs` gives `~/Library/...`, audio goes through
-CoreAudio, and `fc-list` is unavailable — unrun, it's only "theoretically working".
-
-These three lanes **only verify**: no `cargo build --release`, no release packages, no artifact
-upload. Three-platform release assets are produced by `release.yml` on tag push; the rationale is in
-the comment at the top of `ci.yml`.
-
-### 1.7 Launcher scripts: cross-platform conventions
-
-The bash scripts under `scripts/` run **the same** on Linux and macOS; the PowerShell ones only make
-sense on Windows (but the release zip includes the bash ones too, for Git Bash / WSL).
-
-| Windows | Unix side | Notes |
+| Windows | Unix 侧 | 说明 |
 |---|---|---|
-| `kugou-tui.ps1` | `kugou-tui` | launcher. **Deliberately has no `param()` block**, otherwise PowerShell treats `-s 海阔天空` as a misspelled parameter name; all args pass through verbatim via `$args`. `--dry-run` only prints the decision |
-| `kugou-api-install.ps1` | `kugou-api-install` | only clone + install deps, **does not start** — starting the service is the launcher's job, avoiding two copies of that logic |
-| `kugou-api.ps1` | `kugou-api` | start/stop management (`start` / `stop` / `restart` / `status` / `logs`). Shares the PID file with the launcher, see §1.4 |
-| `build-windows.ps1` | `make-release-tarball` | build + package zip. **Which scripts go in the package is decided by "mentioned in the docs"**, not by platform alone — v0.4.3 missed the `.ps1` ones, while the docs told users to run exactly the missing ones |
+| `kugou-tui.ps1` | `kugou-tui` | 启动器。**刻意不写 `param()` 块**，否则 PowerShell 会把 `-s 海阔天空` 当成拼错的参数名；参数经 `$args` 原样透传。`--dry-run` 只打印决策 |
+| `kugou-api-install.ps1` | `kugou-api-install` | 只 clone + 装依赖，**不启动** —— 启动服务是启动器的事，避免两份逻辑 |
+| `kugou-api.ps1` | `kugou-api` | 启停管理（`start` / `stop` / `restart` / `status` / `logs`）。与启动器共用 PID 文件，见 §1.4 |
+| `build-windows.ps1` | `make-release-tarball` | 构建 + 打包 zip。**哪些脚本进包由「文档里提到过」决定**，不只看平台 —— v0.4.3 漏了 `.ps1` 那几个，而文档恰好叫用户去跑漏掉的那些 |
 
-#### bash side: constructs not allowed
+#### bash 侧：不允许的写法
+macOS 带 BSD 工具加 **bash 3.2**；下面每一条都会让脚本直接坏掉。三个脚本各自独立分发，**没有共享库** —— 改就要三个一起改。
 
-macOS ships BSD tools plus **bash 3.2**; every item below breaks the script outright (not "slightly
-different behavior"). The three scripts are each distributed independently (AUR installs into
-`/usr/bin`, release packages put them in `scripts/`, some people symlink them separately), so
-**there is no shared library**: this restriction is restated in each script — change all three
-together.
-
-| Not allowed | What happens | Use instead |
+| 不允许 | 后果 | 改用 |
 |---|---|---|
-| `readlink -f` | macOS reports `illegal option -- f` | resolve symlinks layer by layer (see `self_path` / `self_dir` in each script) |
-| `dirname --` | BSD treats `--` as the argument itself | drop the `--` |
-| `seq` | GNU coreutils, absent on BSD | `while [ "$i" -lt N ]` counting loop |
-| `setsid` | util-linux specific | `nohup` (still the same session, but enough to outlive the terminal) |
-| `ss` | iproute2, absent on macOS | `lsof -nP -iTCP:<port> -sTCP:LISTEN -t` |
-| `declare -A` | bash 3.2 reports `declare: -A: invalid option` | `case` dispatch + `${!name}` indirect expansion |
-| `"${arr[@]}"` (empty array) | bash 3.2 + `set -u` reports unbound variable | `"${arr[@]+"${arr[@]}"}"` |
+| `readlink -f` | macOS 报 `illegal option -- f` | 逐层解软链（见各脚本的 `self_path` / `self_dir`） |
+| `dirname --` | BSD 把 `--` 当成参数本身 | 去掉 `--` |
+| `seq` | GNU coreutils，BSD 没有 | `while [ "$i" -lt N ]` 计数循环 |
+| `setsid` | util-linux 专有 | `nohup` |
+| `ss` | iproute2，macOS 没有 | `lsof -nP -iTCP:<port> -sTCP:LISTEN -t` |
+| `declare -A` | bash 3.2 报 `declare: -A: invalid option` | `case` 分发 + `${!name}` 间接展开 |
+| `"${arr[@]}"`（空数组） | bash 3.2 + `set -u` 报 unbound variable | `"${arr[@]+"${arr[@]}"}"` |
 
-**Directories must align with the `dirs` crate** — this is not a style issue:
+**目录必须与 `dirs` crate 对齐**：配置根 Linux 是 `$XDG_CONFIG_HOME` / `~/.config`、macOS 是 `~/Library/Application Support`；缓存根 Linux 是 `$XDG_CACHE_HOME` / `~/.cache`、macOS 是 `~/Library/Caches`。macOS 上 `dirs` **不读** XDG 变量，所以脚本也不能读：启动器去 `~/.config` 找一个永远不存在的 `config.toml`，于是永远按默认值探测（`:3000`、标准版），概念版用户看到的就是「服务启动失败」。配置根可以用 `KUGOU_TUI_CONFIG_DIR` 整体覆盖（三个脚本 + 两个 ps1 都接受，语义与 `config.rs` 的 `config_root()` 一致）。
+#### PowerShell 侧：四点注意
+* **只用 PowerShell 5.1 语法**（Windows 自带的版本）。不要用 `$IsWindows`（6.0+）或 `Start-Process -Environment`（7.4+）；平台判断统一用 `$env:OS -eq 'Windows_NT'`。
+* **文件必须带 UTF-8 BOM**，这一点**只能靠人保证** —— CI 抓不到。没有 BOM 时 5.1 用当前 ANSI 代码页解码 `.ps1`（中文 Windows 上是 GBK），而脚本里有几十条面向用户的中文提示，会全变乱码。PowerShell 7 默认按 UTF-8 读，CI 用的正是 `shell: pwsh`（7.x），所以**CI 绿不等于用户那边没问题**。新增或重写 `.ps1` 后用 `head -c 3 scripts/*.ps1 | od -An -tx1` 确认每个文件都以 `ef bb bf` 开头；LF 行尾没问题。
+* `Start-Process` **不允许**把 stdout 与 stderr 重定向到同一个文件，所以服务日志有两个：`api-<instance>.log` 与 `api-<instance>.log.err`（实例名 `standard`/`lite`/`netease`）；出错时两个都 dump。
+* 启动器里的配置解析（读 `sources.active` 与 `[sources.<kind>].api_base`）是手写正则，不是 TOML 解析器；配置结构改了要一起改。同理 `kugou-api-install.ps1` 里钉的 commit 必须与 bash 版一致。
 
-| | Linux | macOS |
+`docs/INSTALL.md` 的「在 Windows 上构建与运行」一节列了平台能力表；改完平台分支后那张表也要同步。
+### 1.8 拆分 `update.rs`：进度与规则
+`update.rs` 曾是 4700 行的 `impl App`；拆分目标是降低「改一处要读多少上下文」的成本，不是减少行数。先修可靠性问题（`download.rs` 的 Range 校验、陈旧结果判据集合 `accepts_*`），再动结构。
+
+| 模块 | 行数 | 内容 |
 |---|---|---|
-| config root | `$XDG_CONFIG_HOME` / `~/.config` | `~/Library/Application Support` |
-| cache root | `$XDG_CACHE_HOME` / `~/.cache` | `~/Library/Caches` |
+| `navigation.rs` | 275 | 切页、焦点、移动选中、`go_back`、数字键、`v` 键开音源页 |
+| `playback.rs` | 370 | 起播 / 切歌 / 进度 / 音量 / 静音 / 歌词偏移 |
+| `search.rs` | 142 | 提交搜索、加载更多 |
+| `desktop.rs` | 160 | MPRIS / 托盘快照、窗口控制 |
+| `cloud.rs` | 1160 | 登录 / 切音源 / VIP / 云端歌单 / 账号资料 |
+| `settings.rs` | 760 | 设置页候选值与三种交互（`move_settings` / `click_setting` / `adjust_setting`） |
 
-On macOS, `dirs` does **not read** XDG variables, so the scripts must not either. The consequence is
-concrete: the launcher looks for a `config.toml` under `~/.config` that never exists, so it always
-probes with defaults (`:3000`, standard edition), and Concept-edition users just see "service failed
-to start". The config root can be overridden wholesale with `KUGOU_TUI_CONFIG_DIR` (all three scripts
-+ both ps1 accept it, semantics matching `config_root()` in `config.rs`).
+`update.rs`：4728 → 4144 → 2958 行（当前 3679）。每块都是**纯搬移**、零逻辑变更。`activate()` 与 `startup_search()` 搬回了分发层 —— 留在子模块会形成 `navigation ↔ search` 的叶子对叶子依赖。
 
-#### PowerShell side: four notes
-
-* **Use only PowerShell 5.1 syntax** (what Windows ships). Don't use `$IsWindows` (6.0+ only) or
-  `Start-Process -Environment` (7.4+ only). Platform detection uniformly uses
-  `$env:OS -eq 'Windows_NT'`.
-* **Files must carry a UTF-8 BOM**, and this **can only be guaranteed by hand** — CI won't catch it.
-  Without a BOM, 5.1 decodes `.ps1` using the current ANSI code page (GBK on Chinese Windows), and
-  these scripts contain dozens of user-facing Chinese messages that all turn to mojibake. PowerShell
-  7 reads UTF-8 by default, and CI uses exactly `shell: pwsh` (7.x), so **green CI doesn't mean it's
-  fine for users**. After adding or rewriting a `.ps1`, use
-  `head -c 3 scripts/*.ps1 | od -An -tx1` to confirm every file starts with `ef bb bf`; LF line
-  endings are fine (5.1 handles LF scripts).
-* `Start-Process` **does not allow** redirecting stdout and stderr to the same file, so there are two
-  service logs: `api-<instance>.log` and `api-<instance>.log.err` (instance names
-  `standard`/`lite`/`netease`); on error, dump both.
-* The config parsing in the launcher (reading `sources.active` and `[sources.<kind>].api_base`) is a
-  hand-written regex, not a TOML parser. Change the config structure, change it too — likewise, the
-  commit pinned in `kugou-api-install.ps1` must match the bash version's (pinning one and following
-  master in the other is the worst combination).
-
-The "Building and running on Windows" section of `docs/INSTALL.md` lists the platform capability
-table (what's degraded, what's missing); after changing platform branches, sync that table too.
-
-### 1.8 Splitting `update.rs`: progress and rules
-
-`update.rs` was once a 4700-line `impl App` with too many responsibilities. The goal of the split
-**is not to reduce line count** but to lower the cost of "how much context must be read to change
-one thing". Per the audit's order, reliability issues were fixed first (Range validation in
-`download.rs`, the stale-result criterion set `accepts_*`), then the structure moved — fixing
-reliability first is how you learn where the real boundaries are.
-
-Done (each block is a **pure move**, zero logic changes, compared character by character after
-moving; the line counts below are current values, and each module grew again after the split):
-
-| Module | Lines | Content |
-|---|---|---|
-| `navigation.rs` | 275 | page switch, focus, selection movement, `go_back`, number keys, `v` key to open the source page |
-| `playback.rs` | 370 | start / track change / progress / volume / mute / lyric offset |
-| `search.rs` | 142 | submit search, load more |
-| `desktop.rs` | 160 | MPRIS / tray snapshot, window control |
-| `cloud.rs` | 1160 | login / source switch / VIP / cloud playlists / account profile |
-| `settings.rs` | 760 | settings-page candidate values and three interactions (`move_settings` / `click_setting` / `adjust_setting`) |
-
-`update.rs`: 4728 → 4144 → 2958 lines (after the split it grew with features to the current 3679).
-
-**Boundary corrections (found and fixed after splitting playback)**: `activate()` and
-`startup_search()` were moved back into `update.rs`'s dispatch layer. `activate` was originally
-split into `navigation.rs` with the "navigation" section, but it is "the Enter key deciding what to
-do based on `(Tab, Focus)`" — spanning search / playback / data loading. The result was navigation
-calling playback and search, making `navigation ↔ search` **leaf-to-leaf dependency**.
-`startup_search` (the startup glue for `--search`: switch page + fill query + submit) is the same —
-leaving it in `search.rs` would make search depend on navigation.
-
-Dependency shape after the move (**this is the target to defend**):
-
+依赖形状（**要守住的目标**）：
 ```text
-update ──→ navigation / search / playback / cloud / desktop / settings / mod   (dispatcher)
-navigation ──→ update (ask the loading layer for data), settings (settings-page cursor movement)
+update ──→ navigation / search / playback / cloud / desktop / settings / mod   （分发层）
+navigation ──→ update（向加载层要数据）, settings（设置页光标移动）
 playback ──→ update (client_for / load_cover / request_lyric / sync_queue_cursor)
 settings ──→ update (refresh_cache_usage)
 cloud ──→ update (client_for), mod (ensure_device_fingerprint)
 desktop ──→ (none)
 search ──→ (none)
 ```
+叶子之间零调用。留在 `update.rs` 的是分发（`handle_event` / `handle_action` / `activate`）、加载层（`load_*` / `open_selected_*`）、结果与收尾（`handle_loaded` / `handle_audio_event` / `tick`）。**判据**：方法被谁调用、结果由谁处理，比挂在哪个标题下更重要 —— 所以 `sync_mpris` / `sync_tray` / `toggle_window` 去了 `desktop.rs`，`client_for`（8 处调用）与 `request_lyric` 留在 `update.rs`；唯一刻意保留的跨模块调用是 `navigation.rs::move_selection` 调 `settings.rs::move_settings`。
 
-There are zero calls between leaves, and **no mutually-calling pair**. What remains in `update.rs`
-is three kinds of things: dispatch (`handle_event` / `handle_action` / `activate`), the loading
-layer (`load_*` / `open_selected_*`, which `navigation.rs` only asks to fetch data), and results and
-finalization (`handle_loaded` / `handle_audio_event` / `tick`).
+规则：
 
-**The "playback control" section is not clean, so it was not moved wholesale.** Five methods in it
-don't belong to playback; the first three later went to `desktop.rs`, the other two stayed in
-`update.rs`:
-
-| Not in playback.rs | Why it isn't playback |
-|---|---|
-| `sync_mpris` / `sync_tray` → `desktop.rs` | output adapters, called once per tick by `tick()` to push state to D-Bus components |
-| `toggle_window` → `desktop.rs` | goes through niri's compositor IPC, unrelated to audio |
-| `client_for` | a client-construction helper shared by the whole file (8 call sites); moving it would only make callers write `pub(super)` everywhere |
-| `request_lyric` | the "fetch lyrics" network request; its result handling is in `handle_loaded`, and keeping request and handling in one file saves context (`load_cover` likewise; both now live in the "cover and lyrics" subsection of `update.rs`) |
-
-**This is the criterion for judging a split**: where a section's methods are called from and who
-handles their results matters more than which heading they sit under. Better a smaller module with
-clean boundaries than dragging neighbors along to pad size.
-
-After a round of splitting there is one **deliberately accepted** cross-module call:
-`navigation.rs`'s `move_selection` calls `settings.rs`'s `move_settings`. The settings-page cursor
-movement belongs to `settings.rs` ("the settings page's three interactions" should be together), so
-the navigation side merely asks it to move; it doesn't call back into navigation, and
-`settings_cursor` details aren't spread across two files. Think this through before changing it;
-don't move `move_settings` back to `update.rs` just to remove one edge in the graph — that would
-truly dump a settings-page behavior into the "everything goes here" file.
-
-The large classification before splitting `cloud.rs` (login / source / VIP / cloud playlists /
-common loading helpers) is done, landing as four subsections with headings in `cloud.rs`; helpers
-everyone uses, such as `client_for` and `request_lyric`, stay in `update.rs`.
-
-You'll hit one thing while splitting, so know it in advance: **Rust method privacy is per "module
-where the impl block is written"**, not per type. Once a method moves, calling it from the other side
-reports `E0624 method is private`, and each must be changed to `pub(super)`. This isn't a design
-problem, it's an inherent cost of splitting — the compiler lists them all, just follow it (navigation
-13, playback 16, desktop 3, cloud 15, settings 1). Note **both directions must be changed**: moved
-ones must be callable by their original callers, and ones left in place must be callable by the moved
-block.
-
-A few rules:
-
-* **Split one block at a time, then immediately `clippy -D warnings` + `cargo test`**. Moves don't
-  change logic, so all tests (currently 703) must stay green; if they aren't, the move was wrong,
-  not "conveniently fixed".
-* **Moves must leave evidence**. Method: copy the original file to `/tmp` before moving, then after
-  moving run a script that "compares signatures by function name + function bodies (whitespace
-  collapsed to a single space, `pub(super)` normalized)", confirming character by character that
-  every function is still alive. This round: all 116 functions survived character for character; the
-  only deletion was the duplicate quality-label function in `update.rs` (see §6).
-* **Don't bundle changes into the move commit**. Mixed together, nobody can tell which line is a
-  behavior change.
-* `handle_loaded` (event dispatch) **stays in `update.rs`**: it's the scheduler, and the criterion
-  for "should this result be accepted" stays there too (see §4 item 11); only pure business actions
-  move.
-* **The cut easily eats section headings**. With `sed -i 'A,Bd'`, one line too many or too few leaves
-  an orphan `// =====` or takes `// 播放控制` along. After cutting, immediately `sed -n` the seam and
-  `grep -n '^    // [^=]'` to check the remaining section headings.
-* **After splitting, run a module call graph; you want a star.** Move-equivalence doesn't mean
-  correct boundaries — a wrong boundary doesn't error, it just moves coupling from inside a file to
-  between modules. Method: take the method names defined in each module, then count occurrences of
-  `self.<Y's method>(` in `src/app/X.rs`. **Leaf ↔ leaf** means a wrong boundary; go back to that
-  function (usually a "dispatch by Tab" one). The `navigation ↔ search` case above was found this
-  way.
-* **Methods in a section don't necessarily belong to the same thing**. The criterion is "where's the
-  caller, who handles the result", not "which heading it's under" (see the table above).
-* Constants follow their users: `RESTART_THRESHOLD_MS` moved into `playback.rs`, `SEARCH_MAX_PAGES`
-  into `search.rs` — they're used only by that block.
-
-### 1.9 WebSocket service (`ws.rs`)
-
-Protocol aligned with MoeKoeMusic (<https://music.moekoe.cn/zh-CN/websocket-api.html>), listens on
-`127.0.0.1:6520` by default, disabled by `--no-ws` / `ws = false`, port changed by `--ws-port`.
-
+* **一次只搬一块，搬完立刻 `clippy -D warnings` + `cargo test`**；全部测试（当前 703 个）必须绿，不绿就是搬错了。
+* **搬移要留证据**：搬前拷到 `/tmp`，搬完按函数名比对签名 + 函数体（空白折叠、`pub(super)` 归一化）；这一轮 116 个函数逐字符存活。
+* **不要把改动混进搬移 commit**。
+* `handle_loaded` 留在 `update.rs`（判据见 §4 第 11 条）。
+* **剪切容易吃掉小节标题**：`sed -i 'A,Bd'` 后立刻 `sed -n` 看接缝，并 `grep -n '^    // [^=]'` 查剩下的小节标题。
+* **拆完跑模块调用图，要的是星形**：数 `src/app/X.rs` 里 `self.<Y 的方法>(` 出现次数；叶子 ↔ 叶子就是边界错了。
+* 常量跟着使用者走：`RESTART_THRESHOLD_MS` 进 `playback.rs`，`SEARCH_MAX_PAGES` 进 `search.rs`。
+* **Rust 方法私有性按「impl 块写在哪个模块」算**：方法搬走后在另一边调会报 `E0624 method is private`，要改成 `pub(super)`（navigation 13、playback 16、desktop 3、cloud 15、settings 1），**两个方向都要改**。
+### 1.9 WebSocket 服务（`ws.rs`）
+协议对齐 MoeKoeMusic（<https://music.moekoe.cn/zh-CN/websocket-api.html>），默认监听 `127.0.0.1:6520`，`--no-ws` / `ws = false` 关闭，`--ws-port` 改端口。
 ```
-main loop(tick) ──sync_ws()──→ watch::Sender<Arc<Snapshot>>   （writes the snapshot only）
+主循环(tick) ──sync_ws()──→ watch::Sender<Arc<Snapshot>>   （只写快照）
                                         │
-ws thread ──watch::Receiver─────────────┘  diff_messages() → broadcast → each connection
+ws 线程 ──watch::Receiver───────────────┘  diff_messages() → broadcast → 各连接
     │
-    └── inbound control ──EventBus──→ main loop dispatches into an existing Action
+    └── 入站控制 ──EventBus──→ 主循环分发成已有的 Action
 ```
-
-A few design trade-offs, read before changing:
-
-* **Own thread + `current_thread` runtime**, not stuffed into the main runtime. It does two things:
-  send/receive WebSocket frames, and compare snapshots. The main loop's tick cadence shouldn't be
-  affected by network I/O.
-* **`sync_ws` writes a full snapshot each tick** (including a `Song` clone); `send_if_modified` uses
-  `Snapshot`'s custom `PartialEq` — it compares only the fields that "would change the pushed
-  content", deliberately not the whole `Song` (`privilege` is a large nested JSON, not worth
-  comparing every tick). If the snapshot is unchanged, the broadcast task isn't woken, making this
-  call nearly free while paused.
-* **`playerState` is pushed only on play/pause transitions**, not every tick. Upstream's only call
-  site of `updatePlayerState` is `play-pause-action` in `electron/main.js`; the docs say "when the
-  playback state changes". Sent once more separately when a connection is established.
-* **`lyrics` is pushed every tick** (upstream's `server-lyrics` path is likewise undebounced; only
-  the desktop-lyrics IPC debounces per line). `lyricsData` is the **raw lyric text**, i.e.
-  `Lyric::text` — not the parsed `lines`, because the word-by-word markers and `[language:]` tags
-  are exactly what third-party clients need to lay out themselves.
-* **welcome's `data` is a plain string**, not the nested object in the doc's example. The source is
-  authoritative.
-* **Unknown `control` commands get an `error` reply**, unlike upstream which silently ignores them.
-* **Handshake validates `Origin`**: any page in a browser can connect to a local port, and without
-  validation that opens playback control to every tab open at the time. Native clients without an
-  `Origin` are allowed.
-* **Inbound messages capped at 64 KiB** (tungstenite's default 64 MiB is too loose). Outbound is
-  uncapped; KRC can be tens of KB.
-* **The `lyrics` variant is `Box<LyricsData>`**: unboxed, each enum instance is 264 bytes, and it's
-  passed by value in a `Vec`.
-
-### 1.10 How to verify the WebSocket
-
-No automated integration test (it needs a real player running); verify by hand with an external
-client:
-
+改之前先读的取舍：**独立线程 + `current_thread` runtime**，不塞进主 runtime（主循环 tick 节奏不应受网络 I/O 影响）；**`sync_ws` 每 tick 写一份完整快照**（含 `Song` clone），`send_if_modified` 用 `Snapshot` 自定义的 `PartialEq` 只比「会改变推送内容」的字段，刻意不比整个 `Song`（`privilege` 是很大的嵌套 JSON），快照没变就不唤醒广播任务；**`playerState` 只在播放/暂停切换时推**（上游 `updatePlayerState` 的唯一调用点是 `electron/main.js` 的 `play-pause-action`），连接建立时另外单独发一次；**`lyrics` 每 tick 都推**（上游 `server-lyrics` 那条路径同样没有防抖），`lyricsData` 是**原始歌词文本**即 `Lyric::text`，不是解析后的 `lines`，因为逐字标记和 `[language:]` 标签正是第三方客户端要自己排版的东西；**welcome 的 `data` 是纯字符串**，不是文档示例里的嵌套对象，以源码为准；**未知 `control` 命令回 `error`**，不像上游那样静默忽略；**握手校验 `Origin`**（浏览器里任何页面都能连本地端口，不校验等于把播放控制开放给当时开着的每个标签页；没有 `Origin` 的原生客户端放行）；**入站消息上限 64 KiB**（tungstenite 默认 64 MiB 太松），出站不限，KRC 可能有几十 KB；**`lyrics` 变体是 `Box<LyricsData>`**（不装箱时每个枚举实例 264 字节，而且是按值放在 `Vec` 里传）。
+### 1.10 怎么验证 WebSocket
+没有自动化集成测试（需要真播放器在跑）；用外部客户端手工验：
 ```bash
-# 1) start the player (isolate the config dir! don't touch ~/.config/kugou-tui)
+# 1) 启动播放器（隔离配置目录！别碰 ~/.config/kugou-tui）
 KUGOU_TUI_CONFIG_DIR=/tmp/kt-ws ./target/debug/kugou-tui --search 周杰伦 --no-tray
-# 2) in another terminal, connect any WS client to ws://127.0.0.1:6520/
-#    expected: welcome + playerState first, then one lyrics message every 200ms during playback;
-#    sending {"type":"control","data":{"command":"toggle"}} should toggle playback and yield a playerState.
+# 2) 另一个终端，任意 WS 客户端连 ws://127.0.0.1:6520/
+#    预期：先 welcome + playerState，播放中每 200ms 一条 lyrics；
+#    发 {"type":"control","data":{"command":"toggle"}} 应切换播放并回一条 playerState。
 ```
+`node --experimental-websocket` 或浏览器控制台都行，不需要额外依赖。
+### 1.11 内嵌接口层（`api/native/`）与 KAT
+`--api native`（默认）在进程内实现酷狗的 26 条路由，**不再需要 Node.js**。风险是「结果错了却不报错」：签名、设备指纹、KRC 解密任何一字节偏了，服务端返回的都像业务错误（或空 body）。对策是 **KAT（已知答案测试）**：在上游 JS 上用固定输入算出基准值，Rust 侧断言逐字节相等。基准值**不是手抄的常量**，由 `tools/kat/` 下的脚本现场产出（依赖、用法、已知坑见 [tools/kat/README.md](../tools/kat/README.md)）；上游改了算法或需要复查签名时，重跑同一个脚本比对。
 
-`node --experimental-websocket` or a browser console works; no extra dependencies needed.
+改 `api/native/` 下任何东西时的规则：
 
-### 1.11 Embedded API layer (`api/native/`) and KAT
+- **每个函数在注释里写明来源文件与函数名**（逐函数从上游移植），供日后交叉核对。
+- **改实现就要重跑对应 KAT 脚本，必要时更新期望值** —— 只改 Rust 不改基准，测试要么红要么假绿。
+- `tools/kat/` 下的脚本**不参与构建，也不是测试夹具**，纯粹是「基准值从哪来」的存档。
 
-`--api native` (default) implements KuGou's 26 routes in-process, **no longer needing Node.js**. This
-layer's risk is "wrong results without errors": if a single byte of the signature, device
-fingerprint, or KRC decryption is off, the server returns a response that looks like a business error
-(or an empty body), and it's hard to locate which step was wrong.
-
-The countermeasure is **KAT (known-answer test)**: compute baseline values on the upstream JS with
-fixed inputs, and assert byte-for-byte equality on the Rust side. Baselines **are not hand-copied
-constants** but are produced fresh by the scripts under `tools/kat/` (dependencies, usage, known
-pitfalls in [tools/kat/README.md](../tools/kat/README.md)); when upstream changes an algorithm, or you
-need to recheck a signature, rerun the same script to compare.
-
-Rules when changing anything under `api/native/`:
-
-- **Each function notes its source file and function name in a comment** (ported function by
-  function from upstream), for later cross-checking.
-- **Changing an implementation means rerunning the corresponding KAT script and updating expected
-  values if needed** — changing only the Rust without changing the baseline makes the test either red
-  or falsely green.
-- The scripts in `tools/kat/` **don't participate in the build and aren't test fixtures**, purely an
-  archive of "where the baselines come from".
-
-The Soda source's data plane is another crate (`crates/libresoda`), behavior-aligned with the
-official SodaM client, so for problems there **first check whether upstream fixed it**; don't write a
-second copy in this repo.
-
----
-
-## 2. Running / verifying
-
+汽水音源的数据面是另一个 crate（`crates/libresoda`），行为对齐官方 SodaM 客户端，那边出问题**先看上游修没修**；不要在本仓库写第二份。
+## 2. 运行与验证
 ```bash
-cargo test                         # unit tests (~700, seconds)
-cargo clippy --all-targets         # the release script runs this
-cargo build --release              # binary ~11.7 MiB
-./target/release/kugou-tui --print-config   # show effective config, log path, cache dir
+cargo test                         # 单元测试（约 700 个，秒级）
+cargo clippy --all-targets         # 发布脚本会跑这条
+cargo build --release              # 二进制约 11.7 MiB
+./target/release/kugou-tui --print-config   # 显示生效配置、日志路径、缓存目录
 ```
-
-**Smoke test** (with a real sound card and API service on the machine):
-
+**冒烟测试**（机器上有真声卡与接口服务）：
 ```bash
-# 1) start the API service (first time needs ./scripts/kugou-api-install)
-./scripts/kugou-api              # or the launchd/systemd setup
+# 1) 启动接口服务（首次需要 ./scripts/kugou-api-install）
+./scripts/kugou-api              # 或 launchd/systemd 那套
 
-# 2) play a song with a clean cache and watch the log
+# 2) 用干净缓存播一首，同时看日志
 KUGOU_TUI_DEBUG=1 ./target/release/kugou-tui --search "周杰伦 晴天" --no-tray \
     --cache-dir /tmp/smoke-cache
-# then: Esc → Enter to play → n to change track → Space to pause/resume → q to quit
-# log: ~/.cache/kugou-tui/kugou-tui.log
+# 然后：Esc → Enter 播放 → n 切歌 → 空格暂停/继续 → q 退出
+# 日志：~/.cache/kugou-tui/kugou-tui.log
 ```
-
-To **isolate** your experiments from the real config and session, use XDG variables to relocate:
-
+要把实验与真实配置/会话**隔离**，用 XDG 变量改位置：
 ```bash
 XDG_CONFIG_HOME=/tmp/xdg/config XDG_CACHE_HOME=/tmp/xdg/cache \
     ./target/release/kugou-tui --print-config
 ```
-
-> Why: `session.json` (last position, queue) lives in `XDG_CACHE_HOME/kugou-tui/` and is
-> **overwritten on exit**. Running automated tests against the real config clobbers the user's queue
-> cursor and playback position. Either isolate, or back up `~/.cache/kugou-tui/session.json` first.
-
----
-
-## 3. Troubleshooting guide for two hard classes of problems
-
-### 3.1 Memory only grows
-
-**Symptom**: after continuous listening and track changes, RSS passes 100 MB and doesn't come back
-down after stopping.
-
-**Measure first, don't guess.**
-
+> 原因：`session.json`（上次位置、队列）在 `XDG_CACHE_HOME/kugou-tui/`，且**退出时整体覆盖**。拿真实配置跑自动化测试会冲掉用户的队列光标与播放位置。要么隔离，要么先备份 `~/.cache/kugou-tui/session.json`。
+## 3. 两类难缠问题的排障
+### 3.1 内存只涨不降
+**现象**：连续听歌、切歌之后 RSS 超过 100 MB，停下来也不回落。**先测，别猜。**
 ```bash
 pid=$(pgrep -f 'target/release/kugou-tui' | head -1)
-grep -E 'VmRSS|VmHWM|Threads' /proc/$pid/status    # current / peak / thread count
+grep -E 'VmRSS|VmHWM|Threads' /proc/$pid/status    # 当前 / 峰值 / 线程数
+while :; do grep VmRSS /proc/$pid/status; sleep 1; done   # 循环采样，看趋势不看单点
 ```
+**这一类历史上两个根因**（都可能在别处复发；动手前先确认这里没有重新引入）：
+1. **无界缓冲**。`StreamingBuffer` 曾把整轨下载的每个字节都留在内存里（还是 `Vec` 倍增的整轨），所以 64 MiB 的 Hi-Res 歌就是 66.5 MiB。现在只保留 4 MiB 的尾部窗口，其余用 `pread` 从磁盘 `.part` 回读。→ **任何「随媒体大小增长」的内存结构，都要问「上界是多少」。**
+2. **没人取消的后台任务**。切歌时不取消上一首的流式下载，每按一次 `n` 就多一个正在跑的下载，把整轨往内存里灌 —— 实测连续切 5 次后 323.7 MiB。现在 `App::active_stream` 持有当前流的句柄，`start_playback` / `stop_playback` / `shutdown` 都会 `cancel()`。→ **创建后台任务时，问「谁负责停它」。**
 
-Sample in a loop (watch the trend, not a single point):
+**定位手法**（按性价比排序）：
 
-```bash
-while :; do grep VmRSS /proc/$pid/status; sleep 1; done
-```
-
-**Two historical root causes for this class** (both can still recur elsewhere; before changing
-things, confirm they haven't been reintroduced here):
-
-1. **Unbounded buffering**. `StreamingBuffer` used to keep every byte downloaded for the whole track
-   in memory (a `Vec`-doubled whole track at that), so a 64 MiB Hi-Res song was 66.5 MiB. Now only a
-   4 MiB tail window is kept, and the rest is `pread` back from the on-disk `.part`.
-   → **Point**: for any memory structure that "grows with media size", ask "what's its upper bound".
-2. **Background tasks nobody cancels**. Not cancelling the previous song's streaming download on a
-   track change meant each `n` press added another running download pouring a whole track into
-   memory — measured 323.7 MiB after 5 consecutive changes. Now `App::active_stream` holds the handle
-   to the current stream, and `start_playback` / `stop_playback` / `shutdown` all `cancel()`.
-   → **Point**: when creating a background task, ask "who's responsible for stopping it".
-
-**Locating techniques** (ordered by cost-effectiveness):
-
-| Technique | What it shows |
+| 手法 | 能看出什么 |
 |---|---|
-| Sample `VmRSS`, align with "time window + user action" | whether growth happens during playback, on track change, or while idle |
-| Difference between `VmHWM` and current RSS | whether there's a one-off large peak (e.g. the moment a whole track finishes) |
-| `Threads:` count | whether threads/tasks leak (normal 7–9) |
-| `KUGOU_TUI_DEBUG=1` and watch `预取` / `缓存回收` / `流式下载` logs | which chain is running and whether it finished |
-| Control experiment: temporarily set `MAX_KEPT_BYTES` to 64 KiB | if RSS drops accordingly, that buffer is the bulk |
+| 采样 `VmRSS`，与「时间窗 + 用户动作」对齐 | 增长发生在播放中、切歌时，还是空闲时 |
+| `VmHWM` 与当前 RSS 的差 | 有没有一次性大峰值（如整轨下完那一刻） |
+| `Threads:` 数量 | 线程/任务有没有泄漏（正常 7–9） |
+| `KUGOU_TUI_DEBUG=1` 看 `预取` / `缓存回收` / `流式下载` 日志 | 哪条链路在跑、跑完没有 |
+| 对照实验：把 `MAX_KEPT_BYTES` 临时设成 64 KiB | RSS 跟着降，说明大头就是这个缓冲 |
 
-**Don't do**: periodic `malloc_trim`, periodic `shrink_to_fit`, GC-style "reclaim threads". Those
-only hide the growth; the peak and the bound remain. Change the **bounds and ownership** instead.
+**不要做**：周期性 `malloc_trim`、周期性 `shrink_to_fit`、GC 式「回收线程」—— 只是把增长藏起来，峰值和上界都还在。要改的是**上界与归属**。
+### 3.2 播放跳回开头 / 自动跳歌
+**现象**：边下边播时缓冲一段后从头重放；或听着听着跳到下一首；或十几秒一循环。**先分清「播完了」与「坏了」**，两者在播放层看起来一样：
 
-### 3.2 Playback jumps back to the start / skips songs while playing
+> `rodio` 的解码器把**任何**读错误都吞成 EOF（`symphonia` 的 `format.next_packet().ok()?`），所以音源「结束」可能是真播完，也可能是流断了。
 
-**Symptom**: during download-while-playing, after a buffer it replays from the beginning; or it
-skips to the next song mid-listen; or it loops every ten-odd seconds.
+所以 `engine::Runtime::sync()` **不能把播放器空当成播完**，必须按流的状态判（`classify_drain`）：
 
-**First distinguish "finished" from "broken"**. The two look identical at the playback layer,
-because:
-
-> `rodio`'s decoder swallows **any** read error as EOF
-> (`symphonia`'s `format.next_packet().ok()?`), so a source "ending" may be a real finish
-> or a broken stream.
-
-So `engine::Runtime::sync()` **cannot treat an empty player as finished**; it must grade by the
-stream's state (`classify_drain`):
-
-| Real stream state | Wrap-up | What the user sees |
+| 真实流状态 | 收尾 | 用户看到 |
 |---|---|---|
-| `is_cancelled()` | silent | track changed, nothing should pop up |
-| fully downloaded | `TrackFinished` | normal advance to next track |
-| not finished + has `error` | `Failed(reason)` | report error, stop, don't change track |
-| not finished + no error (read timeout) | `StreamInterrupted { position }` | stay put, auto-resume once from that position |
+| `is_cancelled()` | 静默 | 切歌了，不该弹任何东西 |
+| 已下完 | `TrackFinished` | 正常进下一首 |
+| 未下完 + 有 `error` | `Failed(reason)` | 报错、停止、不切歌 |
+| 未下完 + 无 error（读超时） | `StreamInterrupted { position }` | 原地不动，从该位置自动恢复一次 |
 
-**Two historical root causes for this family**:
+**这一族历史上两个根因**：
+1. **播完后又重载**（把 `Loaded::StreamCached` 当成「可以播了」）。歌已经在播了，再 `audio.load()` 会把位置重置为 0。现在流式路径走 `Loaded::StreamCompleted`，只收尾，不碰播放器。
+2. **流断了被当成播完**。单曲循环（或只有一首的队列）下，切歌就等于「同一首从 0 重放」；现在由上面的分级处理，**读超时**那种还会保留位置并自动恢复一次。
 
-1. **Reloading after finishing** (`Loaded::StreamCached` treated as "time to play"). The song is
-   already playing; reloading via `audio.load()` resets position to 0. Now the streaming path goes
-   through `Loaded::StreamCompleted`, which only finalizes and doesn't touch the player.
-2. **A broken stream treated as finished**. Under single-track repeat (or a queue with one song), a
-   track change means "the same song replays from 0". Now handled by the grading above; the
-   **read-timeout** case also preserves the position and auto-recovers once.
-
-**One more detail you must know**: the position must be recorded **before the track ends**.
-
+**位置必须在歌结束之前记下来**：
 ```rust
-// the final frame cannot read get_pos(): the source is gone, rodio reports 0
-let position_ms = self.last_position_ms;   // the value from the last frame still playing
+// 最后一帧读不到 get_pos()：音源已经没了，rodio 报 0
+let position_ms = self.last_position_ms;   // 上一帧还在播时的值
 ```
+否则播完那一刻进度条跳回 00:00，之后的「恢复」也没有位置可恢复。
 
-Otherwise the progress bar jumps back to 00:00 at the moment of finishing, and the later "resume"
-has no position to resume from.
+**复现方法**（真机、可重复）：用一个「掐流」代理，把 CDN 的数据在传输中途断 20–30 秒，剩下的交给真实解码与播放。要点：选小音质（`quality = "128"`，4 MB 的歌），让下载能在播放中途「下完」或「断掉」；选播放模式 `repeat_one`，它把「从头重放」放大成看得见的现象（顺序播放只会看起来像「跳过这首」）；用 **app 自己的状态**观察（退出时写的 `session.json` 里的 `position_ms`，或日志行「会话已保存：N 首，位置 X ms」），不要用 MPRIS 的 `Position` —— **播放器状态为 Stopped 时 `playerctl position` 永远报 0**。
 
-**Reproduction method** (real machine, repeatable): use a "cut-the-stream" proxy to drop the CDN's
-data mid-transfer for 20–30 seconds, leaving the rest to real decoding and playback. Key points:
+**另一个坑**：半首歌。如果流式下载直接写真实缓存文件名，失败/取消就会在磁盘上留下一个「看起来完整」的短文件，而 `cache.find` 只查「文件存在吗」，下次播放命中它 → 播到一半 EOF → 判为播完 → 单曲循环重启 → 十几秒一循环。**所以 `.part` + 下完才改名不能省。**
+## 4. 改代码时必须守住的不变量
+改 `audio/` 下任何东西前，先确认这些没被破坏：
 
-1. pick a small quality (`quality = "128"`, a 4 MB song) so the download can "finish" or "break"
-   mid-playback;
-2. pick playback mode `repeat_one` — it magnifies "replay from the beginning" into something visible
-   (sequential playback would just look like "skipping this song");
-3. observe **with the app's own state** (`position_ms` in the `session.json` written on exit, or the
-   log line 「会话已保存：N 首，位置 X ms」), not MPRIS `Position`:
-   **when the player state is Stopped, `playerctl position` always reports 0**; that's not the truth
-   and will lead you astray.
+1. **先写盘，再 `push`**。缓冲只留一个窗口，窗口外的字节只能从 `.part` 回读；顺序反了就会读到还没写的空洞（听感是噪声）。
+2. **磁盘文件必须以读写方式打开**（`OpenOptions::read(true).write(true)`）。`File::create` 只给 `O_WRONLY`，在这种句柄上 `pread` 是 `EBADF`。踩过一次。
+3. **区分读位置与写状态**：`is_finished()`（任务结束）≠ `is_complete()`（整轨完整）。播放引擎靠这个区分「播完」与「下载失败」。
+4. **只有真正读不出来时才报错**。已经下好的部分照样能播 —— 后面的失败不能掐断用户已经听到的内容。
+5. **取消必须唤醒阻塞的读**。`read()` 阻塞在条件变量上；`cancel()` 必须置标志并 `notify_all`，否则切歌要等到下一次读超时（最长 15 秒）才释放，而音频线程正卡在 `Player::clear()` 里等。
+6. **`.part` 不是缓存**。回收与「清空缓存」必须跳过它（`cache::is_partial`）。
+7. **结束后不要读 `get_pos()`**（见 §3.2）。
+8. **结束/失败/取消都必须丢掉句柄**：`active_stream`（App）、`Runtime::stream`（engine）。留着一个就会把整个缓冲与文件句柄一起拖住。
+9. **不要靠改 `WAIT_TIMEOUT` 解决内存**。15 秒是「网络真的坏了、必须报错」的兜底；调大只是让卡顿更久，调小会误判正常等待。
+10. **`Output` 的字段顺序不能改**（播放器必须在设备之前），也不要删 `_stream` 字段 —— 它靠生命周期工作，删了声音立刻没。
 
-**Another trap**: half a song. If the streaming download wrote directly to the real cache filename, a
-failure/cancel leaves a "seemingly complete" short file on disk, and `cache.find` only checks "does
-the file exist", so the next play hits it → EOF halfway → judged finished → single-track repeat
-restarts → looping every ten-odd seconds. **So `.part` + rename-only-when-done cannot be skipped.**
+改 `app/update.rs` 的 `handle_loaded` 前，还要满足：
 
----
+11. **每个异步结果都必须自证身份**。请求都是 `tokio::spawn` 出去的，返回顺序不保证；期间用户可以重新搜索、打开另一个歌单、点另一个歌手。无条件接受结果会产生「输入框写着 B，列表是 A」这种**看起来像数据出错**的状态，而且不报任何错。判据是「身份比对」，不是给每个请求编号：播放侧早就是这么做的（`App::is_current` 比 `song.hash`，歌词比 `hash`），其余照抄同一思路。现有比对点：
 
-## 4. Invariants when changing this code
-Before changing anything under `audio/`, confirm these aren't broken:
-
-1. **Write to disk first, then `push`**. The buffer keeps only a window, and bytes outside it can
-   only be read back from `.part`; reverse the order and you read a hole that hasn't been written
-   yet (heard as noise).
-2. **The on-disk file must be opened read-write** (`OpenOptions::read(true).write(true)`).
-   `File::create` gives only `O_WRONLY`, and `pread` on such a handle is `EBADF`. Hit once.
-3. **Distinguish read position from write state**: `is_finished()` (task done) ≠ `is_complete()`
-   (whole track intact). The playback engine relies on this to tell "finished" from "download
-   failed".
-4. **Raise errors only when a read is truly impossible**. The already-downloaded part still plays
-   fine — a later failure must not cut off what the user already heard.
-5. **Cancellation must wake blocked readers**. `read()` blocks on a condvar; `cancel()` must set the
-   flag and `notify_all`, otherwise a track change waits until the next read timeout (up to 15
-   seconds) to release, while the audio thread is waiting in `Player::clear()`.
-6. **`.part` is not cache**. Reclamation and "clear cache" must skip it (`cache::is_partial`).
-7. **Don't read `get_pos()` after the end** (see §3.2).
-8. **End/failure/cancel must all drop the handle**: `active_stream` (App), `Runtime::stream`
-   (engine). Keeping one drags the whole buffer and file handle along.
-9. **Don't change `WAIT_TIMEOUT` to fix memory**. 15 seconds is the fallback for "the network is
-   truly broken and we must report an error"; raising it only makes hangs longer, lowering it
-   misjudges normal waits.
-10. **`Output`'s field order can't change** (the player must precede the device), and don't delete
-    the `_stream` field — it works via lifetimes, and deleting it kills the sound immediately.
-
-Before changing `handle_loaded` in `app/update.rs`, this must hold too:
-
-11. **Every async result must prove its identity**. Requests are all spawned with `tokio::spawn`, and
-    return order isn't guaranteed; the user can search again, open another playlist, or click
-    another artist in between. Accepting results unconditionally produces states like "the input box
-    says B, the list is A" that **look like data errors**, without any error being reported.
-
-    The criterion is "identity comparison", not numbering each request: the playback side already
-    does this (`App::is_current` compares `song.hash`, lyrics compare `hash`); the rest just copies
-    the same idea. Existing comparison points:
-
-    | Result | Compared against |
+    | 结果 | 比对对象 |
     |---|---|
-    | `StreamReady` / `StreamPrerolled` / `StreamCached` | `song.hash` (`App::is_current`) |
+    | `StreamReady` / `StreamPrerolled` / `StreamCached` | `song.hash`（`App::is_current`） |
     | `Lyric` / `LyricFailed` / `CoverReady` | `hash` |
-    | `Search` | keyword (`state.search.submitted`) |
-    | `PlaylistTracks` | the currently open playlist id (`open_playlist`) |
-    | `ArtistSongs` / `RankTracks` | the currently open artist / ranking id |
-    | `Playlists` / `Artists` | the category id at request time (`category` / `kind`) |
+    | `Search` | 关键词（`state.search.submitted`） |
+    | `PlaylistTracks` | 当前打开的歌单 id（`open_playlist`） |
+    | `ArtistSongs` / `RankTracks` | 当前打开的歌手 / 排行榜 id |
+    | `Playlists` / `Artists` | 请求时的分类 id（`category` / `kind`） |
 
-    The criteria themselves are extracted as free functions (`accepts_search_result` /
-    `accepts_open_item`), because they can be tested standalone, whereas constructing `App` needs an
-    audio engine and runtime, which unit tests can't build.
-    **When adding a `Loaded` variant that carries a network request, first decide what it compares
-    against on return.**
-    Also, identity fields must be written into state **before `spawn`** (`open_playlist` /
-    `open_artist` / `open_board` all do this) — writing them in the result is too late, and that
-    result will never match.
+    判据本身抽成了自由函数（`accepts_search_result` / `accepts_open_item`），因为它们能单独测，而构造 `App` 需要音频引擎与 runtime。**新增带网络请求的 `Loaded` 变体时，先定它返回时跟什么比。** 身份字段必须在 **`spawn` 之前**写进状态（`open_playlist` / `open_artist` / `open_board` 都这么做）—— 写在结果里就太晚了。
 
-Before changing `audio/downmix.rs` (multichannel downmix), this must hold too:
+改 `audio/downmix.rs`（多声道下混）前，还要满足：
 
-12. **Multichannel files must be downmixed before reaching rodio.** rodio's
-    `ChannelCountConverter`, when reducing channels, "keeps the first N samples of each frame and
-    discards the rest" (`conversions/channels.rs`; in the unit test `remove_channels`, 4→1 yields
-    `[1.0, 5.0]`). And KuGou **has multichannel lossless files**, possibly of the kind where "the
-    first two channels aren't this song": measured, the `flac` version of 《东京不太热 (DJ Z新豪版)》
-    is 4.0, with the song in the last two channels (the first two are 6–10 dB lower and correlate
-    only +0.35 with the correct mix). Without this layer, the user hears something other than this
-    song, showing up as "the audio version differs from other clients". The criterion and measured
-    data are at the top of the `downmix` module; both exits of `build_decoder` must pass through
-    `downmix::to_stereo`. Two guard tests fail when this layer is removed:
-    `decoded_multichannel_files_are_downmixed_to_stereo` (a hand-made 4-channel WAV through
-    `build_decoder`, asserting `channels() <= 2`) and
-    `the_mixer_hears_the_song_only_because_we_downmixed_first` (builds a sound-card-independent mixer
-    with `rodio::mixer::mixer`, proving by contrast that "going straight into the mixer keeps only
-    the first two channels; downmixing first is correct" — pinning exactly the layer where the bug
-    occurs).
+12. **多声道文件必须在进 rodio 之前下混。** rodio 的 `ChannelCountConverter` 在减声道时「每帧保留前 N 个采样，其余丢掉」（`conversions/channels.rs`；单测 `remove_channels` 里 4→1 得到 `[1.0, 5.0]`）。而酷狗**有多声道无损文件**，还可能是「前两个声道不是这首歌」那种：实测《东京不太热 (DJ Z新豪版)》的 `flac` 版是 4.0，歌在最后两个声道（前两个低 6–10 dB，与正确混音的相关性只有 +0.35）。没有这一层，用户听到的不是这首歌，表现为「音频版本与其他客户端不一样」。判据与实测数据在 `downmix` 模块顶部；`build_decoder` 的两个出口都必须过 `downmix::to_stereo`。去掉这一层会有两个守卫测试挂掉：`decoded_multichannel_files_are_downmixed_to_stereo` 与 `the_mixer_hears_the_song_only_because_we_downmixed_first`。
 
-Before changing `app/desktop.rs` (syncing playback state to desktop integrations), this must hold
-too:
+改 `app/desktop.rs`（把播放状态同步给桌面集成）前，还要满足：
 
-13. **Compare first, clone later, every tick.** `tick` calls `sync_ws` / `sync_mpris` / `sync_tray`
-    every 200ms, and they only take `&self.state`: do **not** `clone()` the current track, artist
-    list, or whole lyrics before handing them to a handle for comparison. `WsHandle::update_from` /
-    `MprisHandle::update_track` / `TrayHandle::update_track` all "compare `hash` / `track_id` and
-    progress first, rebuild metadata only if changed"; passing a reference + closure is enough;
-    tracks compare the **raw hash string** (not a digest), byte-for-byte equal counts as unchanged.
-    Guard tests: `update_from_wakes_only_when_the_snapshot_changes`,
-    `update_track_skips_metadata_rebuild_for_the_same_track`.
+13. **每 tick 先比后 clone。** `tick` 每 200ms 调 `sync_ws` / `sync_mpris` / `sync_tray`，它们只拿 `&self.state`：**不要**先把当前曲目、歌手列表或整份歌词 `clone()` 出来再交给句柄比对。`WsHandle::update_from` / `MprisHandle::update_track` / `TrayHandle::update_track` 都是「先比 `hash` / `track_id` 与进度，变了才重建元数据」；传引用 + 闭包就够了；曲目比的是**原始 hash 字符串**（不是摘要），逐字节相等即视为未变。守卫测试：`update_from_wakes_only_when_the_snapshot_changes`、`update_track_skips_metadata_rebuild_for_the_same_track`。
 
-Before changing the stream-fetch failure path in `app/playback.rs`, this must hold too:
+改 `app/playback.rs` 的取流失败路径前，还要满足：
 
-14. **A load failure must clear the "buffering" state.** `start_playback` first calls `mark_loading()`
-    to set `PlaybackState` to `Loading`, but the engine won't change it when "nothing is loaded"
-    (`sync()` sees `!loaded` and returns immediately). If a stream fetch fails (`request_stream`
-    can't reach the target source, or the async `song_stream_url` fails via `Loaded::Failed`) and
-    nothing handles it, the state stays `Loading` forever — and `toggle_playback` precisely ignores
-    `Loading`, so the user presses Space with no response, looking like a hang. Both paths must clear
-    it: synchronous errors via `App::abort_loading`, async failures via `audio.stop()` in
-    `Loaded::Failed` when `playback == Loading`; only act while `Loading`, to avoid wrongly stopping
-    a song that's playing (failures other than cover/lyrics go this way too).
+14. **加载失败必须清掉「缓冲中」状态。** `start_playback` 先 `mark_loading()` 把 `PlaybackState` 置为 `Loading`，但引擎在「什么都没加载」时不会改它（`sync()` 见 `!loaded` 直接返回）。如果取流失败而没人处理，状态就永远停在 `Loading` —— 而 `toggle_playback` 恰好忽略 `Loading`，用户按空格没反应，看起来像卡死。两条路径都必须清：同步错误走 `App::abort_loading`，异步失败走 `Loaded::Failed` 里 `playback == Loading` 时的 `audio.stop()`；只在 `Loading` 时动手，避免误停正在播的歌。
 
-Before changing the stream-fetch-failure track skip in `app/playback.rs`, or cloud-playlist writes in
-`app/cloud.rs`, these two must hold too:
+改 `app/playback.rs` 的取流失败跳歌、或 `app/cloud.rs` 的云端歌单写入前，还要满足：
 
-15. **Only source-level stream-fetch failures auto-skip; single-song-level failures don't.** Stream
-    URL resolution failures fall into two classes: source-level (can't connect, not logged in, local
-    service not started — `is_connectivity` / `is_auth_related` / `Service` / `NonJsonBody`) and
-    single-song-level (copyright-restricted, VIP trial without permission, etc.). Only source-level
-    goes `Loaded::StreamFailed` → `App::handle_stream_failed` → auto-skip to the next playable song
-    in the queue; single-song-level still only reports the error and `abort_loading`. The rules are
-    all in the pure function `auto_skip_next`: single-track repeat (`RepeatOne`) doesn't skip; a
-    source already confirmed failed in the same round is skipped directly, without re-sending
-    requests doomed to fail for its subsequent songs; a consecutive skip run is at most
-    `min(queue length, MAX_AUTO_SKIP = 5)`; only search forward, never wrap around; if all fail, stop
-    in `Stopped` with one summary message. **Any manual user action (track change, pause, play a new
-    song) calls `reset_auto_skip()` to zero the counter** — `play_from` / `play_from_queue` /
-    `toggle_playback` / `next_track` / `previous_track` / `stop_playback` all call it. Playback
-    stream-fetch failure uses `Loaded::StreamFailed` separately (not `Loaded::Failed`), because a
-    prefetch stream-fetch failure has exactly the same message as playback, indistinguishable by
-    text. Guard tests: `auto_skip_*` (pure functions) and `stream_failure_*` /
-    `single_song_failure_does_not_skip` / `manual_track_change_clears_the_auto_skip_state`.
+15. **只有音源级取流失败才自动跳歌；单曲级失败不跳。** 取流 URL 失败分两类：音源级（连不上、未登录、本地服务没起 —— `is_connectivity` / `is_auth_related` / `Service` / `NonJsonBody`）与单曲级（版权受限、VIP 试听无权限等）。只有音源级走 `Loaded::StreamFailed` → `App::handle_stream_failed` → 自动跳到队列里下一首可播的；单曲级仍然只报错并 `abort_loading`。规则都在纯函数 `auto_skip_next` 里：单曲循环（`RepeatOne`）不跳；同一轮里已确认失败的音源直接跳过；连续跳歌最多 `min(队列长度, MAX_AUTO_SKIP = 5)`；只往后找，不绕回；全失败就停在 `Stopped` 并给一条汇总消息。**用户的任何手动动作（切歌、暂停、播新歌）都会调 `reset_auto_skip()` 把计数清零** —— `play_from` / `play_from_queue` / `toggle_playback` / `next_track` / `previous_track` / `stop_playback` 都调。播放取流失败单独用 `Loaded::StreamFailed`（不是 `Loaded::Failed`），因为预取取流失败与播放的消息完全一样，靠文本分不开。守卫测试：`auto_skip_*`（纯函数）与 `stream_failure_*` / `single_song_failure_does_not_skip` / `manual_track_change_clears_the_auto_skip_state`。
 
-16. **Cloud-playlist add/remove/sync only accepts songs from the same source as the playlist.** The
-    playlist API picks a client by "the playlist's source" (`active_source_kind()`); feeding it a
-    song from another source makes KuGou locate by fileid and NetEase by hash a nonexistent (or
-    someone else's) entry, corrupting the playlist. So `remove_focused_song_from_cloud` /
-    `add_focused_song_to_cloud` / `sync_queue_to_cloud` all go through `playlist_accepts_song`
-    (`song.source == playlist's source`): cross-source is refused outright with a message and no
-    request is sent; batch operations sort per song with `partition_by_playlist_source`, sending only
-    same-source ones and stating the skipped count in the message. **No cross-source conversion**
-    (finding a same-named song on NetEase for a KuGou song) — that's a separate feature. Guard tests:
-    `playlist_guard_*` / `partition_*` / `adding_a_cross_source_song_is_refused_before_any_request` /
-    `syncing_a_mixed_queue_only_sends_matching_songs`.
+16. **云端歌单的增删同步只接受与歌单同音源的歌。** 歌单接口按「歌单的音源」选 client（`active_source_kind()`）；塞给它另一个音源的歌，酷狗会按 fileid、网易云会按 hash 去找一个不存在（或别人的）条目，把歌单弄坏。所以 `remove_focused_song_from_cloud` / `add_focused_song_to_cloud` / `sync_queue_to_cloud` 都过 `playlist_accepts_song`（`song.source == 歌单的音源`）：跨音源直接拒绝并给消息，不发请求；批量操作按 `partition_by_playlist_source` 逐首分类，只发同音源的，并在消息里说明跳过了几首。**不做跨音源转换**（给酷狗的歌去网易云找同名歌）—— 那是另一个功能。守卫测试：`playlist_guard_*` / `partition_*` / `adding_a_cross_source_song_is_refused_before_any_request` / `syncing_a_mixed_queue_only_sends_matching_songs`。
+## 5. 常见坑
+**播放 / rodio**
+- 解码器读错误 = EOF，没有异常能往上抛。任何「流断了」的判断都必须自己看缓冲状态。
+- `Player::stop()` 之后 `get_pos()` 归零（`periodic_access` 里显式写 0）；`Player::clear()` 还会调 `pause()`。
+- `Player::clear()` 会等当前音源退出（`sleep_until_end`）。音源若在 `read()` 里永久阻塞，音频线程就跟着卡死 —— 所以缓冲的读超时必须存在。
+- `LevelMeter` 包装器必须转发 `try_seek`，否则整个音频变得不可 seek，而播放本身完全正常（极难发现）。
+- 队列里只有一首 + 单曲循环 / 列表循环时，「播完」与「从头重放」看起来一样；调试时容易把 bug 当特性。
+- **多声道文件在 rodio 里会被「丢声道」**：减声道只保留每帧前 N 个采样，其余丢掉（`conversions/channels.rs`）。酷狗有多声道无损文件，还可能是「歌在最后两个声道」那种（见 §4 第 12 条）。`build_decoder` 现在统一过 `downmix::to_stereo`，不要去掉这一层。诊断：`ffprobe` 看 `channels`，再算各声道与正确混音的相关性。
+- **`/song/url` 会静默降级，而 `status` 仍是 1**：实测对没有无损版本的歌请求 `quality=flac`，返回 `extName=mp3` + `bitRate=128000`。只看 `status` 会让界面显示 flac 而实际播 128 kbps。判据在 `catalog::downgrade_note`（按容器 + 码率粗排；`super` 与蝰蛇系列不参与），原因经 `StreamUrl::reason` 呈现给界面 —— `handle_loaded` 里 **`reason` 的两个分支都要处理**，只处理试听那个分支会吞掉降级提示。
 
----
+**下载 / 缓存**
+- `cache.find` 只按「文件存在吗」判断，不校验长度 —— 这就是 `.part` 存在的原因。
+- **分块下载的每一步都必须自证**：状态码必须是 `206`，`Content-Range` 必须与请求的区间逐字节一致，每块必须写满长度，总和必须等于总长度。少任何一条，当服务端（或中间 CDN / 代理）忽略 `Range` 返回 `200 OK` 整轨时，4 块会互相覆盖，拼出一个「长度正确、内容全错」的文件 —— 它照样会被改名进缓存。自己写实验代理时别忘了透传 `Range`。回归测试：`audio/download.rs` 里的 `server_ignoring_range_*` 与 `truncated_transfer_*`（用 std `TcpListener` 的假服务端，无新依赖）。
+- `.part` 用 `set_len(total)` 预分配，所以**文件大小不能证明完整性**，只有已写字节数能。因此「下载任务结束」≠「下载成功」。
+- 分块下载失败会**回退到单连接**重下（`fetch_to`），所以「看起来下了两次」可能是正常的。
+- 缓存回收是同步目录扫描，必须放进 `spawn_blocking`；不要阻塞 UI。
+- **同一目标不能同时跑两条流**：`start_streaming` 用按临时文件路径索引的注册表去重，第二条复用第一条的缓冲、不起任务。原因是两条流会互相破坏 —— 后者的 `truncate(true)` 抹掉前者写的字节，失败/取消时的 `remove_file` 会删掉对方的文件。触发它不需要异常操作：**连按两次 Enter** 就会对同一目标发起两次 `start_streaming`（`App::active_stream` 在头部缓冲够之前不会持有）。回归测试：`audio::download::tests::a_second_stream_for_the_same_target_reuses_the_first_buffer`。
+- 整轨下载与流式下载**不共用**临时文件（`x.mp3.part` 与 `x.mp3.stream.part`，见 §1.4）：后台预取下一首时，用户很可能正好切到那一首。
 
-## 5. Common pitfalls
+**列表分页**
+- 歌单类接口的 `pagesize` 是**硬上限 30**；响应里的 `count` 只是本页条数，**不是总数**；唯一能算总页数的是歌单元数据里的 `song_count`。
+- 「本页没满 ⇒ 就这些了」**只在第 1 页成立**。降序显示时首屏取的是最后一页，最后一页不满是正常的 —— 照抄这条会让「补全整表」永不触发，只显示最后一页那几十首。判据抽在 `app::update::needs_full_fetch`，有测试钉住。
+- 更根本的：**「有没有下一页」只能用本页是否为空来判断**。解析会过滤条目（缺 hash、字段类型不对），30 条缩成 29 条很常见，靠「没满」停会静默截断列表。**现在两边用同一判据**：酷狗在 `catalog.rs::collect_all_pages`，网易云在 `source/netease.rs::should_continue_paging`（2026-09-28 改的，见 §7）。网易云那条抽成了自由函数，因为它的单元测试跑不了整条分页流程（需要 HTTP），而判据本身必须能被钉住。
+- **并发取回的页必须按页号拼，不能按完成顺序拼**：`JoinSet::join_next()` 给的是任务完成顺序，一批页一起发出去就会按返回顺序追加，整表的页序变随机 —— 对排行榜尤其致命，它的「顺序」就是内容本身。回归测试：`api::catalog::tests::concurrent_pages_are_assembled_in_page_order`（手写假服务端，让页号**必然**逆序返回）。
+- 取哪一页由 `app::update::first_screen_page` 决定：**必须与 `sort_descending` 一致**，否则首屏与最终列表头部不一致，画面整屏翻转。
+- 首屏取到空页（`song_count` 过期）就回退到第 1 页；不要让用户对着空列表。
 
-**Playback / rodio**
+**进程 / 环境**
+- 默认不记 DEBUG；排障前先 `KUGOU_TUI_DEBUG=1`。
+- `session.json` 退出时整体覆盖。自动化测试要么隔离 `XDG_CACHE_HOME`，要么先备份。
+- MPRIS 的 `Position` 在 `Stopped` 时无意义（`playerctl` 报 0）。
+- 一台机器上跑两个 kugou-tui：后一个拿不到 `org.mpris.MediaPlayer2.kugou-tui`；不要把 `playerctl` 的读数当作唯一证据。
+- ALSA 会把插件（`lavrate`/`jack`/`oss`…）报成设备；设备枚举已经做了两轮过滤（可给出默认输出配置 + 排除 `null`）；不要退回「全部列出」。
+- 概念版（lite）与标准版对 `ppage_id` 的处理不同；**取直链时不要自己造 `ppage_id`**（见 `api/catalog.rs` 注释：错的会直接给 31863，表现为「所有歌都播不了」）。
 
-- A decoder read error = EOF; no exception can propagate up. Any "stream broke" judgment must
-  inspect the buffer state itself.
-- After `Player::stop()`, `get_pos()` resets to zero (explicitly written as 0 in `periodic_access`);
-  `Player::clear()` also calls `pause()`.
-- `Player::clear()` waits for the current source to exit (`sleep_until_end`). If the source blocks
-  forever in `read()`, the audio thread hangs with it — so the buffer's read timeout must exist.
-- The `LevelMeter` wrapper must forward `try_seek`, otherwise the whole audio becomes unseekable
-  while playback itself is perfectly normal (extremely hard to notice).
-- With one song in the queue + single-track repeat / list repeat, "finished" and "replay from the
-  start" look the same; easy to mistake a bug for a feature when debugging.
-- **Multichannel files get "channels dropped" in rodio.** Channel reduction keeps only the first N
-  samples per frame and discards the rest (`conversions/channels.rs`). KuGou has multichannel
-  lossless files, possibly of the "song in the last two channels" kind (see §4 item 12).
-  `build_decoder` now uniformly goes through `downmix::to_stereo`; don't remove that layer.
-  Diagnosis: `ffprobe` the `channels`, then compute per-channel correlation with the correct mix.
-- **`/song/url` silently downgrades while `status` stays 1.** Measured, requesting `quality=flac`
-  for a song without a lossless version returns `extName=mp3` + `bitRate=128000`. Judging only
-  `status` leaves the UI showing flac while actually playing 128 kbps. The criterion is in
-  `catalog::downgrade_note` (coarse ordering by container + bitrate; `super` and the viper series
-  don't participate), and the reason is surfaced to the UI via `StreamUrl::reason` — note that in
-  `handle_loaded` **both branches of `reason` must be handled**; handling only the trial branch
-  swallows the downgrade notice.
+**歌词解析**
+- **「这一行算不算歌词」的判据只能存在一处**（`api/lyric.rs::has_lyric_content`）：`parse_lrc` 用它决定哪些行进 `Lyric`，`attach_translations` 用它算这些行在**原始带时间轴的行**中的下标，以便从语言轨（`[language:base64]`）取翻译。两边各判一次而判据略有差异，下标就会错一位，**之后每一行的翻译都错** —— 表现为「翻译与文本对不上」，不报错不崩溃。
+- **`<` 之前的文本也是正文**：标准 KRC 每行以 `<offset,duration,0>` 开头，所以标记前的文本通常是空的；但歌里出现带 `<` 又没有配对 `>` 的文本时（如 `宝贝<3`），只取标记之后的文本会把整行丢掉。`parse_krc_words` 现在先收集前缀，而前缀没有逐字时间轴，`words` 会被「词数必须等于标记数」那条检查清掉并回退整行高亮 —— 这是设计好的回退，不是 bug。
+- 逐字信息**宁可没有也不要猜**：词数与标记数不匹配时清空 `words`，界面回退整行高亮。猜出来的时间轴会让整行唱得与音频不同步。
 
-**Download / cache**
+**渲染 / 布局**
+- **`Ord::clamp` 在 `min > max` 时会 panic**（`assert!(min <= max)`）。`area.height == 0` 时 `x.clamp(1, area.height)` 就是定时炸弹，而它看起来完全像防御性代码。先用 `if area.width == 0 || area.height == 0 { return ...; }` 挡住退化区域；**不要**用 `max(1)` 糊过去 —— 得到的框会伸到区域外，随后 `area.width - columns` 下溢。踩过一次：`ui/views/player.rs::fit_box`。
+- 反过来也重要：`area.width - columns` 这类减法在「框比区域还大」时下溢，所以算完框要断言**两边都**满足 `box ⊆ area`，而不只是「没 panic」。
+- **UI 层生产代码目前没有 `unwrap()` / `expect()`**（全在 `#[cfg(test)]` 里）。一次 panic 就意味着界面没了、终端留在 raw 模式 —— 最贵的一类故障；保持这样。
+- **宽而矮**的终端（如 100×8）是最容易压坏布局的形状：走了宽分支但高度不够，`Min` 与 `Length` 抢空间。改完布局跑几个这种尺寸（`TestBackend` + `terminal.draw`，见 `render_home_in_a_short_wide_area_does_not_panic`）。实测空间紧张时 `[Min(6), Length(8)]` 里 `Min` 赢，封面区仍有至少 4 行 —— 但那是**实测行为，不是文档承诺**；升级 ratatui 后要重测。
+- **不要每帧重编码登录二维码**：`render_login` 直接复用 `login.qr`（收到二维码时按 `config.qr_aspect` 渲染好，见 `Loaded::LoginQr`），`qr_lines_fitted` 只在已渲染的行上判断「放不放得下」；只有终端放不下时才用 `qr_needed_size` 编一次。一次编码约 0.9ms，在 30fps 的预算里占很大一块（基准：`bench_qr_encoding_cost`、`bench_login_render_cost`）。
 
-- `cache.find` only judges by "does the file exist" and doesn't validate length — that's the reason
-  `.part` exists.
-- **Every step of a chunked download must prove itself**: the status code must be `206`,
-  `Content-Range` must match the requested range byte for byte, each chunk must write its full
-  length, and the total must equal the total length. Miss any one and when the server (or an
-  intermediate CDN / proxy) ignores `Range` and returns `200 OK` with the whole track, the 4 chunks
-  overwrite each other and assemble a "correct length, entirely wrong content" file — which still
-  gets renamed into the cache. When writing your own proxy for experiments, don't forget to pass
-  through `Range`. Regression tests: `server_ignoring_range_*` and `truncated_transfer_*` in
-  `audio/download.rs` (a fake server on a std `TcpListener`, no new dependencies).
-- `.part` is pre-allocated with `set_len(total)`, so **file size doesn't prove integrity**, only the
-  number of bytes written does. Hence "download task finished" ≠ "download succeeded".
-- A failed chunked download **falls back to a single connection** and re-downloads (`fetch_to`), so
-  "it looks like it downloaded twice" may be normal.
-- Cache reclamation is a synchronous directory scan and must run in `spawn_blocking`; don't block the
-  UI.
-- **Two streams must not run against the same target at once.** `start_streaming` deduplicates in a
-  registry keyed by temporary file path: the second reuses the first's buffer and starts no task. The
-  reason is that two streams corrupt each other — the later `truncate(true)` wipes the bytes the
-  earlier wrote, and `remove_file` on failure/cancel deletes the other's file. It doesn't take an
-  unusual action to trigger: **pressing Enter twice** puts two `start_streaming` calls on the same
-  target (`App::active_stream` isn't held until enough of the head is buffered, and nothing blocks
-  the second during that window). Regression test:
-  `audio::download::tests::a_second_stream_for_the_same_target_reuses_the_first_buffer`.
-- Whole-track and streaming downloads **don't share** a temp file (`x.mp3.part` vs
-  `x.mp3.stream.part`, see §1.4): when prefetching the next track in the background, the user may
-  well switch to exactly that one.
-
-**List pagination**
-
-- `pagesize` on playlist-class APIs is a **hard cap of 30**; the response's `count` is only this
-  page's item count, **not the total**; the only way to compute total pages is `song_count` from the
-  playlist metadata.
-- "This page isn't full ⇒ that's everything" holds **only on page 1**. After the first screen
-  fetches from the last page (when displaying descending), a non-full last page is normal — copying
-  this over would make "fill in the full table" never fire, showing only the last page's few dozen
-  songs. The criterion is extracted in `app::update::needs_full_fetch`, pinned by a test.
-- More fundamental: **"is there a next page" can only be judged by whether this page is empty**.
-  Parsing filters entries (missing hash, wrong field type), so a page of 30 shrinking to 29 is
-  common, and stopping on "not full" silently truncates the list. **Both sides now use the same
-  criterion**: KuGou in `catalog.rs::collect_all_pages`, NetEase in
-  `source/netease.rs::should_continue_paging` (changed 2026-09-28, see §7). NetEase's criterion is
-  extracted as a free function because its unit test can't exercise the whole paging flow (needs
-  HTTP), yet the criterion itself must be pinnable — see that test's comment.
-- **Concurrent page results must be assembled by page number, not completion order.**
-  `JoinSet::join_next()` gives task completion order, so a batch of pages sent together appends in
-  whatever order they return, making the whole table's page order random — fatal for rankings
-  especially, whose "order" is the content itself. Regression test:
-  `api::catalog::tests::concurrent_pages_are_assembled_in_page_order` (a hand-written fake server
-  that makes page numbers **necessarily** return in reverse, so this test doesn't pass by luck).
-- Which page to fetch is decided by `app::update::first_screen_page`: **must be consistent with
-  `sort_descending`**, otherwise the first screen doesn't match the head of the final list and the
-  screen flips wholesale (directly visible to the user).
-- If the first screen gets an empty page (`song_count` stale), fall back to page 1; don't leave the
-  user staring at an empty list.
-
-**Process / environment**
-
-- DEBUG isn't logged by default; set `KUGOU_TUI_DEBUG=1` before troubleshooting.
-- `session.json` is overwritten wholesale on exit. Automated tests must either isolate
-  `XDG_CACHE_HOME` or back it up first.
-- MPRIS `Position` is meaningless when `Stopped` (`playerctl` reports 0).
-- Running two kugou-tui instances on one machine: the later one can't take
-  `org.mpris.MediaPlayer2.kugou-tui`; don't take `playerctl` readings as sole evidence.
-- ALSA reports plugins (`lavrate`/`jack`/`oss`…) as devices; device enumeration already does two
-  rounds of filtering (can provide a default output config + exclude `null`); don't revert to "list
-  everything".
-- Concept edition (lite) and standard edition handle `ppage_id` differently; **don't invent
-  `ppage_id` yourself when fetching the direct URL** (see the comment in `api/catalog.rs`: a wrong
-  one gives 31863 directly, showing up as "all songs unplayable").
-
-**Lyric parsing**
-
-- **The "does this line count as a lyric" criterion can exist in only one place**
-  (`api/lyric.rs::has_lyric_content`). `parse_lrc` uses it to decide which lines enter `Lyric`, and
-  `attach_translations` uses it to compute these lines' index among the **original timed lines**, to
-  fetch translations from the language track (`[language:base64]`). Judging separately on both sides
-  with slightly different criteria shifts the index by one, **throwing off every subsequent line's
-  translation** — showing up as "translations don't match the text", with no error and no crash, only
-  detectable by staring at the lyrics.
-- **Text before `<` is also body text.** The standard KRC form starts each line with
-  `<offset,duration,0>`, so text before the marker is usually empty; but when a song contains text
-  with a `<` and no matching `>` (e.g. `宝贝<3`), taking only the text after the marker drops the
-  whole line. `parse_krc_words` now collects the prefix first, and since the prefix has no per-word
-  timing, `words` is cleared by that "word count must equal marker count" check and falls back to
-  whole-line highlighting — a designed fallback, not a bug.
-- Word-by-word info is better **absent** than **guessed**: when word count and marker count mismatch,
-  clear `words` and fall back to whole-line highlighting in the UI. A guessed timing makes the whole
-  line sing out of sync with the audio, worse than no effect.
-
-**Rendering / layout**
-
-- **`Ord::clamp` panics when `min > max`** (`assert!(min <= max)`). `x.clamp(1, area.height)` is a
-  time bomb when `area.height == 0`, and it looks exactly like defensive code. Guard degenerate areas
-  first with `if area.width == 0 || area.height == 0 { return ...; }`; do **not** paper over it with
-  `max(1)` — the resulting box extends outside the area and `area.width - columns` then underflows.
-  Hit once: `ui/views/player.rs::fit_box`.
-- The converse also matters: subtractions like `area.width - columns` underflow when "the box is
-  bigger than the area", so after computing a box, assert **both** `box ⊆ area`, not just "doesn't
-  panic".
-- **The UI layer currently has no `unwrap()` / `expect()` in production code** (all in
-  `#[cfg(test)]`). A panic means the UI is gone and the terminal is left in raw mode — the most
-  expensive class of failure; keep it this way.
-- **Wide and short** terminals (e.g. 100×8) are the shape most likely to break layout: the wide
-  branch is taken but the height is insufficient, and `Min` and `Length` compete for space. After
-  changing layout, run a few such sizes (`TestBackend` + `terminal.draw`, see
-  `render_home_in_a_short_wide_area_does_not_panic`). Measured, `[Min(6), Length(8)]` gives `Min` the
-  win when space is short, so the cover pane still has at least 4 rows — but that's **measured
-  behavior, not a documented promise**; re-test after upgrading ratatui.
-- **Don't re-encode the login QR code every frame**: `render_login` reuses `login.qr` directly
-  (rendered according to `config.qr_aspect` when the QR code is received, see `Loaded::LoginQr`), and
-  `qr_lines_fitted` only judges "does it fit" on the already-rendered lines, no longer encoding
-  itself; only when the terminal can't fit it does it encode once with `qr_needed_size`. One encoding
-  measures about 0.9ms, a large chunk of the budget at 30fps (benchmarks: `bench_qr_encoding_cost`,
-  `bench_login_render_cost`).
-
-**Testing**
-
-- Unit tests run in the same process, so **don't assert with `VmRSS`** (parallel tests and allocator
-  caching interfere). To assert "memory is bounded", assert the **window length** (see
-  `streaming::tests::keeps_only_a_bounded_window_in_memory`), and do RSS-level comparisons in an
-  out-of-process experiment (§6).
-- Disk-related tests must open temp files **read-write** (same as §4.2), otherwise the test fails with
-  `EBADF`.
-
----
-
-## 6. Memory control experiment (run after changing the buffer/download)
-
-Idea: compile the **same** `streaming.rs`, old and new versions, into a small program, run the same
-workload, and read `VmRSS` / `VmHWM` from `/proc/self/status`. A temporary project outside the repo,
-no repo pollution:
-
+**测试**
+- 单元测试同进程运行，所以**不要用 `VmRSS` 做断言**（并行测试与分配器缓存会干扰）。要断言「内存有界」，断言**窗口长度**（见 `streaming::tests::keeps_only_a_bounded_window_in_memory`），RSS 级对比放到进程外实验里（§6）。
+- 磁盘相关测试必须**以读写方式**打开临时文件（同 §4 第 2 条），否则测试以 `EBADF` 失败。
+## 6. 内存对照实验（改完缓冲/下载后跑）
+思路：把**同一份** `streaming.rs` 的新旧版本编进一个小程序，跑同样的负载，从 `/proc/self/status` 读 `VmRSS` / `VmHWM`。临时工程放在仓库外，不污染仓库：
 ```bash
-mkdir -p /tmp/mem-repro/src && cd /home/xibie/kugou-tui
+mkdir -p /tmp/mem-repro/src && cd <仓库根目录>
 git show HEAD:src/audio/streaming.rs > /tmp/mem-repro/src/old.rs
 cp src/audio/streaming.rs            > /tmp/mem-repro/src/new.rs
-# in main.rs: #[path = "old.rs"] mod old; #[path = "new.rs"] mod new;
-# run three workloads each: single track / N consecutive changes / consecutive changes without cancel
+# main.rs 里：#[path = "old.rs"] mod old; #[path = "new.rs"] mod new;
+# 每种负载各跑三遍：单曲 / 连续切 N 次 / 连续切但不取消
 ```
+`streaming.rs` 只依赖 `std`，所以能直接用 `#[path]` 拉进来。
 
-`streaming.rs` depends only on `std`, so it can be pulled in with `#[path]` directly — an extra
-benefit of writing it with "no in-crate dependencies".
+**2026-09 基线数据**（64 MiB 单曲、64 KiB 分块、release、CachyOS）：
 
-**2026-09 baseline data** (64 MiB single track, 64 KiB chunks, release, CachyOS):
-
-| Workload | Before fix | After fix |
+| 负载 | 修复前 | 修复后 |
 |---|---|---|
-| Single track played through (peak RSS) | 66.5 MiB | 12.5 MiB |
-| 5 consecutive changes, none cancelled | 323.7 MiB | 3.0 MiB (after cancel) / 53 MiB (no cancel) |
-| 24 tracks played consecutively | 66.6 MiB (constant, doesn't grow with count) | 12.5 MiB (constant) |
+| 单曲完整播一遍（峰值 RSS） | 66.5 MiB | 12.5 MiB |
+| 连续切 5 次，都不取消 | 323.7 MiB | 3.0 MiB（取消后） / 53 MiB（不取消） |
+| 连续播 24 首 | 66.6 MiB（恒定，不随首数增长） | 12.5 MiB（恒定） |
 
-**Real process** comparison (`--search` + keypresses in a pty + sampling `/proc/<pid>/status`): same
-6 track changes, 85 MiB and monotonically rising before the fix, 25 MiB and stable after; at 12 track
-changes, peak **175.8 MiB** before the fix, still 145.7 MiB on exit (no drop), peak **35.3 MiB**
-after, 30.1 MiB on exit.
+**真实进程**对比（`--search` + 在 pty 里按键 + 采样 `/proc/<pid>/status`）：同样 6 次切歌，修复前 85 MiB 且单调上升，修复后 25 MiB 且稳定；12 次切歌时，修复前峰值 **175.8 MiB**，退出时仍有 145.7 MiB（不回落），修复后峰值 **35.3 MiB**，退出 30.1 MiB。
 
-To judge "is there a persistent leak": **play enough songs (≥20) and see whether RSS converges to the
-same value**. After the fix, 24 consecutive tracks hold RSS steady at 12.5 MiB, showing every
-stream's lifetime is fully cleaned up.
+判断「有没有持续性泄漏」：**播够多首（≥20）看 RSS 是否收敛到同一个值**。修复后连续 24 首稳定在 12.5 MiB，说明每条流的生命周期都被完整清理。
+## 7. 已知但**未动**的区域
+这一节记录「已复核、确认有问题或可疑，但这次刻意不改」的东西。留着不是忘了；改动的代价或风险大于收益 —— 动手前先读这里的理由。
 
----
-
-## 7. Known but **untouched** areas
-
-This section records things "reviewed and confirmed problematic or suspicious, but deliberately not
-changed this time". Keeping them isn't forgetting; the cost or risk of changing exceeds the benefit —
-read the reasons here before acting.
-
-| Location | Problem | Why untouched |
+| 位置 | 问题 | 为什么没动 |
 |---|---|---|
-| ~~`source/netease.rs::playlist_tracks_all`~~ **(fixed 2026-09-28, kept for the conclusion)** | ~~Stops paging on "less than a full page ⇒ end", conflicting with the KuGou side's "stop only on an empty page" criterion; any page with one entry filtered out by parsing silently truncates the whole table~~ | The blocker then was "can't measure it", now removed: started NeteaseCloudMusicApi (`:3002`) and measured out-of-range offsets — `offset=500` (the playlist has 200 songs) and `offset=999999` both return `{"songs":[],"code":200}`, **an empty array, not an error**, and it doesn't clamp offset to the last page and return duplicates. The criterion is extracted as `should_continue_paging` (`got > 0`), consistent with the KuGou side; the regression test `paging_stops_only_on_an_empty_page` does fail when reverting to the old criterion. Cost: one extra request at the end of a full-table load |
-| `source/netease.rs::plaza_playlists` / `artist_list` | Category (`_category_id`) and region (`_kind`) parameters are ignored, yet the UI still shows the selectors | The UI passes **KuGou**'s category ids; NetEase wants `cat` strings / `area`, and the two don't match. Adding a mapping is a new feature, not a bug fix; first acknowledge it has no effect, so users don't think the filter is broken |
-| `api/catalog.rs::request_song_url_with_hash` | `Song.album_id` / `album_audio_id` are parsed but not sent to `/song/url` | On 2026-09-28, measured four parameter combinations on the Concept-edition service (none / with `ppage_id` / with the id from search / with the id from `/privilege/lite`) and **all obtained a direct URL**, while `status_reason()` records a counterexample that "the id from privilege gives status=3". Sending them has no provable benefit and a clear cost when wrong, so none is sent; the conclusion is in the comment there |
-| `api/model.rs::normalize_duration` | Guesses the unit using 10000: a 9-second short track (9000 ms) is treated as 9000 seconds; a 2.8-hour long compilation (10800 s) is treated as 10.8 seconds | Both directions collide in the 1000–9999 range, while the actual APIs' units are **known** (search `Duration` in seconds, playlist `timelen` in milliseconds); this fallback only applies to unseen shapes. Changing the threshold moves the error from one range to another, not a fix; a test pins the current behavior, revisit when it actually bites |
-| `config.rs::save` | Directly `fs::write`s over `config.toml`, not "write temp file + rename"; a crash could in theory leave half a config file | The config file is only a few hundred bytes, and one `write` syscall doesn't fill a block, so in practice you get the old or the new content, not a mix; also `load()` falls back to defaults with a warning on a bad file, so the worst case is "settings lost, log in again". Doing it properly means handling Windows' difference where `rename` can't overwrite an existing file, and the benefit doesn't justify the complexity |
-| `audio/download.rs` | Two **whole-track** downloads landing on the same target (prefetch vs resume) still contend for the same `.part` | Both write the same bytes from the same URL; worst case the later one's rename fails and reports one download error. The trigger chain is long (prefetch in flight → track change → that song breaks again); separating the more easily collided "streaming × whole-track" combination first is enough |
+| ~~`source/netease.rs::playlist_tracks_all`~~ **（2026-09-28 已修，保留结论）** | ~~按「不满一页 ⇒ 结束」停分页，与酷狗侧「只在空页停」的判据冲突；任何被解析过滤掉一条的页都会静默截断整表~~ | 起了 NeteaseCloudMusicApi（`:3002`）实测越界 offset —— `offset=500`（歌单 200 首）与 `offset=999999` 都返回 `{"songs":[],"code":200}`，**是空数组不是错误**，也不会把 offset 夹到最后一页返回重复。判据抽成了 `should_continue_paging`（`got > 0`），与酷狗侧一致；回归测试 `paging_stops_only_on_an_empty_page` 在改回旧判据时确实会失败。代价：整表加载末尾多一次请求 |
+| `source/netease.rs::plaza_playlists` / `artist_list` | 分类（`_category_id`）与地区（`_kind`）参数被忽略，界面却仍显示选择器 | 界面传的是**酷狗**的分类 id；网易云要的是 `cat` 字符串 / `area`，两者对不上。加映射是新功能，不是修 bug |
+| `api/catalog.rs::request_song_url_with_hash` | `Song.album_id` / `album_audio_id` 解析了但不发给 `/song/url` | 2026-09-28 在概念版服务上实测四种参数组合（不带 / 带 `ppage_id` / 带搜索来的 id / 带 `/privilege/lite` 来的 id），**都拿到了直链**，而 `status_reason()` 记着一个「privilege 来的 id 给 status=3」的反例。发它们没有可证明的收益、错了代价明确，所以都不发；结论在那里的注释里 |
+| `api/model.rs::normalize_duration` | 用 10000 猜单位：9 秒的短曲（9000 ms）被当成 9000 秒；2.8 小时的长合辑（10800 s）被当成 10.8 秒 | 两个方向都在 1000–9999 区间相撞，而实际接口的单位是**已知的**（搜索 `Duration` 是秒，歌单 `timelen` 是毫秒）；这个回退只对没见过的形状生效。改阈值只是把错误从一个区间挪到另一个，不是修复；有测试钉住当前行为，真踩到再说 |
+| `config.rs::save` | 直接 `fs::write` 覆盖 `config.toml`，不是「写临时文件 + rename」；理论上崩溃会留下半个配置文件 | 配置文件只有几百字节，一次 `write` 系统调用填不满一个块，实际拿到的是旧的或新的，不会混杂；而且 `load()` 遇到坏文件会带警告回退默认值，最坏也就是「设置丢了，重新登录」。正经做还要处理 Windows 上 `rename` 不能覆盖已存在文件的差异，收益不值得这份复杂度 |
+| `audio/download.rs` | 两个**整轨**下载落在同一目标（预取 vs 续传）仍会争同一个 `.part` | 两者从同一个 URL 写同样的字节；最坏是后者的 rename 失败、报一次下载错误。触发链很长（预取在飞 → 切歌 → 那首又坏了）；先把更容易撞的「流式 × 整轨」组合分开就够了 |
 
-**Before changing any of these**, first see whether there's a way to verify on a real machine — the
-common trait of these entries is "whether the change is correct can't be seen from unit tests alone".
+**改这些之前**，先看有没有办法在真机上验证 —— 这些条目的共同点是「改得对不对，光靠单元测试看不出来」。

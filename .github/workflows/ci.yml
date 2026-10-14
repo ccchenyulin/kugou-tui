@@ -35,7 +35,7 @@
 #
 # # 本地等价命令
 #
-# 见 `CONTRIBUTING.md`「提交前请跑这三条」与 `docs/MAINTENANCE.md` §1.6。
+# 见 `CONTRIBUTING.md`「提交前必跑这三条」与 `docs/MAINTENANCE.md` §1.6。
 # `cargo fmt --check` 只在 Linux 那一栏跑：格式化与平台无关，三栏各跑一遍是浪费。
 
 name: CI

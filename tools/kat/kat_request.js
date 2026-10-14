@@ -5,7 +5,12 @@
 // 真实时间，没法固化成断言。这里把时间钉死，只做「构造」，不发包。
 //
 // 用法：KUGOU_UPSTREAM=/path/to/KuGouMusicApi node tools/kat/kat_request.js
-const path = process.env.KUGOU_UPSTREAM || '/home/xibie/KuGouMusicApi';
+const path = process.env.KUGOU_UPSTREAM;
+if (!path) {
+  console.error('KUGOU_UPSTREAM 未设置：请指向 KuGouMusicApi 的 clone 路径，例如\n' +
+    '  KUGOU_UPSTREAM=/path/to/KuGouMusicApi node tools/kat/kat_request.js');
+  process.exit(1);
+}
 
 // 1700000000000ms = 1700000000s，与 tools/kat/kat_gen.js 的 clienttime 对齐。
 const FIXED_NOW_MS = 1700000000000;

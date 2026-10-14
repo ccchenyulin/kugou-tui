@@ -1,7 +1,12 @@
 // 证明 song_url / search_lyric 的 notSign:true 不生效：签名照旧走 android。
 // 做法：用假的 useAxios 截获模块真正传出的 options，再按 request.js 的逻辑复算签名。
-// 上游 KuGouMusicApi 的 clone 路径；默认按开发机布局，可用 KUGOU_UPSTREAM 覆盖。
-const path = process.env.KUGOU_UPSTREAM || '/home/xibie/KuGouMusicApi';
+// 上游 KuGouMusicApi 的 clone 路径，必须由 KUGOU_UPSTREAM 指定。
+const path = process.env.KUGOU_UPSTREAM;
+if (!path) {
+  console.error('KUGOU_UPSTREAM 未设置：请指向 KuGouMusicApi 的 clone 路径，例如\n' +
+    '  KUGOU_UPSTREAM=/path/to/KuGouMusicApi node tools/kat/kat_notsign.js');
+  process.exit(1);
+}
 
 // 固定 Math.random，让 song_url 内部 randomString(24) 的 dfid 可复现
 const seqA = Array.from({ length: 32 }, (_, i) => Number(((i % 10) / 10).toFixed(1)));

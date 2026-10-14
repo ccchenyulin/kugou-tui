@@ -4,12 +4,11 @@
 #
 # # 为什么需要它
 #
-# 一次发版会在三个地方留下东西：
-#   - 仓库里   `target/package/`（cargo package 的解包验证目录）
-#              `dist/` 里历史版本的 tarball
-#   - AUR 仓库 `src/`、`pkg/`、以及 makepkg 拉下来的上游源码目录
+# 一次发版会在仓库里留下东西：
+#   - `target/package/`（cargo package 的解包验证目录）
+#   - `dist/` 里历史版本的 tarball
 #
-# 这些都能再生，但不会自己消失。实测一轮下来 10+ MiB，多留几版就是几百 MiB。
+# 这些都能再生，但不会自己消失。实测一轮下来约 8 MiB，多留几版就是几百 MiB。
 #
 # # 触发时机
 #
@@ -23,7 +22,7 @@
 #   - `target/` 整体（会毁掉增量编译，下次全量重编约 3 分钟）——要清得显式加 --all
 #   - 运行时的歌曲磁盘缓存 `~/.cache/kugou-tui`（那是用户数据，且它自己带逐出逻辑，
 #     见 `CacheStore::enforce_limit`）——要清得显式加 --cache
-#   - 任何不是本项目 / AUR 包目录的东西
+#   - 任何不属于本项目的东西
 #
 # # 用法
 #
@@ -36,7 +35,6 @@
 set -euo pipefail
 
 repo_dir=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd)
-aur_dir="${KUGOU_AUR_DIR:-$HOME/aur/kugou-tui}"
 runtime_cache="${XDG_CACHE_HOME:-$HOME/.cache}/kugou-tui"
 
 dry_run=0
@@ -48,7 +46,8 @@ for arg in "$@"; do
     --all) do_all=1 ;;
     --cache) do_cache=1 ;;
     -h | --help)
-      sed -n '3,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      # 头部注释即帮助文本：从第 3 行打到第一个非注释行（= set -euo pipefail）。
+      awk 'NR>=3 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
       exit 0
       ;;
     *)
@@ -60,9 +59,8 @@ done
 
 # 回收前后对比用。拿不到就当 0，不影响主流程。
 #
-# 注意用 `-e` 而不是 `-d`：要回收的东西里有单个文件（dist/ 里的旧 tarball、
-# makepkg 产出的 .pkg.tar.zst），只判目录会让它们一律记成 0 字节——
-# 回收照做，但汇总数字会少算一大截。
+# 注意用 `-e` 而不是 `-d`：要回收的东西里有单个文件（dist/ 里的旧 tarball），
+# 只判目录会让它们一律记成 0 字节——回收照做，但汇总数字会少算一大截。
 dir_bytes() {
   if [ -e "$1" ]; then
     du -sb "$1" 2>/dev/null | cut -f1
@@ -112,30 +110,6 @@ if [ -d "$repo_dir/dist" ]; then
     esac
     reclaim "$tarball" "历史版本的发行包（当前版本 $current_version）"
   done
-fi
-
-# ---- AUR 包仓库 ----
-
-if [ -d "$aur_dir" ]; then
-  # 先确认这真是那个 AUR 包目录，再动里面的东西。
-  if [ -f "$aur_dir/PKGBUILD" ]; then
-    reclaim "$aur_dir/src" "makepkg 解包的源码"
-    reclaim "$aur_dir/pkg" "makepkg 的打包目录"
-    # makepkg 用 git+ 源时拉下来的上游副本，目录名与 PKGBUILD 里的源名一致
-    while IFS= read -r upstream; do
-      [ -n "$upstream" ] || continue
-      reclaim "$aur_dir/$upstream" "makepkg 拉下来的上游源码（$upstream）"
-    done < <(sed -n 's/^[[:space:]]*"\([A-Za-z][A-Za-z0-9_-]*\)::git+.*/\1/p' "$aur_dir/PKGBUILD")
-    # 构建出的包本体也不留（要留的话用 makepkg 自己产出的那份）
-    for pkg in "$aur_dir"/*.pkg.tar.zst; do
-      [ -e "$pkg" ] || continue
-      reclaim "$pkg" "上一次构建出的包"
-    done
-  else
-    printf '  \033[33m跳过 %s：里面没有 PKGBUILD，看着不是 AUR 包目录\033[0m\n' "$aur_dir"
-  fi
-else
-  printf '  （没有 AUR 包目录 %s，跳过）\n' "$aur_dir"
 fi
 
 # ---- 可选：更激进的回收 ----

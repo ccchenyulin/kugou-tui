@@ -6,7 +6,12 @@
 // method / baseURL / url / params 插入序 / headers / data / getUri。
 //
 // 用法：KUGOU_UPSTREAM=/path/to/KuGouMusicApi node tools/kat/kat_login.js
-const path = process.env.KUGOU_UPSTREAM || '/home/xibie/KuGouMusicApi';
+const path = process.env.KUGOU_UPSTREAM;
+if (!path) {
+  console.error('KUGOU_UPSTREAM 未设置：请指向 KuGouMusicApi 的 clone 路径，例如\n' +
+    '  KUGOU_UPSTREAM=/path/to/KuGouMusicApi node tools/kat/kat_login.js');
+  process.exit(1);
+}
 const { spawnSync } = require('child_process');
 
 // randomString 的字符池是 '1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ'（36 个）。

@@ -5,7 +5,12 @@
 //   2. rsaEncrypt2 用 forge.random.getBytes 填 PKCS1 的 PS → 替换它
 //
 // 用法：KUGOU_UPSTREAM=/path/to/KuGouMusicApi node tools/kat/kat_aes.js
-const path = process.env.KUGOU_UPSTREAM || '/home/xibie/KuGouMusicApi';
+const path = process.env.KUGOU_UPSTREAM;
+if (!path) {
+  console.error('KUGOU_UPSTREAM 未设置：请指向 KuGouMusicApi 的 clone 路径，例如\n' +
+    '  KUGOU_UPSTREAM=/path/to/KuGouMusicApi node tools/kat/kat_aes.js');
+  process.exit(1);
+}
 const { spawnSync } = require('child_process');
 const forge = require(path + '/node_modules/node-forge');
 const CryptoJS = require(path + '/node_modules/crypto-js');

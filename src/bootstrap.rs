@@ -482,7 +482,7 @@ fn candidate_dirs(explicit: Option<&Path>) -> Vec<PathBuf> {
     if let Some(dir) = explicit {
         dirs.push(dir.to_path_buf());
     }
-    // 发行包（AUR / deb）把服务连同生产依赖装在这里
+    // 发行包（deb / tarball）把服务连同生产依赖装在这里
     dirs.push(PathBuf::from("/usr/share/kugou-tui/api/kugou"));
     // 本程序自己安装的位置
     dirs.push(install_dir());

@@ -8,7 +8,12 @@
 //   KUGOU_UPSTREAM=/path/to/KuGouMusicApi node tools/kat/probe_outbound.js
 //   ... node tools/kat/probe_outbound.js lite      # 只跑 lite
 const http = require('http');
-const path = process.env.KUGOU_UPSTREAM || '/home/xibie/KuGouMusicApi';
+const path = process.env.KUGOU_UPSTREAM;
+if (!path) {
+  console.error('KUGOU_UPSTREAM 未设置：请指向 KuGouMusicApi 的 clone 路径，例如\n' +
+    '  KUGOU_UPSTREAM=/path/to/KuGouMusicApi node tools/kat/probe_outbound.js');
+  process.exit(1);
+}
 
 const captured = [];
 const server = http.createServer((req, res) => {

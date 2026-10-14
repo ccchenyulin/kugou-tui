@@ -1,90 +1,81 @@
-# User Guide
+# 使用指南
 
-## Features
+## 功能
 
-| Category | Capability |
+| 分类 | 能力 |
 |---|---|
-| Browse | Playlist plaza, artist list (filterable by region), rankings, personal cloud playlists |
-| Search | Single-track search (available after login); `M` loads more |
-| Playback | Play / pause / previous / next / seek (±5 s) / volume (±5%) / mute |
-| Playback modes | Sequential, repeat-all, repeat-one, shuffle |
-| Lyrics | Per-character (KRC timestamps), translations / transliterations, centered scrolling, line cross-fade, click a line to seek, ±100 ms offset |
-| Visualizer | **Real spectrum**: FFT over samples captured on the audio thread, log-spaced (40 Hz–16 kHz); bass lights the left, cymbals the right |
-| Queue | Append (`a`), play next (`i`), add whole list (`A`), remove (`x`), clear (`X`) |
-| Cloud playlists | Favorite (`s`), sync whole queue (`S`), remove (`d`), delete playlist (`D`), create (`N`) |
-| Login | **In-app QR scan** (`L`); the QR code is drawn in the terminal |
-| Concept-edition VIP | **Claimed automatically each day** (attempted at startup / after login / on switching to the concept edition; once per day); `V` retries manually |
-| Track download | `W` downloads the current track to the directory set in settings (default `~/Music`) |
-| Cache | Audio cached to disk with LRU eviction; `C` clears it |
-| Network | **Automatic retry on transient failures**: connection refused / reset / truncated body / 408 / 429 / 5xx are retried (3 attempts total, 300 ms → 900 ms apart); timeouts, business error codes, and other 4xx are not. Writes are never retried |
-| Input | Keyboard + mouse (click to select, double-click to activate, wheel, click the progress bar to seek) |
-| Appearance | 6 themes (cool blue / graphite / sunset / forest / neon / dark purple), each in truecolor and 16-color variants |
-| Settings page | Opened with `,`: theme, quality, playback mode, refresh interval, lyric offset and animation, page size, cache limit, 16-color, lyric panel, side navigation, download directory, cover fill, output device; saved immediately on change |
-| Desktop integration | **MPRIS** (status bar / media controls / `playerctl`, with cover art) and **system tray** (right-click menu, wheel volume, icon dims with state); Linux desktops only |
+| 浏览 | 歌单广场、歌手列表（可按地区筛选）、排行榜、个人云端歌单 |
+| 搜索 | 单曲搜索（登录后可用）；`M` 加载更多 |
+| 播放 | 播放 / 暂停 / 上一首 / 下一首 / 快进快退（±5 秒）/ 音量（±5%）/ 静音 |
+| 播放模式 | 顺序、列表循环、单曲循环、随机 |
+| 歌词 | 逐字歌词（KRC 时间戳）、翻译 / 音译、居中滚动、行交叉淡入、点某行跳转、±100 ms 偏移 |
+| 可视化 | **真实频谱**：对音频线程采集的采样做 FFT，对数分频（40 Hz–16 kHz）；低频亮左侧，高频亮右侧 |
+| 队列 | 追加（`a`）、下一首播放（`i`）、整列表加入（`A`）、移除（`x`）、清空（`X`） |
+| 云端歌单 | 收藏（`s`）、同步整个队列（`S`）、移除（`d`）、删除歌单（`D`）、新建（`N`） |
+| 登录 | **应用内扫码**（`L`）；二维码直接画在终端里 |
+| 概念版 VIP | **每天自动领取**（启动 / 登录后 / 切到概念版时各尝试一次，每天只领一次）；`V` 手动重试 |
+| 单曲下载 | `W` 把当前曲目下载到设置里的目录（默认 `~/Music`） |
+| 缓存 | 音频落盘缓存并做 LRU 回收；`C` 清空 |
+| 网络 | **瞬时失败自动重试**：连接被拒 / 被重置 / 响应体截断 / 408 / 429 / 5xx 会重试（共 3 次，间隔 300 ms → 900 ms）；超时、业务错误码、其余 4xx 不重试。写操作一律不重试 |
+| 输入 | 键盘 + 鼠标（点击选中、双击激活、滚轮、点进度条跳转） |
+| 外观 | 6 套主题（冷蓝 / 石墨 / 日落 / 森林 / 霓虹 / 暗紫），每套都有真彩与 16 色两个版本 |
+| 设置页 | `,` 打开：主题、音质、播放模式、刷新间隔、歌词偏移与动画、每页条数、缓存上限、16 色、歌词面板、侧边导航、下载目录、封面填充、输出设备；改动立即保存 |
+| 桌面集成 | **MPRIS**（状态栏 / 媒体控制 / `playerctl`，带封面）与**系统托盘**（右键菜单、滚轮调音量、图标随状态变暗）；仅 Linux 桌面 |
 
-Supported audio formats are determined by rodio: **MP3, FLAC, M4A/MP4, OGG (Vorbis), WAV**.
+支持的音频格式由 rodio 决定：**MP3、FLAC、M4A/MP4、OGG (Vorbis)、WAV**。
 
-## Interface
+## 界面
 
 ```
 ┌──────────┬──────────────────────────────────┐
-│ Sidebar  │ Primary (search box / list)      │
-│ grouped  ├────────────────────┬─────────────┤
-│ nav      │ Secondary (tracks) │ Lyrics      │
-│ + status ├────────────────────┴─────────────┤
-│          │ Playback queue                   │
+│侧边栏    │主区（搜索框 / 列表）             │
+│分组导航  ├────────────────────┬─────────────┤
+│+ 状态    │次区（曲目）        │歌词         │
+│          │播放队列                          │
 ├──────────┴──────────────────────────────────┤
-│          │ Track · Artist · Album  Next: ...│
-│          │ ━━━━━━━━━━━━━━━━━━━━ 1:23 / 4:56 │
+│          │曲目 · 歌手 · 专辑    下一首 …    │
+│          │━━━━━━━━━━━━━━━━━━━━ 1:23 / 4:56  │
 └─────────────────────────────────────────────┘
 ```
 
-`Tab` / `Shift+Tab` cycle focus between "sidebar → Primary → Secondary → queue"; the focused panel's border is highlighted.
+`Tab` / `Shift+Tab` 在「侧边栏 → 主区 → 次区 → 队列」之间轮换焦点，聚焦面板的边框高亮。**数字键有固定目标**：`1` 首页、`2` 搜索、`3` 歌单、`4` 歌手、`5` 排行榜、`6` 云端、`7` 队列、`8` 音源、`9` 设置、`0` 可视化。侧边栏按「正在播放 / 发现 / 我的 / 设置」分组，**顺序与数字键不同**（更便于扫视），所以每行都标了自己的键；侧边栏内 `↑` `↓` 按显示顺序移动。
 
-**Number keys have fixed targets**: `1` home, `2` search, `3` playlists, `4` artists, `5` rankings, `6` cloud, `7` queue, `8` sources, `9` settings, `0` visualizer. The sidebar groups items as "Now Playing / Discover / Mine / Settings", **in a different order from the number keys** (a more scannable order), so each row is labeled with its key; inside the sidebar, `↑` `↓` follow the display order.
+导航下方是两块状态：**连接**（接口地址、音源、登录、设备指纹、会员）与**缓存**（已用、上限、清空入口）。模式与音量已经出现在播放栏和队列标题里，不重复。终端过矮时整块收缩成一行紧凑状态（如 `● 接口内嵌 · 酷狗`），而不是被静默裁掉。
 
-Below the navigation are two status blocks: **connection** (API address, source, login, fingerprint, membership) and **cache** (used, limit, clear entry). Mode and volume already appear in the playback bar and queue title, so they are not repeated. On short terminals these collapse: the whole block yields to a single condensed status line (e.g. `● embedded · kugou`) rather than being silently clipped.
+**播放栏**只有 4 行：曲目信息 + 进度条，左侧图标与颜色表示播放状态，右侧是下一首 / 音量 / 循环模式。它刻意**不放封面**（8×4 字符的专辑图只是一团模糊）；封面只出现在**首页**左栏，那里有空间。
 
-The **playback bar** is only 4 rows: track info + progress bar, with the leading icon and color showing playback state and the right side showing next / volume / loop mode. It deliberately has **no cover art** (an 8×4-cell album image is just a blur); the cover appears only in the **home** left column, where there is room.
+**首页**左栏是「封面 + 我的资料」。封面如何填满区域由 `cover_fill` 决定（终端封面区几乎不可能是正方形，而专辑图通常是）——见 [CONFIGURATION.md](CONFIGURATION.md#封面填充cover_fill)。资料来自 `/user/detail`：昵称、头像、等级、累计听歌时长（刻意不含粉丝数与徽章，否则就成了数据表）。头像格在支持 kitty / iTerm2 / sixel 的终端上画真实头像，在只有半块字符的终端上画**昵称首字**（半块模式下那格只有 24×12 个「像素」，放照片就是噪点）。三种「没有资料」状态分别显示：未登录、加载中、失败原因 + 「点击重试」。**图标**优先用 Nerd Font，启动时用 `fc-list` 探测一次；没有就回退到 ASCII 符号，而不是显示满屏豆腐块。
 
-The **home** left column is "cover + my profile". How the cover fills its area is set by `cover_fill` (the terminal cover area is almost never square, while album art usually is) — see [CONFIGURATION.md](CONFIGURATION.md#cover-fill-cover_fill). Profile data comes from `/user/detail`: nickname, avatar, level, cumulative listening time (deliberately excluding follower counts and badges, which would turn it into a data table). The avatar cell draws a real avatar on terminals supporting kitty / iTerm2 / sixel, and the **nickname's first character** on terminals limited to half-block characters (in half-block mode that cell is only 24×12 "pixels"; a photo would be noise). The three "no profile" states are shown distinctly: not logged in, loading, and failure reason + "click to retry".
+### 每日领取概念版 VIP
 
-**Fonts**: icons prefer Nerd Font, probed once at startup with `fc-list`; without it the program falls back to ASCII symbols instead of showing a screen of tofu.
+概念版内置「每天领一天 VIP」的机制，这里把它自动化：**登录成功后**、**切到概念版时**、**启动时**各尝试一次，每天一次（日期记录在会话文件里）。领取还会升级成「畅听 VIP」——只领一天收益有限。
 
-### Daily concept-edition VIP
-
-The concept edition has a built-in "claim one day of VIP per day" mechanism, made automatic here: attempted **after a successful login**, **on switching to the concept edition**, and **at startup**, once per day (the date is recorded in the session file). Claiming also upgrades to "unlimited-listening VIP" — one day alone has limited benefits.
-
-When the active source is the concept edition, an extra status line appears in "My Profile":
+当前音源是概念版时，「我的资料」里会多一行状态；按 `V` 或**点这一行**领取：
 
 ```
-│ Concept SVIP · until 09-24 │
-│ Claim today's VIP · press V │     # claiming… / today's VIP already claimed
+│ 概念版 SVIP · 至 09-24 │
+│ 领取今日 VIP · 按 V │     # 领取中… / 今日 VIP 已领取
 ```
 
-Press `V` or **click this row** to claim. Under the standard edition this row is not shown (it is a concept-edition-only interface; a dead entry point is worse than none), and pressing `V` prompts you to press `v` to switch first.
+标准版下不显示这一行（它是概念版专属接口，摆一个按不动的入口比没有更糟），此时按 `V` 会提示先按 `v` 切换。该接口有频率限制，连续失败时提示会告知去手机端领取；官方文档也警告不要频繁调用，所以这里严格按天去重。
 
-> The interface is rate-limited; on repeated failures the prompt tells you to claim on mobile. The official docs also warn against frequent calls, so this is strictly de-duplicated per day.
+### 音源（酷狗 / 酷狗概念版）
 
-### Sources (Kugou / Kugou concept edition)
+按 **`v`** 在**已启用**的音源之间循环（顺序取音源管理页设的优先级）；选择写入配置文件。切换**不打断当前播放**——只换请求地址与身份，播放队列与当前曲目都不动。`--print-config` 会告诉你它需要的服务端配置（如 `当前音源  : 酷狗概念版（服务端需 platform=lite）`）。两个音源的**登录态与设备标识互相独立**（酷狗两个平台的 token 不通用）；在音源 A 扫的码不会带到 B。切过去如果没登录，界面会提示按 `L` 重新扫码。
 
-Press **`v`** to cycle through **enabled** sources (in the priority order set on the source management page); the choice is written to the config file. Switching **does not interrupt current playback** — it only changes the request address and identity; the playback queue and current track are untouched. `--print-config` tells you the server-side config it needs (e.g. `active source : Kugou concept edition (server needs platform=lite)`).
+> 「概念版」不是皮肤，而是另一套会员与鉴权体系。会员属于平台，所以必须用该平台的实例，并**在该平台登录**，否则会降级成试听。
+>
+> 汽水的扫码走 libresoda 内置的 CDP 签名页；按 `L` 后选择它即可——见「汽水音乐音源」一节。
 
-The two sources have **independent login state and device identifiers** (the tokens for the two Kugou platforms are not interchangeable); a QR code scanned on source A does not carry over to B. If the switched-to source is not logged in, the UI prompts you to press `L` to scan again.
+### 网易云音源
 
-> The "concept edition" is not a skin but a separate membership and authentication system. A membership belongs to a platform, so you must use that platform's instance and **log in on that platform**, otherwise it degrades to preview.
-
-> Soda's QR scan uses the CDP signer page built into libresoda; press `L` and select it — see the "Soda Music source" section.
-
-### Netease source
-
-Netease goes through **NeteaseCloudMusicApi**, a separate service from Kugou's KuGouMusicApi. The program only knows the single `api_base` address and **is not bound to a specific implementation** — the original Binaryify one, api-enhanced, or any interface-compatible fork works:
+网易云走 **NeteaseCloudMusicApi**，与酷狗的 KuGouMusicApi 是两个独立服务。程序只认 `api_base` 这一个地址，**不绑定具体实现**——原版 Binaryify、api-enhanced，或任何接口兼容的 fork 都能用：
 
 ```bash
-# Or do it in one step: ./scripts/kugou-api-install netease
+# 也可以一步到位：./scripts/kugou-api-install netease
 git clone --depth 1 https://github.com/neteasecloudmusicapienhanced/api-enhanced.git NeteaseCloudMusicApi
 cd NeteaseCloudMusicApi && npm install
-env PORT=3002 node app.js          # ⚠️ only reads the PORT env var, not --port=
+env PORT=3002 node app.js          # 只读 PORT 环境变量，不认 --port=
 ```
 
 ```toml
@@ -93,198 +84,173 @@ enabled = true
 api_base = "http://127.0.0.1:3002"
 ```
 
-**You must then scan the QR code with `L`** — without login, cloud interfaces return "login required". After a successful scan the server issues a cookie (containing `MUSIC_U`), which the client writes to `[sources.netease].cookie` and sends automatically on later startups.
+**之后必须用 `L` 扫码**——不登录时云端接口返回「需要登录」。扫码成功后服务端下发 cookie（含 `MUSIC_U`），客户端写入 `[sources.netease].cookie`，之后启动自动带上。
 
-> ⚠️ The server issues a **whole `Set-Cookie`** (with `Max-Age` / `Expires` / `Path`, multiple cookies joined by `;;`), but reads it back recognizing **only the "semicolon + space" separator** — echoing it verbatim folds `MUSIC_U` into the preceding attribute segment, and the UI says "login successful" while cloud playlists forever report "not logged in". The client normalizes it to `k=v; k=v` before storing; **when filling the cookie in by hand, use the same format** — do not paste a whole `Set-Cookie`.
+> 服务端下发的是**整条 `Set-Cookie`**（带 `Max-Age` / `Expires` / `Path`，多个 cookie 用 `;;` 连接），但回读时**只认「分号 + 空格」分隔**——原样回填会把 `MUSIC_U` 折进前一个属性段，界面显示「登录成功」而云端歌单永远报「未登录」。客户端会先归一化成 `k=v; k=v` 再存；**手填 cookie 时也用这个格式**，不要粘整条 `Set-Cookie`。
+>
+> **不要**在短时间内反复按 `L` 取新二维码——网易云会判定「频繁登录」，导致手机端完全扫不了。程序默认每次 `L` 都申请新会话，并拦截 30 秒内的重复按键，提示剩余等待时间。
 
-> **Do not** press `L` repeatedly on mobile within a short time to fetch new QR codes — Netease flags "frequent login" and the mobile app cannot scan at all. The program requests a new session on each `L` by default, and blocks presses within 30 seconds with a remaining-wait prompt.
-
-Stream resolution is not login-gated: you can search and play without login, only VIP-exclusive tracks are unavailable. Write operations use the song id (not Kugou playlist entries' `fileid`), so you can favorite directly from search results.
-
-Config is stored per source:
+取流不受登录限制：不登录也能搜索和播放，只有 VIP 专属曲目不可用。写操作使用歌曲 id（不是酷狗歌单条目的 `fileid`），所以可以直接从搜索结果收藏。配置按音源分开存：
 
 ```toml
 [sources]
-active = "kugou"              # or "kugou_concept" / "netease"
+active = "kugou"              # 或 "kugou_concept" / "netease"
 
 [sources.kugou]
 api_base = "http://127.0.0.1:3000"
-cookie = "…"                  # this source's own login state
-device_id = "…"               # this source's own dfid
+cookie = "…"                  # 该音源自己的登录态
+device_id = "…"               # 该音源自己的 dfid
 
 [sources.kugou_concept]
 api_base = "http://127.0.0.1:3001"
 ```
 
-### Soda Music source
+### 汽水音乐音源
 
-Soda (Soda Music) data is provided by **libresoda** — the same library used by the official SodaM client ([sodahub-org/sodam](https://github.com/sodahub-org/sodam)). Login, stream resolution, decryption, playlists, artists, albums, and lyrics are all delegated to it, so behavior matches the official client and upstream fixes carry over.
+汽水（Soda Music）的数据由 **libresoda** 提供——与官方 SodaM 客户端 ([sodahub-org/sodam](https://github.com/sodahub-org/sodam)) 用的是同一个库。登录、取流、解密、歌单、歌手、专辑、歌词全部交给它，因此行为与官方客户端一致，上游的修复也能直接受益。
 
-Two fundamental differences from the other three sources, up front:
+与其他三个音源有两个根本区别：**直连公网**（`api.qishui.com`），本机不跑任何服务，首次使用既不需要 `--api-start` 也不需要 Node.js；**下发的音频是加密的**（MP4/CENC，密钥在取流接口的 `play_auth` 里），取流必须「整曲下载 → 解密 → 落盘」之后才能交给播放器，所以汽水曲目**不能边下边播**，首次播放要等完整下载一次。后者是加密方案决定的，不是实现上的偷懒。
 
-1. **Connects to the public internet** (`api.qishui.com`); no local service runs. First use needs neither `--api-start` nor Node.js.
-2. **The delivered audio is encrypted** (MP4/CENC, key in the stream interface's `play_auth`). Resolving a stream requires "download the whole track → decrypt → write to disk" before handing it to the player, so Soda tracks **cannot be played while downloading**; first play waits for one full download. This is dictated by the encryption scheme, not an implementation shortcut.
-
-#### Minimal config: works with nothing set
+#### 最小配置：什么都不设也能用
 
 ```toml
 [sources.sodam]
 enabled = true
 ```
 
-Search, per-character lyrics, cover art, and full-track playback of free tracks work anonymously (search goes through an unsigned Android gateway).
+搜索、逐字歌词、封面、免费曲目的整曲播放都能匿名使用（搜索走未签名的 Android 网关）。
 
-#### VIP full tracks and lossless: via the signing service
+#### VIP 完整曲目与无损：靠签名服务
 
-Soda's stream resolution has two layers; measured behavior is:
+汽水的取流分两层，实测行为是：
 
-| Layer | Endpoint | What you get |
+| 层 | 端点 | 拿到什么 |
 | --- | --- | --- |
-| Web / share page | `GET /luna/pc/track_v2` (`device_platform=web`), `/luna/h5/seo_track` | **Only 30 / 60 s preview** |
-| App | `POST /luna/pc/track_v2` (with an app-level signature) | **Full track**; without a signature it returns **HTTP 200 + empty body** |
+| Web / 分享页 | `GET /luna/pc/track_v2`（`device_platform=web`）、`/luna/h5/seo_track` | **只有 30 / 60 秒试听** |
+| App | `POST /luna/pc/track_v2`（带应用级签名） | **整曲**；不带签名则返回 **HTTP 200 + 空 body** |
 
-So the root cause of "VIP tracks only play 30 seconds" is **not** that membership failed but that the app-level signature is missing. That empty response is especially counterintuitive — HTTP 200 with nothing in it.
+所以「VIP 曲目只放 30 秒」的根因**不是**会员失效，而是缺应用级签名。那个空响应尤其反直觉——HTTP 200 里什么都没有。
 
-**A public signing service is configured by default** (taken from upstream SodaM's built-in default), so full tracks work out of the box with no packet capture or self-hosting:
+**默认已配置一个公共签名服务**（取自上游 SodaM 的内置默认），整曲开箱即用，无需抓包或自建：
 
 ```toml
 [sources.sodam_app]
-# Empty = use the upstream public signing service (default)
-# signer_url = "http://your-server:8899/sign"   # switch to your own
-# signer_url = "none"                          # disable explicitly; preview / free tracks only
+# 留空 = 用上游的公共签名服务（默认）
+# signer_url = "http://your-server:8899/sign"   # 换成自建的
+# signer_url = "none"                          # 显式关闭；只剩试听 / 免费曲目
 ```
 
-> ⚠️ The public signing service is a **shared third-party service**: it may rate-limit, may be temporarily unavailable, and its token may rotate. For long-term use, self-host (see below).
+> 公共签名服务是**第三方共享服务**：可能限流、可能临时不可用、token 也可能轮换。长期使用建议自建（见下）。
 
-Self-hosting the signing service ([libmssdk](https://github.com/sodahub-org/libmssdk) or libresoda's `tools/qishui-signer-host/signer-service.mjs`):
+自建签名服务（[libmssdk](https://github.com/sodahub-org/libmssdk)，或 libresoda 的 `tools/qishui-signer-host/signer-service.mjs`）：
 
 ```toml
 [sources.sodam_app]
 signer_url = "http://127.0.0.1:8899/sign"
-signer_token = "fill this in if your service enables auth"
+signer_token = "自建服务启用了鉴权就填这里"
 ```
 
-Environment variables work too (same names as upstream, so one set can be shared): `QISHUI_SIGNER_URL` / `QISHUI_SIGNER_TOKEN`.
+环境变量也行（与上游同名，一套配置可以共用）：`QISHUI_SIGNER_URL` / `QISHUI_SIGNER_TOKEN`。
 
-#### QR login
+#### 扫码登录
 
-Press **`L`** and select Soda to scan. It uses the **CDP signer page** built into libresoda — it drives your local Chromium directly, **no Node needed**:
+按 **`L`** 并选择汽水即可扫码。它用 libresoda 内置的 **CDP 签名页**——直接驱动本机 Chromium，**不需要 Node**：
 
-* Prerequisite: Chrome / Chromium / Edge on the machine. Without one it fails explicitly at this step, without affecting search and playback.
-* `QISHUI_CHROMIUM_PATH` sets the browser path.
-* Each QR code gets its own browser context (the passport service rate-limits by device identity; sharing one gets blocked all the way).
-* If a **second verification** (slider / SMS) is required, complete it in the browser window as prompted.
+* 前提：机器上有 Chrome / Chromium / Edge。没有会在这一步明确失败，不影响搜索与播放。
+* `QISHUI_CHROMIUM_PATH` 指定浏览器路径。
+* 每个二维码用独立的浏览器上下文（passport 服务按设备身份限流；共用一个会被一路拦）。
+* 如果需要**二次验证**（滑块 / 短信），按提示在浏览器窗口里完成。
 
-On success you get a **session cookie**, which the program writes to `[sources.sodam].cookie` and sends on later startups.
-
-You can also skip the scan entirely and fill it in by hand:
+成功后拿到 **session cookie**，程序写入 `[sources.sodam].cookie`，之后启动自动带上。也可以完全跳过扫码，手填：
 
 ```toml
 [sources.sodam]
 cookie = "sessionid_ss=…; sessionid=…"
 ```
 
-**The device fingerprint can be left empty.** When going through the signing service, the signer has its own device identity; only the manual packet-capture path needs `device_id` / `iid` / `fp` (and they must match the signer).
+**设备指纹可以留空。** 走签名服务时签名侧有自己的设备身份；只有手工抓包路径需要 `device_id` / `iid` / `fp`（且必须与签名侧一致）。
 
-#### Quality and downgrade
+#### 音质与降级
 
-- Soda's quality tiers are decided by the **platform side**; the program picks by "completeness first, then quality": if you ask for lossless but only a 128k **full track** is available, it picks the full track and states "actual quality standard" in the status bar — it will not show flac in the UI while playing 128k with no way to find out why.
-- Preview-only tracks also play, but with an explicit "preview clip only" prompt and whether it is due to membership.
-- Quality mapping: `flac` → lossless, `super` → highest, `320` → 320k, `128` → 128k; Kugou's `viper_*` tiers have no Soda equivalent and are treated as "unrestricted".
+- 汽水的音质档位由**平台侧**决定；程序按「先保证完整、再谈音质」挑选：如果你要无损但只有 128k 的**整曲**，它会选整曲，并在状态栏写明实际音质——不会界面标着 flac、实际放 128k 却让人无从查起。
+- 只有试听的曲目也会播放，但会明确提示「只有试听片段」以及是否因会员导致。
+- 音质映射：`flac` → 无损，`super` → 最高，`320` → 320k，`128` → 128k；酷狗的 `viper_*` 档在汽水没有对应物，按「无限制」处理。
 
-#### Current capability status
+#### 当前能力状态
 
-| Capability | Status | Notes |
+| 能力 | 状态 | 说明 |
 | --- | --- | --- |
-| Search | ✅ | Through the unsigned gateway; works without login |
-| Playback (incl. full track / lossless) | ✅ | Needs the signing service (configured by default) |
-| Per-character lyrics / cover art | ✅ | |
-| QR login | ✅ | Built-in CDP signer page; needs local Chromium |
-| **Cloud playlists (my playlists)** | ✅ | Requires login; via `/luna/pc/me/playlist` |
-| **Playlist detail / tracks** | ✅ | Both own and public playlists open and play |
-| **User profile / membership status** | ✅ | Official `/luna/pc/me` gives `is_vip` directly |
-| Playlist plaza (recommended / categories) | ❌ | The reference implementation has no such endpoints, only playlist search |
-| Artist list (hot artists) | ❌ | Only lookup by id for detail and tracks; no "hot artists" endpoint |
-| Rankings | ❌ | No equivalent chart endpoint |
+| 搜索 | 可用 | 走未签名网关；不登录也能用 |
+| 播放（含整曲 / 无损） | 可用 | 需要签名服务（默认已配置） |
+| 逐字歌词 / 封面 | 可用 | |
+| 扫码登录 | 可用 | 内置 CDP 签名页；需要本机 Chromium |
+| **云端歌单（我的歌单）** | 可用 | 需要登录；走 `/luna/pc/me/playlist` |
+| **歌单详情 / 曲目** | 可用 | 自己的与公开的歌单都能打开并播放 |
+| **用户资料 / 会员状态** | 可用 | 官方 `/luna/pc/me` 直接给 `is_vip` |
+| 歌单广场（推荐 / 分类） | 不可用 | 参考实现没有这类端点，只有歌单搜索 |
+| 歌手列表（热门歌手） | 不可用 | 只能按 id 查详情与曲目；没有「热门歌手」端点 |
+| 排行榜 | 不可用 | 没有对应的榜单端点 |
 
-The three ❌ are **conclusions from reading the libresoda code**, not omissions: its `get_recommended_playlists` / `get_playlist_categories` return `Unsupported` directly, and there are no entries for artists and charts. The UI explains this clearly in these three places rather than showing a blank screen that looks like a network problem.
+三个「不可用」是**读 libresoda 代码得出的结论**，不是遗漏：它的 `get_recommended_playlists` / `get_playlist_categories` 直接返回 `Unsupported`，歌手与榜单也没有对应入口。界面在这三处明确说明，而不是留一片空白让人以为是网络问题。
 
-**If you previously saw "this source only supports search and playback (playlists / charts / cloud playlists unavailable)" when switching sources — that message is out of date**; playlists and cloud playlists both work now.
+**如果你之前切音源时看到过「该音源仅支持搜索与播放（歌单 / 榜单 / 云端歌单不可用）」——那条提示已经过时**；歌单与云端歌单现在都能用。
 
-#### The signing service decides which features work
+#### 哪些功能可用由签名服务决定
 
-One thing must be clear: cloud playlists, playlist detail, user profile, and membership status all go through the `/luna/pc/` family and **all need the app signature**. So:
+上表里的「可用」都以签名服务可用为前提。云端歌单、歌单详情、用户资料、会员状态都走 `/luna/pc/` 这一族，**都需要应用签名**，所以把 `signer_url` 设为 `none`、或公共签名服务临时不可用时，这些功能会一起失败（空响应）——不是账号或网络问题。排查时先看 `--print-config` 的「签名服务」一行。
 
-- When the default public signing service is available, all the ✅ in the table above work;
-- If you set `signer_url` to `none`, or the public signing service is temporarily unavailable, these features fail together (empty responses) — not an account or network problem.
+#### 缓存与解密中间产物
 
-When troubleshooting, first check the "signing service" line of `--print-config`.
+解密后的音频放在音频缓存目录的 `sodam/` 子目录下，不计入缓存上限（它由曲目 id + 音质档位推导，删掉下次播放会重新生成）。
 
-#### Cache and decryption intermediates
+### 播放队列
 
-Decrypted audio goes in the `sodam/` subdirectory of the audio cache directory and does not count toward the cache size limit (it is derived from track id + quality tier and regenerated on next play if deleted).
+- **顺序**：歌单与搜索结果默认**降序**（最后一首在最上面）；按 `o` 切回升序。底层数据是反转的，所以界面顺序与播放顺序始终一致。
+- **批量加入**：`A` 把当前列表追加进队列（一次几百首）。
+- **清空**：`X` 先确认；`Enter` 确认后**停止播放**并清空。只删一首用 `x`，不打断当前播放。
 
-### Playback queue
+### 登录与云端歌单
 
-- **Order**: playlists and search results default to **descending** (the last track on top); press `o` to switch back to ascending. The underlying data is reversed, so the UI order and playback order always agree.
-- **Bulk add**: `A` appends the current list to the queue (hundreds of tracks in one action).
-- **Clear**: `X` shows a confirmation first; `Enter` confirms, **stops playback**, and clears. To delete just one, use `x`, which does not interrupt current playback.
+按 `L` 显示二维码，用酷狗 App 扫。成功后凭据写入配置文件，**界面只会告诉你存到了哪里，绝不回显 cookie 内容**（它等同于账号密码）。也可以手动传入：`--cookie 'token=xxx; userid=xxx'`。退出登录就删掉配置文件里的 `cookie` 行。未登录时浏览与播放都正常，搜索返回 `error_code: 152`；云端歌单的写操作（收藏 / 同步 / 移除 / 删除 / 新建）都需要登录。
 
-### Login and cloud playlists
-
-Press `L` to show a QR code and scan it with the Kugou app. On success the credentials are written to the config file, and **the UI only tells you where they were saved, never echoing the cookie content** (it is equivalent to an account password). You can also pass it manually: `--cookie 'token=xxx; userid=xxx'`. To log out, delete the `cookie` line from the config file.
-
-- When not logged in: browsing and playback all work; search returns `error_code: 152`.
-- Cloud-playlist writes (favorite / sync / remove / delete / create) all require login.
-
-**Two write-operation limits** (both inherent to the interfaces):
-
-- `d` (remove from playlist) uses the playlist entry's `fileid`, which only exists for tracks loaded from the playlist interface — so `d` only works on tracks inside a playlist.
-- **Rename is not implemented**: `/playlist/update` additionally requires `total_ver` (the playlist version number), which the existing playlist-list interface does not return.
+**两个写操作限制**（都是接口本身的限制）：`d`（从歌单移除）用的是歌单条目的 `fileid`，只有从歌单接口加载的曲目才有，所以 `d` 只对歌单内的曲目有效；**重命名未实现**，因为 `/playlist/update` 还要求 `total_ver`（歌单版本号），而现有的歌单列表接口不返回它。
 
 ---
 
-## Desktop integration (MPRIS and system tray)
+## 桌面集成（MPRIS 与系统托盘）
 
-> **Linux desktops only.** Both are D-Bus interfaces: Windows has no session bus, so the related code is not compiled (`--print-config` shows `system tray : unavailable`); on macOS the code compiles, but there is no session bus by default, so it logs one WARN at startup and skips. All other features are identical across the three platforms.
+> **仅 Linux 桌面。** 两者都是 D-Bus 接口：Windows 没有会话总线，相关代码不会编译（`--print-config` 显示「系统托盘 : 不可用」）；macOS 上代码能编译，但默认没有会话总线，启动时记一条 WARN 后跳过。其余功能三平台完全一致。
 >
-> "Minimize / show window" likewise only appears under niri, with its entry in the **tray menu**; to bind it to a key, see [CONFIGURATION.md's custom keybindings](CONFIGURATION.md#custom-keybindings).
+> 「最小化 / 显示窗口」同样只在 niri 下出现，入口在**托盘菜单**里；想绑到按键上，见 [CONFIGURATION.md 的自定义快捷键](CONFIGURATION.md#自定义快捷键)。
 
-At startup it registers `org.mpris.MediaPlayer2.kugou-tui` with the session bus; once registered, the desktop environment **automatically** recognizes it with no configuration:
+启动时会向会话总线注册 `org.mpris.MediaPlayer2.kugou-tui`；注册成功后桌面环境**自动**识别，无需任何配置：
 
 ```bash
-playerctl -l                          # should list kugou-tui
+playerctl -l                          # 应该列出 kugou-tui
 playerctl -p kugou-tui status         # Playing / Paused / Stopped
-playerctl -p kugou-tui metadata       # title, artist, album, cover URL, duration
+playerctl -p kugou-tui metadata       # 标题、歌手、专辑、封面 URL、时长
 playerctl -p kugou-tui play-pause
-playerctl -p kugou-tui position 90    # drag the progress bar (via SetPosition)
+playerctl -p kugou-tui position 90    # 拖进度条（走 SetPosition）
 ```
 
-On desktops like Hyprland / DankMaterialShell, the status bar's media controls, notification center, and lock screen show the track and cover directly (`dms ipc call mpris list` confirms whether DMS sees it).
+在 Hyprland / DankMaterialShell 这类桌面上，状态栏媒体控制、通知中心、锁屏会直接显示曲目与封面（用 `dms ipc call mpris list` 确认 DMS 是否看到它）。同时存在多个播放器时（例如浏览器在放视频），会各自打分后只显示一个；看不到 kugou-tui 就先把其他播放器暂停。
 
-> When multiple players are present (e.g. a browser playing video), each is scored and one is shown. If you do not see kugou-tui, pause the other players first.
+### 系统托盘
 
-### System tray
+启动时还会注册 `org.kde.StatusNotifierItem`，状态栏（Quickshell / waybar / KDE 等）会显示一个音符图标：
 
-At startup it also registers an `org.kde.StatusNotifierItem`, and the status bar (Quickshell / waybar / KDE, etc.) shows a music-note icon:
+- **滚轮** → 垂直调音量，水平快进 / 快退
+- **右键** → 菜单：播放 / 暂停（文案随状态变）、上一首、下一首、静音 / 取消静音、最小化 / 显示窗口（仅 niri）、退出
+- **中键**（KDE）或部分宿主的右键 → 播放 / 暂停
+- **悬停** → 当前曲目；**图标**在播放 / 加载时亮，暂停 / 停止时变暗
+- 状态在播放时为 `Active`，暂停时为 `Passive`
 
-- **Wheel** → vertical adjusts volume, horizontal seeks forward / backward
-- **Right-click** → menu: play / pause (worded to match state), previous, next, mute / unmute, minimize / show window (niri only), quit
-- **Middle-click** (KDE) or right-click on some hosts → play / pause
-- **Hover** → current track; the **icon** is bright while playing / loading and dims while paused / stopped
-- State is `Active` while playing and `Passive` while paused
+菜单用 `com.canonical.dbusmenu`。**能不能弹出取决于状态栏有没有实现它**——Quickshell 的 end4 配置只在「有菜单」时响应右键，caelestia 配置则只接了左键；遇到后一种情况就用 MPRIS 控制（状态栏媒体控制、`playerctl`），功能等价。
 
-The menu uses `com.canonical.dbusmenu`. **Whether it pops up depends on whether the status bar implements it** — Quickshell's end4 config responds to right-click only when "there is a menu", while the caelestia config only wires up left-click. In the latter case, use the MPRIS controls (the status bar's media controls, `playerctl`), which are functionally identical.
+图标内嵌在程序里（源文件 `assets/tray.svg`），不依赖系统图标主题。没有图形会话（纯 tty、未转发的 SSH）或没有会话总线时自动跳过，各记一行日志。**状态栏比播放器晚启动也没关系**：托盘线程每 5 秒重查一次 watcher 的注册列表，面板起来后会自动重新注册，不需要重启 kugou-tui。想跳过托盘，加 `--no-tray` 或设 `tray = false`——**重启后生效**。
 
-The icon is embedded in the program (source `assets/tray.svg`) and does not depend on the system icon theme. With no graphical session (pure tty, SSH without forwarding) or no session bus, it skips automatically with one log line each. **It is fine if the status bar starts after the player**: the tray thread rechecks the watcher's registration list every 5 seconds and re-registers automatically once the panel comes up, with no need to restart kugou-tui.
+#### 最小化（niri）
 
-To skip the tray, add `--no-tray` or set `tray = false` — **takes effect on restart**.
+「最小化 / 显示窗口」把 TUI 从平铺布局里收起来，同时**音乐继续播放**，再点一次恢复。收起后键盘够不到它，托盘菜单与 MPRIS 是唯一的控制入口。
 
-#### Minimize (niri)
-
-"Minimize / show window" collapses the TUI out of the tiling layout while **music keeps playing**, and clicking again restores it. Once collapsed, the keyboard can no longer reach it, so the tray menu and MPRIS are the only controls.
-
-A terminal program cannot minimize its own window (Wayland's xdg-shell has no such request), so this goes through niri's `toggle-window-minimized`. The program finds its own window by the **terminal title** (set to `kugou-tui` at startup, because the window `pid` niri reports is the terminal emulator's and will not match). Therefore:
-
-- It is offered only when `NIRI_SOCKET` is detected; if you are not on niri, the menu does not have it
-- Changing the terminal title another way (e.g. some shells' title templates) breaks this, and the log records "no window titled kugou-tui in the window list"
+终端程序无法最小化自己的窗口（Wayland 的 xdg-shell 没有这个请求），所以走 niri 的 `toggle-window-minimized`。程序靠**终端标题**找自己的窗口（启动时设为 `kugou-tui`，因为 niri 报告的窗口 `pid` 是终端模拟器的，对不上）。因此它只在探测到 `NIRI_SOCKET` 时提供，不在 niri 下菜单里就没有这一项；用其他方式改终端标题（例如某些 shell 的标题模板）会破坏它，日志会记「niri 窗口列表里没有标题含 kugou-tui 的窗口」。

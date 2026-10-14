@@ -1,7 +1,12 @@
 // 生成 PKCS1 v1.5 的 KAT：把 forge 的随机源换成固定填充，使其可复现。
 // 同时提取公钥的 n / e 十六进制，供 Rust 侧硬编码。
-// 上游 KuGouMusicApi 的 clone 路径；默认按开发机布局，可用 KUGOU_UPSTREAM 覆盖。
-const path = process.env.KUGOU_UPSTREAM || '/home/xibie/KuGouMusicApi';
+// 上游 KuGouMusicApi 的 clone 路径，必须由 KUGOU_UPSTREAM 指定。
+const path = process.env.KUGOU_UPSTREAM;
+if (!path) {
+  console.error('KUGOU_UPSTREAM 未设置：请指向 KuGouMusicApi 的 clone 路径，例如\n' +
+    '  KUGOU_UPSTREAM=/path/to/KuGouMusicApi node tools/kat/kat_rsa.js');
+  process.exit(1);
+}
 const forge = require(path + '/node_modules/node-forge');
 
 const { cryptoRSAEncrypt, publicRasKey, publicLiteRasKey, rsaEncrypt2 } = require(path + '/util/crypto.js');

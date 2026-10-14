@@ -61,7 +61,7 @@ set -euo pipefail
 #   setsid        util-linux，macOS 没有
 #   declare -A    需要 bash 4；macOS 自带的 /bin/bash 是 3.2
 #
-# 仓库里的三个 bash 脚本各自独立分发（AUR 装进 /usr/bin、发行包放进 scripts/、
+# 仓库里的三个 bash 脚本各自独立分发（发行包放进 scripts/、
 # 也有人单独软链到 ~/.local/bin），所以**不做成共享库**：任何一份都得能单独跑起来。
 # 代价是这段在每个脚本里重复一遍，改的时候三处一起改。
 # ==================================================================

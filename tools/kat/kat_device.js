@@ -1,7 +1,12 @@
 // 注入固定 Math.random，生成 guid / randomString 的 KAT。
 // 上游 getGuid / randomString 都只依赖 Math.random，替换掉即可复现。
-// 上游 KuGouMusicApi 的 clone 路径；默认按开发机布局，可用 KUGOU_UPSTREAM 覆盖。
-const path = process.env.KUGOU_UPSTREAM || '/home/xibie/KuGouMusicApi';
+// 上游 KuGouMusicApi 的 clone 路径，必须由 KUGOU_UPSTREAM 指定。
+const path = process.env.KUGOU_UPSTREAM;
+if (!path) {
+  console.error('KUGOU_UPSTREAM 未设置：请指向 KuGouMusicApi 的 clone 路径，例如\n' +
+    '  KUGOU_UPSTREAM=/path/to/KuGouMusicApi node tools/kat/kat_device.js');
+  process.exit(1);
+}
 
 // 固定序列：0, 0.1, 0.2, ... 循环；另生成一组包含 0 与 0.999... 的边界序列
 function withFixedRandom(sequence, fn) {

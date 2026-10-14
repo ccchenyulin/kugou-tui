@@ -1,286 +1,241 @@
-# Configuration
+# 配置
 
-## Command-line arguments
+## 命令行参数
 
-CLI > environment variables > config file > built-in defaults.
+优先级：CLI > 环境变量 > 配置文件 > 内置默认。
 
-| Flag | Environment variable | Description |
+| 参数 | 环境变量 | 说明 |
 |---|---|---|
-| `--api <node\|native>` | `KUGOU_API_BACKEND` | Which backend serves the Kugou API. Default `native` (embedded pure Rust, no Node.js required). See below |
-| `-a`, `--api-base <URL>` | `KUGOU_API_BASE` | KuGouMusicApi address, default `http://127.0.0.1:3000` (used only with `--api node`) |
-| `-c`, `--cookie <COOKIE>` | `KUGOU_COOKIE` | Login credentials, e.g. `token=xxx; userid=xxx` |
-| `-s`, `--search <KEYWORDS>` | — | Search for these keywords immediately on startup |
-| `--volume <0-100>` | — | Initial volume |
-| `--cache-dir <DIR>` | — | Audio cache directory |
-| `--cache-limit <MiB>` | — | Cache limit; `0` means unlimited |
-| `--tick-ms <MS>` | — | Refresh interval, 50–5000; larger values lower CPU further |
-| `--page-size <N>` | — | Items per page for search results and the playlist square, 5–200 |
-| `--proxy <URL>` | `KUGOU_PROXY` | HTTP proxy used to reach the API service |
-| `--sodam-cookie <COOKIE>` | `SODAM_COOKIE` | Sodam Music login state, e.g. `sessionid_ss=…; sessionid=…` |
-| `--sodam-device-id <ID>` | `SODAM_DEVICE_ID` | Sodam device fingerprint (**may be empty** when using the signer service) |
-| `--sodam-iid <ID>` | `SODAM_IID` | Sodam install id |
-| `--sodam-signer-url <URL>` | `QISHUI_SIGNER_URL` | App signer service URL; empty uses the built-in **public default**, `none` disables signing |
-| `--sodam-signer-token <TOKEN>` | `QISHUI_SIGNER_TOKEN` | Bearer token for the signer service (empty for the public address) |
-| `--sodam-x-helios <VALUE>` | `SODAM_X_HELIOS` | Static signature headers from manual capture (unused when using the signer service) |
-| `--sodam-x-medusa <VALUE>` | `SODAM_X_MEDUSA` | Same as above; used as a pair |
-| `--basic-color` | — | Fixed 16-color palette for older terminals |
-| `--no-tray` | — | Do not register a system tray icon (or set `tray = false` in the config to disable it permanently) |
-| `--no-api-start` | `KUGOU_API_AUTO_START=0` | Do not auto-start the local API service (you manage it yourself; errors out if nothing is listening on the port) |
-| `--api-start` | — | Prepare and start the local API service, then exit without entering the UI; services started this way **stay in the background** and are stopped with `--api-stop` |
-| `--api-stop` | — | Stop the local API service(s) started by this program |
-| `--print-config` | — | Print the effective config and the cache/log paths, then exit |
-
+| `--api <node\|native>` | `KUGOU_API_BACKEND` | 由哪个后端提供酷狗接口。默认 `native`（内嵌纯 Rust，不需要 Node.js），见下文 |
+| `-a`, `--api-base <URL>` | `KUGOU_API_BASE` | KuGouMusicApi 地址，默认 `http://127.0.0.1:3000`（仅在 `--api node` 下生效） |
+| `-c`, `--cookie <COOKIE>` | `KUGOU_COOKIE` | 登录凭据，如 `token=xxx; userid=xxx` |
+| `-s`, `--search <KEYWORDS>` | — | 启动后立即搜索这些关键词 |
+| `--volume <0-100>` | — | 初始音量 |
+| `--cache-dir <DIR>` | — | 音频缓存目录 |
+| `--cache-limit <MiB>` | — | 缓存上限，`0` 表示不限 |
+| `--tick-ms <MS>` | — | 刷新间隔，50–5000；值越大 CPU 占用越低 |
+| `--page-size <N>` | — | 搜索结果与歌单广场每页条数，5–200 |
+| `--proxy <URL>` | `KUGOU_PROXY` | 访问接口服务所用的 HTTP 代理 |
+| `--sodam-cookie <COOKIE>` | `SODAM_COOKIE` | 汽水音乐登录态，如 `sessionid_ss=…; sessionid=…` |
+| `--sodam-device-id <ID>` | `SODAM_DEVICE_ID` | 汽水设备指纹（使用签名服务时**可以为空**） |
+| `--sodam-iid <ID>` | `SODAM_IID` | 汽水安装 id |
+| `--sodam-signer-url <URL>` | `QISHUI_SIGNER_URL` | App 签名服务 URL；留空用内置**公共默认**，`none` 关闭签名 |
+| `--sodam-signer-token <TOKEN>` | `QISHUI_SIGNER_TOKEN` | 签名服务的 Bearer token（公共地址留空） |
+| `--sodam-x-helios <VALUE>` | `SODAM_X_HELIOS` | 手工抓包得到的静态签名头（使用签名服务时不生效） |
+| `--sodam-x-medusa <VALUE>` | `SODAM_X_MEDUSA` | 同上，成对使用 |
+| `--basic-color` | — | 老终端使用的固定 16 色配色 |
+| `--no-tray` | — | 不注册系统托盘图标（配置里写 `tray = false` 可永久关闭） |
+| `--no-ws` | — | 不开启内嵌 WebSocket 服务（配置里写 `ws = false` 可永久关闭） |
+| `--ws-port <PORT>` | — | WebSocket 监听端口，默认 6520；仍只绑 `127.0.0.1` |
+| `--no-api-start` | `KUGOU_API_AUTO_START=0` | 不自动拉起本地接口服务（由你自己管理；端口无人监听时报错退出） |
+| `--api-start` | — | 启动本地接口服务后退出，不进入界面；服务**留在后台**，用 `--api-stop` 停止 |
+| `--api-stop` | — | 停止由本程序启动的本地接口服务 |
+| `--print-config` | — | 打印生效配置以及缓存/日志路径后退出 |
 ```bash
-kugou-tui --print-config        # show the effective config and paths
-kugou-tui --tick-ms 1000        # power-saving: idle CPU near zero
-kugou-tui -s "海阔天空"          # search on startup (login required)
+kugou-tui --print-config        # 打印生效配置与路径
+kugou-tui --tick-ms 1000        # 省电：空闲 CPU 接近零
+kugou-tui -s "海阔天空"          # 启动即搜索（需要登录）
 ```
 
-### Environment variables with no CLI flag
+### 没有命令行开关的环境变量
 
-These are environment-only because they are either diagnostic switches or control where the config file lives — the latter cannot be written inside the config file.
-
-| Variable | Effect |
+| 变量 | 作用 |
 |---|---|
-| `KUGOU_TUI_CONFIG_DIR` | **Overrides the config root directory.** When set to a path, config is read/written at `<path>/config.toml` instead of `~/.config/kugou-tui`. Useful for portable installs; tests use it to isolate state to a temp directory. The cache directory is unaffected and can still be set separately with `--cache-dir` |
-| `KUGOU_TUI_NERD_FONT` | `1` forces icon rendering as if Nerd Font is installed, `0` forces ASCII as if not. Empty means auto-detect (queries `fc-list` on Linux; **Windows has no fontconfig, so auto-detect always assumes not installed**) |
-| `KUGOU_TUI_DEBUG` | `1` enables DEBUG-level logging (per-frame logs such as keys and position sync are off by default, otherwise they drown the log) |
-| `KUGOU_TUI_MEM_TRACE` | `1` writes RSS and the current track to the log every 5 seconds, for diagnosing memory growth during long listening |
-| `KUGOU_API_DIR` | Directory of the local KuGouMusicApi. When set, **no auto-search or download** happens; a wrong path errors out immediately |
-| `KUGOU_API_AUTO_START` | `0` / `false` / `no` / `off` disables auto-starting the API service |
-
+| `KUGOU_TUI_CONFIG_DIR` | **覆盖配置根目录。** 设为某路径后，配置读写于 `<path>/config.toml` 而非 `~/.config/kugou-tui`。适合便携安装；测试用它把状态隔离到临时目录。缓存目录不受影响，仍可用 `--cache-dir` 单独设置 |
+| `KUGOU_TUI_NERD_FONT` | `1` 强制按已装 Nerd Font 渲染图标，`0` 强制按未装渲染 ASCII。留空为自动探测（Linux 下查 `fc-list`；**Windows 没有 fontconfig，自动探测一律视为未安装**） |
+| `KUGOU_TUI_DEBUG` | `1` 打开 DEBUG 级日志（按键、进度同步这类逐帧日志默认关闭，否则会淹没日志） |
+| `KUGOU_TUI_MEM_TRACE` | `1` 每 5 秒把 RSS 和当前曲目写进日志，用于诊断长时间播放的内存增长 |
+| `KUGOU_API_DIR` | 本地 KuGouMusicApi 的目录。设置后**不再自动搜索或下载**；路径错误立即报错 |
+| `KUGOU_API_AUTO_START` | `0` / `false` / `no` / `off` 关闭接口服务的自动拉起 |
 ```powershell
-# Windows: portable directory + enable Nerd Font icons
+# Windows：便携目录 + 启用 Nerd Font 图标
 $env:KUGOU_TUI_CONFIG_DIR = "D:\apps\kugou-tui\config"
 $env:KUGOU_TUI_NERD_FONT  = "1"
 .\kugou-tui.exe
 ```
 
-## Config file
+## 配置文件
 
-Generated automatically on first run. On Linux/macOS it is `~/.config/kugou-tui/config.toml`; on Windows it is `%APPDATA%\kugou-tui\config.toml` (mode `0600` on Unix, since it may contain cookies). Cache and logs live in the cache directory: `~/.cache/kugou-tui/` on Linux, `%LOCALAPPDATA%\kugou-tui\` on Windows.
-
-If unsure which file is actually read, use `--print-config` (it prints the config, log, and cache paths together with the effective values).
-
+首次运行时自动生成。Linux/macOS 位于 `~/.config/kugou-tui/config.toml`，Windows 位于 `%APPDATA%\kugou-tui\config.toml`（Unix 下权限 `0600`，因为可能含 cookie）。缓存与日志在缓存目录：Linux 为 `~/.cache/kugou-tui/`，Windows 为 `%LOCALAPPDATA%\kugou-tui\`。不确定实际读的是哪个文件时用 `--print-config`。
 ```toml
-api_backend = "native"              # native (default, embedded) | node (fallback to local service)
-api_base = "http://127.0.0.1:3000"  # used only with --api node
-cookie = "token=xxx; userid=xxx"   # login state, can be set by hand
-dfid = "..."                        # device fingerprint, fetched automatically on first start
+api_backend = "native"              # native（默认，内嵌）| node（回退到本地服务）
+api_base = "http://127.0.0.1:3000"  # 仅在 --api node 下生效
+cookie = "token=xxx; userid=xxx"   # 登录态，可手写
+dfid = "..."                        # 设备指纹，首次启动自动获取
 volume = 0.7                        # 0.0–1.0
-audio_device = "..."                # output device name, empty = follow the system default
+audio_device = "..."                # 输出设备名，留空 = 跟随系统默认
 playback_mode = "sequential"        # sequential | repeat_all | repeat_one | shuffle
 cache_dir = "/home/you/.cache/kugou-tui"
-cache_limit_mib = 512               # 0 = unlimited
-lyric_offset_ms = 0                 # global lyric offset, positive = delay
-lyric_anim_ms = 200                 # max duration of line fade in/out, 0 = off
-tick_ms = 200                       # UI refresh interval (ms)
-page_size = 30                      # items per page for search results and the playlist square
-proxy = "http://127.0.0.1:7890"     # optional
+cache_limit_mib = 512               # 0 = 不限
+lyric_offset_ms = 0                 # 全局歌词偏移，正数 = 延后
+lyric_anim_ms = 200                 # 行淡入淡出最长时长，0 = 关闭
+tick_ms = 200                       # 界面刷新间隔（毫秒）
+page_size = 30                      # 搜索结果与歌单广场每页条数
+proxy = "http://127.0.0.1:7890"     # 可选
 quality = "128"
 basic_color = false
-theme = "default"                   # see "Themes" below
-download_dir = "~/Music"            # single-track downloads go here, may be empty
-qr_aspect = 2.0                     # terminal character height:width ratio, see below
-lite_mode = false                   # see below
-cover_fill = "crop"                 # how the home cover fills its box, see below
-tray = true                         # system tray, see below
-api_auto_start = true               # auto-start the service when it is not running, see below
-api_dir = ""                        # local KuGouMusicApi directory, empty = auto-detect
+theme = "default"                   # 见「其他设置」
+download_dir = "~/Music"            # 单曲下载目录，可为空
+qr_aspect = 2.0                     # 终端字符高宽比，见下文
+lite_mode = false                   # 见下文
+cover_fill = "crop"                 # 首页封面填充方式，见下文
+tray = true                         # 系统托盘，见下文
+ws = true                           # 内嵌 WebSocket 服务，只监听 127.0.0.1
+ws_port = 6520                      # WebSocket 端口（与 MoeKoeMusic 一致）
+api_auto_start = true               # 服务未运行时自动拉起，见下文
+api_dir = ""                        # 本地 KuGouMusicApi 目录，留空 = 自动探测
 
-# ---- Per-source connection and identity, plus the active one ----
-# The four sources are independent: login state and device identity **cannot be reused across sources**.
-# See the sources section of the user guide.
+# ---- 各音源的连接与身份，以及当前音源 ----
+# 四个音源相互独立：登录态与设备身份**不能跨音源复用**（见使用指南的音源章节）。
 [sources]
 active = "kugou"                   # kugou | kugou_concept | netease | sodam
-
 [sources.kugou]
 enabled = true
-api_base = "http://127.0.0.1:3000"  # local KuGouMusicApi (standard)
-cookie = "token=…; userid=…"        # this source's own login state
-device_id = "…"                      # this source's own dfid
-priority = 0                         # lower numbers come first
-
+api_base = "http://127.0.0.1:3000"  # 本地 KuGouMusicApi（标准版）
+cookie = "token=…; userid=…"        # 该音源自己的登录态
+device_id = "…"                      # 该音源自己的 dfid
+priority = 0                         # 数字越小越靠前
 [sources.kugou_concept]
 enabled = true
-api_base = "http://127.0.0.1:3001"  # local KuGouMusicApi (platform=lite)
+api_base = "http://127.0.0.1:3001"  # 本地 KuGouMusicApi（platform=lite）
 priority = 10
-
 [sources.netease]
 enabled = true
-api_base = "http://127.0.0.1:3002"  # local NeteaseCloudMusicApi
+api_base = "http://127.0.0.1:3002"  # 本地 NeteaseCloudMusicApi
 priority = 20
-
 [sources.sodam]
 enabled = true
-api_base = "https://api.qishui.com" # Sodam connects **directly to the public internet**; no local service needed
+api_base = "https://api.qishui.com" # 汽水**直连公网**，不需要本地服务
 cookie = "sessionid_ss=…; sessionid=…"
 priority = 30
-# Device fingerprint may be empty when using the signer service; only the manual-capture path needs it
-# device_id = "…"
+# device_id = "…"                    # 使用签名服务时可为空，只有手工抓包才需要
 
-# Sodam's signer service: determines whether VIP full tracks and lossless are available.
-# Without a signature the server replies "HTTP 200 + empty body", which looks like the membership
-# is not active, so this item is worth checking first.
-[sources.sodam_app]
-# Empty = use the upstream built-in public signer service (works out of the box).
-# Replace it with your own, or set "none" to disable signing explicitly.
+# 汽水的签名服务：决定 VIP 完整曲目与无损是否可用。没有签名时服务端返回
+# 「HTTP 200 + 空 body」，看起来像会员没生效，所以这项值得先查。
+# 留空 = 用上游内置的公共签名服务（开箱可用）；也可换自建地址，或写 "none" 关闭签名。
 # signer_url = "http://127.0.0.1:8899/sign"
-# signer_token = "only needed if the service enables auth"
-# The following are needed only for the **manual capture** path (leave empty when using the signer service):
-# device_id / iid / fp empty = use the signer's own device identity
-# x_helios / x_medusa are captured static signature headers and will expire
+# signer_token = "仅在服务启用鉴权时需要"
+# 以下仅**手工抓包**路径需要（用签名服务时留空）：device_id / iid / fp 留空 = 用签名
+# 服务自己的设备身份；x_helios / x_medusa 是抓来的静态签名头，会过期。
+[sources.sodam_app]
 ```
 
-### Kugou API backend (`api_backend`)
+### 酷狗接口后端（`api_backend`）
 
-Default `native`: the standard and concept Kugou APIs are implemented entirely in-process in pure Rust, **no Node.js required**, usable immediately, with no "prepare service on first run" step.
-
-`node` is a fallback: it uses a local (or remote) KuGouMusicApi service, kept for self-hosted services and for diagnosing differences from the embedded implementation. How to switch:
-
+默认 `native`：标准版与概念版酷狗接口在进程内用纯 Rust 实现，**不需要 Node.js**，开箱即用，没有「首次运行准备服务」这一步。`node` 是回退方案：使用本地（或远程）KuGouMusicApi 服务，保留给自建服务与对比内嵌实现差异的场景。两个后端共用登录态与设备指纹（`cookie` / `dfid`），**切换无需重新登录**；该开关只影响两个酷狗音源。
 ```bash
-kugou-tui --api node            # temporarily switch back to the Node service
-kugou-tui --api native          # temporarily switch back to embedded (same as default)
+kugou-tui --api node            # 临时切回 Node 服务
+kugou-tui --api native          # 临时切回内嵌（等同默认）
 ```
 
-```toml
-api_backend = "node"            # permanent switch, write into the config file
-```
+### 接口服务的自动拉起
 
-Both backends share the same login state and device fingerprint (`cookie` / `dfid`), so **switching back and forth requires no re-login**. This switch only affects the two Kugou sources; Netease and Sodam are unaffected.
+> **仅适用于 `--api node` 回退方案（以及网易云音源）。** 默认的内嵌后端（`--api native`）在进程内实现接口，既不需要本地服务也不需要 Node.js。
 
-### Auto-starting the API service
+`--api node` 使用第三方 KuGouMusicApi 服务（Node.js 编写），`cargo install` 无法携带，因此程序在**运行时**自行准备：启动时探测一次端口，已有服务则复用（退出时也不动它），没有才动手。查找顺序：配置的 `api_dir` → `/usr/share/kugou-tui/api/kugou`（发行版打包）→ `~/.local/share/kugou-tui/api/kugou` → `~/KuGouMusicApi`；都不存在则下载固定 commit 并执行 `npm install --omit=dev`。要求机器上有 Node.js（≥ 12）与 npm；这样启动的服务随程序退出而停止，不留常驻进程。要让服务常驻（例如另一台机器或 systemd 管理），设 `api_auto_start = false` 或 `--no-api-start`；要预装好以后秒起，用 `kugou-tui --api node --api-start`；服务目录在别处则设 `api_dir` 或 `KUGOU_API_DIR`。要从二进制里去掉这段引导代码，用 `--no-default-features` 构建（见 [README](../README.md#安装)）。
 
-> **Applies only to the `--api node` fallback (or the Netease source).** The default embedded backend (`--api native`) implements the API in-process and needs neither a local service nor Node.js.
+### 封面填充（`cover_fill`）
 
-`--api node` uses the third-party KuGouMusicApi service (written in Node.js), which `cargo install` cannot ship, so the program provisions it at **runtime**: it probes the port once on startup, reuses an existing service (and leaves it alone on exit), and only acts if none is found. Lookup order: configured `api_dir` → `/usr/share/kugou-tui/api/kugou` (distro package) → `~/.local/share/kugou-tui/api/kugou` → `~/KuGouMusicApi`; if none exist it downloads the pinned commit and runs `npm install --omit=dev`.
+封面区域是若干列 × 行，几乎不会正好是像素正方形，而专辑图通常是正方形：填满、不变形、不裁剪三者只能同时满足两个。
 
-| Scenario | How to |
-|---|---|
-| Service runs permanently on another machine / managed by systemd | `api_auto_start = false` (or `--no-api-start`) |
-| Want to pre-install for instant startup later | `kugou-tui --api node --api-start` (the service stays in the background; stop it with `--api-stop`) |
-| Service directory is elsewhere | `api_dir = "/opt/KuGouMusicApi"` or `KUGOU_API_DIR=...` |
-
-**Requirements**: Node.js (≥ 12) and npm on the machine. By default a service started by the program stops when it exits, leaving no resident process. To drop this bootstrap code from the binary, build with `--no-default-features` (see [README](../README.md#install)).
-
-### Cover fill (`cover_fill`)
-
-The cover area is some number of columns × rows, which almost never converts to a square in pixels, while album art is usually square — of "fill", "no distortion", and "no cropping", only two can hold at once:
-
-| Value | Fills | Distorts | Crops | Description |
+| 取值 | 填满 | 变形 | 裁剪 | 说明 |
 |---|---|---|---|---|
-| `crop` (default) | yes | no | yes | center crop, equivalent to CSS `object-fit: cover` |
-| `stretch` | yes | yes | no | stretches to the area size; square art gets widened horizontally |
-| `fit` | no | no | no | image stays whole, but the background shows on the sides when the box is wider than the image |
+| `crop`（默认） | 是 | 否 | 是 | 居中裁剪，等同 CSS `object-fit: cover` |
+| `stretch` | 是 | 是 | 否 | 拉伸到区域尺寸；正方形图会被横向拉宽 |
+| `fit` | 否 | 否 | 否 | 图保持完整，但区域比图宽时两侧露出背景 |
 
-Toggle at runtime from the settings page (`,`); changes take effect immediately and are written to disk.
+可在设置页（`,`）运行时切换，立即生效并写盘。
 
-### Lyric animation (`lyric_anim_ms`)
+### 歌词动画（`lyric_anim_ms`）
 
-Maximum duration of the fade in/out when the line changes (default `200`, `0` = off).
+换行时淡入淡出的最长时长（默认 `200`，`0` = 关闭）。终端没有亚字符定位，上滚只能整行跳变，唯一能做过渡的维度是**颜色**：切换时旧行仍亮、新行未亮，两者交叉淡变，其余行亮度平滑重排。实际时长随行距自适应：`min(本值, 本行到下一行的间隔 × 0.55)` —— 快歌里一行只有几百毫秒，用上限会显得拖沓。三种情况**强制关闭过渡**：
 
-A terminal has no sub-cell positioning — one character cell is one line and cannot move — so a "scroll up" can only jump whole lines; the only dimension that can actually transition is **color**: at the switch the old line is still lit and the new one is not, then they cross-fade, while the brightness levels of the other lines smoothly re-flow.
-
-The actual duration adapts to line spacing: `min(this value, interval from this line to the next × 0.55)` — lines in fast songs last only a few hundred ms, so using the cap would feel sluggish. Three cases **force the transition off**:
-
-| Case | Reason |
+| 情况 | 原因 |
 |---|---|
-| `lite_mode = true` | its selling point is fewer redraws |
-| `basic_color = true` | 16 colors have no intermediate levels; the fade degrades to a hard flip past the halfway point, which looks worse than no animation |
-| Spanning 3+ lines at once | that is dragging the progress bar or clicking a lyric line to jump; fading line by line is slow and disorienting |
+| `lite_mode = true` | 它的卖点就是少重绘 |
+| `basic_color = true` | 16 色没有中间层级，淡变退化成过半硬切，比不做动画更难看 |
+| 一次跨 3 行以上 | 那是拖动进度条或点击歌词行跳转，逐行淡变又慢又晕 |
 
-### Output device (`audio_device`)
+### 输出设备（`audio_device`）
 
-Default is to **follow the system default** (this field empty). The last item in the settings page shows the **card actually opened**, and you can switch between "system default" and the enumerated devices.
+默认**跟随系统默认**（本字段留空）。设置页最后一项显示**实际打开的声卡**，可在「系统默认」与枚举出的设备之间切换。
 
-It exists because of a typical Linux failure: the progress bar moves and the state is "playing" but there is no sound — audio went to a different card (e.g. the onboard jack with no speakers), and **directly to the hardware** (bypassing PipeWire), so `pactl list sink-inputs` does not even show this program.
-
-The root cause is usually outside the program: ALSA's `default` is pinned to a card by `/etc/asound.conf` or `~/.asoundrc` (`pcm.!default { type hw card 2 }`). **Card numbers change** (plugging in a USB sound card or a different boot order makes "card 2" point elsewhere). The fix is to point `default` back at PipeWire (`type pipewire`), or to delete that file. Three diagnostic steps:
-
+这项存在是因为一个典型 Linux 故障：进度条在走、状态是「播放中」却没有声音 —— 音频去了另一张声卡（例如没接音箱的板载接口），且**直通硬件**（绕过 PipeWire），`pactl list sink-inputs` 里看不到本程序。根因通常在程序之外：ALSA 的 `default` 被 `/etc/asound.conf` 或 `~/.asoundrc` 钉在某张声卡上（`pcm.!default { type hw card 2 }`），而**声卡编号会变**。修法是把 `default` 指回 PipeWire（`type pipewire`），或删掉该文件。三条诊断命令：
 ```bash
-ls -l /proc/<pid>/fd | grep snd      # /dev/snd/pcmCxD0p = direct hardware (bypasses PipeWire)
-pactl list sink-inputs               # while playing, your stream should appear here
-aplay -D default /dev/zero -f cd     # failing to open (busy / no such device) means the ALSA config is broken
+ls -l /proc/<pid>/fd | grep snd      # /dev/snd/pcmCxD0p = 直通硬件（绕过 PipeWire）
+pactl list sink-inputs               # 播放时，你的流应该出现在这里
+aplay -D default /dev/zero -f cd     # 打不开（busy / no such device）说明 ALSA 配置有问题
 ```
 
-The candidate list is filtered: ALSA reports every PCM it defines as a device (52 on the author's machine, mostly `lavrate` / `samplerate` / `jack` / `oss` plugins), but only those that "provide a default output configuration" and are not `null` are kept, then de-duplicated by name. Selecting a device that fails to open does not silence playback — it falls back to the previous card and only shows a status-bar notice.
+候选列表只保留「能提供默认输出配置」且不是 `null` 的 PCM，再按名称去重。选中打不开的设备不会让播放静音，而是回退到上一张声卡，只在状态栏提示。
 
-### Other settings
+### 其他设置
 
-- **`qr_aspect`** — shape correction for the login QR code. When a terminal character is about twice as tall as it is wide, half-block art comes out square. If the QR code looks stretched or squashed, press `L` to show it and measure the height:width ratio of one character: `< 1.5` uses full blocks, `>= 1.5` uses half blocks.
-- **`theme`** — `default` (cool blue), `graphite`, `sunset`, `forest`, `neon`, `dracula`. A typo or removal falls back to `default`. Switch it from the settings page (`,`).
-- **`quality`** — `128` (default), `320`, `flac`, `high`, `super`, `viper_clear`, `viper_atmos`, `viper_tape`. The last three are "Viper sound effects", **supported only for some songs**; when unavailable the server returns an empty URL and the UI shows a notice.
-- **`lite_mode`** — disables the three most resource-hungry features (**playback itself is unaffected**): no cover download/decode, no real-time spectrum, refresh drops to 5 fps and no animation speedup. Measured resident memory: 19.1 MiB idle / 19.1 MiB playing (`--api native`), and enabling this lowers it further. Per-scenario numbers in [DESIGN.md](DESIGN.md#low-resource-footprint).
-- **`tray`** — system tray, on by default: after registering as `org.kde.StatusNotifierItem`, Quickshell / waybar / KDE show an icon whose right-click menu offers play/pause, previous, next (plus "minimize / show window" under niri). It is skipped automatically when there is no graphical session, no session bus, or no `StatusNotifierWatcher` from the status bar (each logged once). **Changes take effect after a restart.** On non-Unix platforms the code is not compiled and the value defaults to `false`.
+- **`qr_aspect`** —— 登录二维码的形状校正。终端字符高约为宽的两倍时，半块字符画正好是正方形。二维码看起来被拉伸或压扁时按 `L` 显示并量一个字符的高宽比：`< 1.5` 用全块，`>= 1.5` 用半块。
+- **`theme`** —— `default`（冷蓝）、`graphite`、`sunset`、`forest`、`neon`、`dracula`。写错或删掉会回退到 `default`。在设置页（`,`）切换。
+- **`quality`** —— `128`（默认）、`320`、`flac`、`high`、`super`、`viper_clear`、`viper_atmos`、`viper_tape`。后三个是「蝰蛇音效」，**只对部分歌曲可用**；不可用时服务端返回空 URL，界面给出提示。
+- **`lite_mode`** —— 关掉三个最耗资源的功能（**播放本身不受影响**）：不下载/解码封面、不做实时频谱、刷新降到 5 fps 且不做动画加速。实测常驻内存：空闲 19.1 MiB / 播放 19.1 MiB（`--api native`），开启后更低。各场景数据见 [DESIGN.md](DESIGN.md#低资源占用)。
+- **`tray`** —— 系统托盘，默认开启：注册为 `org.kde.StatusNotifierItem` 后，Quickshell / waybar / KDE 会显示图标，右键菜单提供播放/暂停、上一首、下一首（niri 下另有「最小化 / 显示窗口」）。没有图形会话、没有会话总线、或状态栏没有 `StatusNotifierWatcher` 时自动跳过（各记一条日志）。**改动需重启生效。** 非 Unix 平台不编译这段代码，取值默认为 `false`。
 
-Volume, playback mode, and lyric offset are written back automatically on exit.
+音量、播放模式、歌词偏移在退出时自动写回。
 
-### Custom keybindings
+### 自定义快捷键
 
-Map **action names** to **keys** in the `[keymap]` section. Action names are the snake_case form of `Action` variants:
-
+在 `[keymap]` 段把**动作名**映射到**按键**。动作名是 `Action` 变体的 snake_case 形式：
 ```toml
 [keymap]
-reload = "f"                 # move refresh-current-list (default R) to f
+reload = "f"                 # 把刷新当前列表（默认 R）改到 f
 help = "f1"
 quit = "Z"
 cycle_artist_filter = "ctrl+f"
 ```
 
-**Actions not listed keep their default keys**, so old config files need no changes; write only the entries you want to change.
+**未列出的动作保留默认键**，旧配置文件无需改动，只写想改的条目即可。
 
-| Key syntax | Examples |
+| 按键写法 | 示例 |
 |---|---|
-| Single character (**case-sensitive**) | `q`, `Q`, `/`, `[` |
-| Named key | `space`, `enter`, `esc`, `tab`, `backtab`, `up`, `down`, `left`, `right`, `home`, `end`, `pgup`, `pgdn`, `backspace`, `delete`, `insert` |
-| Function key | `f1` – `f12` |
-| With modifiers | `ctrl+n`, `alt+1`, `shift+tab` |
+| 单个字符（**区分大小写**） | `q`、`Q`、`/`、`[` |
+| 具名键 | `space`、`enter`、`esc`、`tab`、`backtab`、`up`、`down`、`left`、`right`、`home`、`end`、`pgup`、`pgdn`、`backspace`、`delete`、`insert` |
+| 功能键 | `f1` – `f12` |
+| 带修饰键 | `ctrl+n`、`alt+1`、`shift+tab` |
 
-Available action names, grouped by purpose:
-
+可用动作名，按用途分组：
 ```
-# global
+# 全局
 quit  force_quit  help  toggle_sidebar  switch_source
-# navigation
+# 导航
 move_up  move_down  move_top  move_bottom  page_up  page_down
 focus_next  focus_prev  submit  cancel  context_menu
 backspace  delete  cursor_left  cursor_right  cursor_home  cursor_end
-# playback
-play_pause  next  prev  seek_forward  seek_backward
-volume_up  volume_down  toggle_mute
-cycle_playback_mode  cycle_quality
-toggle_lyric_panel  lyric_delay  lyric_advance
-# business
+# 播放
+play_pause  next  prev  seek_forward  seek_backward  volume_up  volume_down  toggle_mute
+cycle_playback_mode  cycle_quality  toggle_lyric_panel  lyric_delay  lyric_advance
+# 业务
 open_search  open_settings  reload  load_more_search  download_current
 queue_append  queue_play_next  add_all_to_queue  remove_from_queue  clear_queue
-clear_cache  toggle_sort_order  open_ranks  open_cloud
-login  claim_vip  cycle_artist_filter
+clear_cache  toggle_sort_order  open_ranks  open_cloud  login  claim_vip  cycle_artist_filter
 add_to_cloud  remove_from_cloud  sync_to_cloud  delete_cloud_playlist  new_cloud_playlist
 set_default_source  raise_source_priority  lower_source_priority
-# window (niri only)
+# 窗口（仅 niri）
 toggle_window
 ```
 
-> `toggle_window` is the **only action with no default key**: it is normally clicked from the tray menu (right-click → "minimize / show window"). It works only under niri (the test is whether `NIRI_SOCKET` exists) — Wayland's xdg-shell has no "minimize" request, so a terminal program must go through the compositor's IPC.
->
-> Actions with parameters (switching tabs, seeking to a given position, typing characters) are not in the list — their values come from runtime and cannot be expressed fully in the config file.
+> `toggle_window` 是**唯一没有默认键的动作**，通常从托盘菜单点击。仅在 niri 下有效（依据是 `NIRI_SOCKET` 是否存在）—— Wayland 的 xdg-shell 没有「最小化」请求，终端程序只能走合成器 IPC。带参数的动作（切换标签页、跳转到指定位置、输入字符）不在列表中，它们的值来自运行期，无法写进配置文件。
 
-**Invalid entries are skipped without aborting startup**, and a WARN is logged (`~/.cache/kugou-tui/kugou-tui.log`):
+**无效条目会被跳过，不会中断启动**，并记一条 WARN（`~/.cache/kugou-tui/kugou-tui.log`）：
 
-| Case | Log |
+| 情况 | 日志 |
 |---|---|
-| Unknown action name | `键位配置：未知动作 "xxx"（键 "yyy"），已忽略` |
-| Unparsable key name | `键位配置：无法解析按键 "yyy"（动作 xxx），已忽略` |
-| One key bound to two actions | `键位配置：… 同时绑定了 …，以 … 为准` |
+| 未知动作名 | `键位配置：未知动作 "xxx"（键 "yyy"），已忽略` |
+| 无法解析的键名 | `键位配置：无法解析按键 "yyy"（动作 xxx），已忽略` |
+| 一个键绑了两个动作 | `键位配置：… 同时绑定了 …，以 … 为准` |
 
-On successful startup there is a line `已加载 N 条自定义键位`; use it to verify the count.
+启动成功时会有一行 `已加载 N 条自定义键位`，用它核对条数。
 
-### Session persistence
+### 会话持久化
 
-On exit, the **play queue + current track + playback position** are saved to `~/.cache/kugou-tui/session.json`; the next start restores them and shows "已恢复上次会话：N 首 · 按 Space 继续播放".
+退出时把**播放队列 + 当前曲目 + 播放位置**存到 `~/.cache/kugou-tui/session.json`；下次启动恢复并提示「已恢复上次会话：N 首 · 按 Space 继续播放」。
 
-> This path is **fixed**; `--cache-dir` / `cache_dir` only change the audio cache directory and do not move the session file with it (same for logs). To move the session too, change `XDG_CACHE_HOME`.
+> 该路径**固定**：`--cache-dir` / `cache_dir` 只改音频缓存目录，不会连带移动会话文件（日志同理）。要连会话一起移动，改 `XDG_CACHE_HOME`。
 
-**Auto-play is deliberately disabled** (making noise the moment the program opens is startling). After restoring, press `Space` to continue, and playback **resumes from the previous position**, not from the start. That position applies only to the restored track: playing something else first discards it — otherwise pressing play on any track next time would start from the old position.
-
-The same file also records `vip_claimed_day` (the date the concept-edition daily VIP was last claimed); it is what enforces "claim once per day" (that endpoint has risk controls). Deleting the file makes the program claim again on the next start, usually harmless.
+**自动播放被有意关闭**（程序一开就出声太突兀）。恢复后按 `Space` 继续，播放**从上次位置接着走**，不从开头开始；该位置只对恢复的那首有效，先播别的会丢弃它，否则下次对任意曲目按播放都会从旧位置开始。同一个文件还记录 `vip_claimed_day`（上次领取概念版每日 VIP 的日期），「每天只能领一次」靠它实现（该接口有风控）；删掉文件会让程序下次启动重新领取，通常无害。

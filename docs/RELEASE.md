@@ -1,322 +1,175 @@
-# Release and Cleanup
+# 发版与清理
 
-This document covers **version and tag rules**, **what a release artifact contains**, **the
-order and dependencies of the release flow**, and **when each cleanup path runs and what it
-clears**.
+覆盖**版本与标签规则**、**发版产物包含什么**、**发版流程的顺序与依赖**、**每条清理路径何时触发、清掉什么**。
 
-Implementation: `scripts/release` (release flow), `scripts/clean` (build artifact cleanup),
-`src/audio/streaming.rs` + `src/audio/cache.rs` (runtime cleanup). Only **verified behavior**
-is described; anything unverified is called out.
+实现：`scripts/release`（发版流程）、`scripts/clean`（构建产物清理）、`src/audio/streaming.rs` + `src/audio/cache.rs`（运行期清理）。只描述**已验证的行为**；未验证的会点明。
 
 ---
 
-## 1. Version and tag rules
+## 1. 版本与标签规则
 
-| Item | Rule | Enforced by |
+| 项 | 规则 | 由谁强制 |
 |---|---|---|
-| Version | `Cargo.toml` `version`, a plain numeric `X.Y.Z` (no `-alpha` suffix) | `scripts/release` pre-check |
-| Tag | Always `vX.Y.Z`, **annotated** (`git tag -a`), release notes in the message | `scripts/release` |
-| Tag uniqueness | Checked locally and remotely; abort if it exists | `scripts/release` |
-| Changelog | `CHANGELOG.md` must have a `## [X.Y.Z]` section | `scripts/release` |
-| AUR `pkgver` | Must equal the same version | `scripts/release` rewrites it |
-| Binary self-reported version | The built binary's `--version` must match `Cargo.toml` | `scripts/release` |
+| 版本 | `Cargo.toml` 的 `version`，纯数字 `X.Y.Z`（不带 `-alpha` 后缀） | `scripts/release` 预检 |
+| 标签 | 固定 `vX.Y.Z`，**附注标签**（`git tag -a`），消息里写 release notes | `scripts/release` |
+| 标签唯一性 | 本地与远端都检查；已存在则中止 | `scripts/release` |
+| 更新日志 | `CHANGELOG.md` 必须有 `## [X.Y.Z]` 小节 | `scripts/release` |
+| 二进制自报版本 | 构建出的二进制 `--version` 必须与 `Cargo.toml` 一致 | `scripts/release` |
 
-**Tags are not redoable.** Once a version is used, pick a new one; never delete and re-tag —
-AUR and crates.io versions are equally irreversible.
+**标签不可重来。** 版本用过就换新的；不要删了重打 —— crates.io 的版本同样不可逆。
 
 ---
 
-## 2. What a release artifact contains
+## 2. 发版产物包含什么
 
-The artifact is a tarball, `kugou-tui-<version>-x86_64-unknown-linux-gnu.tar.gz` (5.3 MB
-measured at 0.6.2), produced by `scripts/make-release-tarball`. It **must be self-contained**:
-it is **the only path available to non-Arch users** — the AUR package ships the API service
-directly, this tarball does not, so it must carry everything needed to set the service up.
+产物是 tarball：`kugou-tui-<version>-x86_64-unknown-linux-gnu.tar.gz`（0.6.2 实测 5.3 MB），由 `scripts/make-release-tarball` 产出。它**必须自包含**：这是**不用 `cargo install` 的用户唯一可用的路径** —— tarball 不带接口服务，所以它得把搭起服务所需的一切都装上。
 
-| Content | Why it must be there |
+| 内容 | 为什么必须在 |
 |---|---|
-| `kugou-tui` (binary, ~11.7 MiB, stripped) | The main program |
-| `scripts/kugou-api` | Start/stop the API service |
-| `scripts/kugou-api-install` | **Fetches and configures the service** — without it users cannot set up the service and the flow breaks |
-| `scripts/kugou-tui` | Launcher (starts the service on demand) |
-| `README.md`, `README.zh-CN.md`, `KEYBINDINGS.md`, `CHANGELOG.md`, `LICENSE` | Basic docs (English + Chinese README) |
-| `docs/*.md` | Full documentation |
+| `kugou-tui`（二进制，约 11.7 MiB，已 strip） | 主程序 |
+| `scripts/kugou-api` | 启停接口服务 |
+| `scripts/kugou-api-install` | **拉取并配置服务** —— 没有它用户搭不起服务，流程就断了 |
+| `scripts/kugou-tui` | 启动器（按需拉起服务） |
+| `README.md`、`KEYBINDINGS.md`、`CHANGELOG.md`、`LICENSE` | 基础文档 |
+| `docs/*.md` | 完整文档 |
 
-`scripts/release` checks this list item by item and aborts if any is missing.
+`scripts/release` 会逐项检查这张清单，缺任何一项就中止。
 
-> Releases at 0.3.7 and earlier contained **only the binary and README**, missing three
-> scripts — non-Arch users could not run `kugou-tui-install-api` after extracting. Assembling
-> the directory by hand misses things easily, so this step is now a script.
+> 0.3.7 及更早的 Release **只有二进制和 README**，缺了三个脚本 —— 用户解压后跑不了 `kugou-api-install`。手工拼目录很容易漏东西，所以这一步现在是脚本。
 
-**Not included**: the API service itself (a separate project, fetched by the user per
-`docs/INSTALL.md`). Build with `cargo build --release`, **never makepkg** — `makepkg` applies
-`makepkg.conf`'s `-march=native`, and that binary will not run on another machine.
+**不包含**：接口服务本身（独立项目，用户按 `docs/INSTALL.md` 自行拉取）。用 `cargo build --release` 构建。
 
-### Packages for three platforms come from CI
+### 三平台包由 CI 产出
 
-`scripts/release` runs on the dev machine and produces the `x86_64-unknown-linux-gnu`
-tarball; the other two platforms **cannot be built there — a physical limit, not an
-oversight**: the Windows `.exe` needs the MSVC toolchain and the macOS binary the Apple SDK.
+`scripts/release` 在开发机上跑，产出 `x86_64-unknown-linux-gnu` 的 tarball；另外两个平台**在开发机上构建不了 —— 这是物理限制，不是疏忽**：Windows 的 `.exe` 需要 MSVC 工具链，macOS 二进制需要 Apple SDK。
 
-So all three platforms go through `.github/workflows/release.yml`: on a `v*` tag push it
-builds one each on `ubuntu-latest` / `windows-latest` / `macos-latest`, packages them, and
-attaches them to the same Release. Releasing then works **without the dev machine on hand**;
-artifacts depend on no specific machine.
+所以三个平台都走 `.github/workflows/release.yml`：`v*` 标签推送时，在 `ubuntu-latest` / `windows-latest` / `macos-latest` 上各构建一份、打包，挂到同一个 Release 上。这样发版**不需要开发机在场**，产物也不依赖任何特定机器。
 
-| Platform | Artifact | Packaging script |
+| 平台 | 产物 | 打包脚本 |
 |---|---|---|
-| Linux x86_64 | `kugou-tui-<version>-x86_64-unknown-linux-gnu.tar.gz` | `make-release-tarball` (CI and local) |
-| Windows x86_64 | `kugou-tui-<version>-x86_64-pc-windows-msvc.zip` | `build-windows.ps1` (CI) |
-| macOS arm64 | `kugou-tui-<version>-aarch64-apple-darwin.tar.gz` | `make-release-tarball` (CI) |
+| Linux x86_64 | `kugou-tui-<version>-x86_64-unknown-linux-gnu.tar.gz` | `make-release-tarball`（CI 与本地） |
+| Windows x86_64 | `kugou-tui-<version>-x86_64-pc-windows-msvc.zip` | `build-windows.ps1`（CI） |
+| macOS arm64 | `kugou-tui-<version>-aarch64-apple-darwin.tar.gz` | `make-release-tarball`（CI） |
 
-> **Linux has two sources.** Local `scripts/release` still builds and uploads one (it also
-> verifies asset contents); CI builds another, same name, overwritten by
-> `upload-release-asset`'s `--clobber` — last one wins. So **the two sha256 values are not
-> guaranteed to match**: the rustc minor version and the target machine's C toolchain both
-> affect the `aws-lc-sys` build. A hash recorded during a local release not matching one
-> downloaded from the Release later is normal, not a replaced file. To have a single source
-> of hashes, drop the Linux packaging and upload from `scripts/release` and leave it entirely
-> to CI — a release-flow change, do it separately.
+> **Linux 有两个来源。** 本地 `scripts/release` 仍会构建并上传一份（它同时校验产物内容）；CI 也构建一份同名产物，被 `upload-release-asset` 的 `--clobber` 覆盖 —— 后到的赢。所以**两份 sha256 不保证一致**：rustc 小版本与目标机器的 C 工具链都会影响 `aws-lc-sys` 的构建。本地发版时记录的 hash 和之后从 Release 下载的 hash 对不上是正常的，不是文件被换过。想让 hash 只有一个来源，就把 Linux 的打包上传从 `scripts/release` 里去掉、完全交给 CI —— 那是发版流程的改动，单独做。
 
-> **Intel Mac is out of scope**: `macos-latest` is an arm64 machine, so its binary will not
-> run on Intel. To cover it, cross-compile with `--target x86_64-apple-darwin` on the same
-> runner — a different package name (`x86_64-apple-darwin`) and one extra job; not done now.
+> **Intel Mac 不在范围内**：`macos-latest` 是 arm64 机器，它的二进制在 Intel 上跑不了。要覆盖就得在同一个 runner 上用 `--target x86_64-apple-darwin` 交叉编译 —— 包名不同（`x86_64-apple-darwin`），多一个 job；现在没做。
 
-### The packaging script is verifiable before the tag is pushed
+### 打标签前就能验证打包脚本
 
-`release.yml` only runs after the tag is pushed, and **tags are irreversible** — if the
-packaging script misses a file, you either ship a broken package or accept it (this project
-hit that at 0.3.7). So the packaging script has two verification points before pushing the
-tag, **both outside `release.yml`**:
+`release.yml` 只在标签推送后才跑，而**标签不可逆** —— 打包脚本漏了文件，要么发个坏包，要么认了（0.3.7 就撞过）。所以打包脚本在推标签之前有两个验证点，**都在 `release.yml` 之外**：
 
-1. **Stage one** of `scripts/release` — runs `make-release-tarball` locally, checks the
-   content list item by item, then stops for confirmation;
-2. `release.yml`'s own **dry-run** (below) — runs the three platforms' build, packaging, and
-   artifact passing end to end, skipping only Release creation and asset attachment.
-   Platform-specific branches (BSD tools on macOS, the PowerShell packaging script on
-   Windows) can only be verified by actually running.
+1. `scripts/release` 的**第一阶段** —— 本地跑 `make-release-tarball`，逐项检查内容清单，然后停下等确认；
+2. `release.yml` 自带的 **dry-run**（见下）—— 把三平台的构建、打包、产物传递端到端跑一遍，只跳过 Release 创建与产物挂载。平台特有分支（macOS 的 BSD 工具、Windows 的 PowerShell 打包脚本）只有真跑才能验证。
 
-> `ci.yml` **does none of this**: its three columns only run `clippy + test` — no release
-> build, no release packaging, no artifact passing. Intentional: release builds use
-> `lto = "fat"` and `codegen-units = 1`, so running them for three platforms on every push
-> costs several times the time while nobody uses the artifacts (anyone wanting a binary
-> should go to the Releases page). Reason documented in the `ci.yml` header.
+> `ci.yml` **这些都不做**：它那三列只跑 `clippy + test` —— 没有 release 构建、没有发版打包、没有产物传递。这是有意的：release 构建用 `lto = "fat"` 和 `codegen-units = 1`，每次推送都为三个平台跑一遍，耗时是数倍，而产物没人用（要二进制的人该去 Releases 页）。原因记在 `ci.yml` 头部注释里。
 
-### dry-run: run the whole pipeline without pushing a tag
+### dry-run：不打标签跑完整条流水线
 
-Changing `release.yml` cannot be verified by "pushing a tag to try it" — tags are
-irreversible. So `workflow_dispatch` has an extra `dry_run` input: the whole pipeline runs
-(three-platform build, packaging, artifact upload, retrieval, asset list check), **skipping
-only the final Release creation and asset attachment**; not a byte is written remotely.
+改 `release.yml` 没法用「推个标签试试」来验证 —— 标签不可逆。所以 `workflow_dispatch` 多了一个 `dry_run` 输入：整条流水线照跑（三平台构建、打包、产物上传、取回、资产清单检查），**只跳过最后的 Release 创建与产物挂载**；远端一个字节都不写。
 
-It checks out `main`, and version checking compares `TAG` against the binary's `--version`,
-so the tag passed must match `main`'s current version:
+它检出 `main`，而版本检查拿 `TAG` 与二进制的 `--version` 比对，所以传的标签必须与 `main` 当前版本一致：
 
 ```bash
 gh workflow run release.yml --ref <branch> -f tag=v0.6.1 -f dry_run=true
 ```
 
-### Backfilling assets (`workflow_dispatch`)
+### 回填产物（`workflow_dispatch`）
 
-To backfill assets for an **already released** version, specify the tag manually — e.g. this
-workflow did not exist when 0.4.2 was released:
+给**已经发过**的版本回填产物时，手动指定标签 —— 比如 0.4.2 发版时这个 workflow 还不存在：
 
 ```bash
 gh workflow run release.yml -f tag=v0.4.2
 ```
 
-The backfill path checks out `main` (`scripts/release-notes` is only updated on main; the
-copy in an old tag may not yet know the version being backfilled). `publish` first checks
-whether the Release exists: if so it skips creation and uploads assets directly (`--clobber`
-overwrites same-named files); if not it creates one.
+回填路径检出 `main`（`scripts/release-notes` 只在 main 上更新，旧标签里的副本可能还不认识要回填的版本）。`publish` 先看 Release 是否存在：存在就跳过创建、直接上传产物（`--clobber` 覆盖同名文件）；不存在就创建一个。
 
-### Timing: the Release appears only after all three platforms are green
+### 时序：三个平台全绿后才出现 Release
 
-The three build jobs (`linux` / `windows` / `macos`) **only build and package**, each
-uploading its package as an artifact, none touching the Release. The fourth job `publish`
-`needs` those three, retrieves the artifacts, checks the list (2 tarballs + 1 zip), then
-creates the Release and attaches all assets **in one shot**. Workflow-level permission is
-`contents: read`; write permission is granted only to `publish`. The release page therefore
-never shows a window where "the Release exists but assets have not arrived", and a build
-failure means no Release is created at all.
+三个构建 job（`linux` / `windows` / `macos`）**只构建打包**，各自把包作为 artifact 上传，都不碰 Release。第四个 job `publish` `needs` 那三个，取回产物、检查清单（2 个 tarball + 1 个 zip），然后**一次性**创建 Release 并挂上全部产物。workflow 级权限是 `contents: read`；写权限只给 `publish`。因此发版页面上不会出现「Release 已存在但产物还没到」的窗口，构建失败则根本不创建 Release。
 
-> It used to be the opposite: the first job `prepare` created the Release, then the three
-> platforms each added assets — so any platform's build failure left an already-published
-> Release whose assets could never be completed.
+> 以前是反的：第一个 job `prepare` 先创建 Release，然后三个平台各自加产物 —— 任何一个平台构建失败，都会留下一个已发布、产物却永远补不齐的 Release。
 
-Local `scripts/release` remains usable and does more (verifies the CHANGELOG has the version
-section, updates and pushes AUR, downloads assets back to verify). Its order is "push tag →
-create Release → upload assets", which collides with `publish`: both are idempotent —
-`publish` skips creation if the Release exists, and `upload-release-asset` uses `--clobber` —
-**whoever arrives first creates it, no errors either way**.
+本地 `scripts/release` 仍可用，且做得更多（校验 CHANGELOG 有对应版本小节、把产物下载回来校验）。它的顺序是「推标签 → 创建 Release → 上传产物」，会与 `publish` 撞车：两者都是幂等的 —— Release 存在时 `publish` 跳过创建，`upload-release-asset` 用 `--clobber` —— **谁先到谁创建，两种顺序都不报错**。
 
-> **The cost of tag-only pushes**: AUR's `PKGBUILD` / `.SRCINFO` are not updated and
-> `CHANGELOG.md` is not verified. To also release to AUR, run `scripts/release`, or manually
-> update `~/aur/kugou-tui` afterward.
-
-### Current state: AUR is not published, always pass `--no-aur`
-
-The package `kugou-tui` **does not exist on AUR** yet
-(`aur.archlinux.org/packages/kugou-tui` returns 404), and local `~/aur/kugou-tui` is a draft
-directory with no `.git`. Therefore:
-
-- The release command is fixed to `./scripts/release --no-aur`;
-- Omitting `--no-aur` aborts in the pre-check (the script checks whether `$aur_dir/.git`
-  exists). Intentional — otherwise the flow would first push main and tag
-  (**irreversible**), then hit "not a Git repository" at the `git add` in step 9, paying the
-  cost for nothing.
-
-Publishing to AUR requires these external actions first (none in this repo):
-
-1. Register an AUR account and paste `~/.ssh/aur.pub` into My Account → SSH Public Key;
-2. `git clone ssh://aur@aur.archlinux.org/kugou-tui.git` (AUR creates the repo on first use);
-3. Put the local `~/aur/kugou-tui`'s `PKGBUILD` / `.SRCINFO` / `LICENSE` /
-   `kugou-api-package-lock.json` into that repo and push.
-
-Afterward, delete this section and change `docs/INSTALL.md`'s "Path 4: AUR (planned, not yet
-published)" to normal instructions.
-
-The zip also carries three **bash** scripts (still useful under Git Bash / WSL), and the
-macOS tarball likewise — a package carries "things also usable on another platform", not
-"this platform's native scripts", which the source repo provides.
+zip 里也带那三个 **bash** 脚本（在 Git Bash / WSL 下仍可用），macOS 的 tarball 同理 —— 包里装的是「在别的平台上也能用的东西」，而不是「本平台的原生脚本」，后者由源码仓库提供。
 
 ---
 
-## 3. Target repositories for the release push
+## 3. 发版推送的目标仓库
 
-| Target | URL | What is pushed | Credentials |
+| 目标 | URL | 推什么 | 凭据 |
 |---|---|---|---|
-| GitHub (source and Release) | `github.com/sijin-xb/kugou-tui` | `main` branch, `vX.Y.Z` tag, Release assets | `gh` logged in |
-| AUR | `ssh://aur@aur.archlinux.org/kugou-tui.git` (local at `~/aur/kugou-tui`) | `PKGBUILD` and `.SRCINFO` on the `master` branch | Separate key `~/.ssh/aur`, public key posted to the AUR account |
-
-AUR **only accepts the `master` branch**; `.SRCINFO` must be pushed too, or the page will not
-update its version. The local repo's git identity is repo-level
-`sijin-xb <sijin-xb@users.noreply.github.com>` — **the author email appears in cleartext in
-AUR commit logs**, so use GitHub's noreply rather than a real email.
+| GitHub（源码与 Release） | `github.com/sijin-xb/kugou-tui` | `main` 分支、`vX.Y.Z` 标签、Release 产物 | `gh` 已登录 |
 
 ---
 
-## 4. Execution order and dependencies
+## 4. 执行顺序与依赖
 
-`./scripts/release` does it all in one command. Two stages; **stage two is entirely
-irreversible external actions**, so the script stops after stage one, lists every action it
-will take, and waits for confirmation.
+`./scripts/release` 一条命令做完全部。分两个阶段；**第二阶段全是不可逆的外部动作**，所以脚本在第一阶段后停下，列出将要执行的每一项动作，等确认。
 
-### Stage one: local (repeatable, no external effect)
+### 第一阶段：本地（可重复，无外部影响）
 
-| # | Step | Depends on |
+| # | 步骤 | 依赖 |
 |---|---|---|
-| 1 | Pre-check (version format, branch, clean worktree, in sync with origin, tag unused, CHANGELOG has the section) | — |
-| 2 | Clean the previous run's intermediates (calls `scripts/clean`) | 1 |
+| 1 | 预检（版本格式、分支、工作区干净、与 origin 同步、标签未被占用、CHANGELOG 有对应小节） | — |
+| 2 | 清理上一轮的中间产物（调用 `scripts/clean`） | 1 |
 | 3 | `cargo clippy --all-targets` + `cargo test` | 2 |
-| 4 | `cargo build --release`, and verify the binary's self-reported version | 3 |
-| 5 | Build the release package, and check the content list item by item | 4 |
-| 6 | List stage-two actions, wait for confirmation | 5 |
+| 4 | `cargo build --release`，并校验二进制自报版本 | 3 |
+| 5 | 构建发版包，并逐项检查内容清单 | 4 |
+| 6 | 列出第二阶段动作，等待确认 | 5 |
 
-### Stage two: external (irreversible)
+### 第二阶段：外部（不可逆）
 
-| # | Step | Depends on | Notes |
+| # | 步骤 | 依赖 | 备注 |
 |---|---|---|---|
-| 7 | `git push origin main` | 6 | Network action, with backoff retries |
-| 8 | `git tag -a vX.Y.Z` + `git push origin vX.Y.Z` | 7 | **Irreversible** |
-| 9 | Take the sha256 of the tag source tarball, rewrite AUR's `pkgver` and `sha256sums`, regenerate `.SRCINFO`, commit locally (**no push**) | 8 | **The only dependency that cannot be reordered**, see below |
-| 10 | Clone the AUR repo from that commit and run `makepkg` once | 9 | Verifies "what a user clones builds" |
-| 11 | `gh release create` and attach the release packages | 8 | Idempotent: if it exists, switch to `gh release upload --clobber` |
-| 12 | **Download** the Release assets back to verify content and sha256 | 11 | Cannot rely on local files alone |
-| 13 | Push AUR (`master`) | 9 | If the key is not registered, only warn, no error |
+| 7 | `git push origin main` | 6 | 网络动作，带退避重试 |
+| 8 | `git tag -a vX.Y.Z` + `git push origin vX.Y.Z` | 7 | **不可逆** |
+| 9 | `gh release create` 并挂上发版包 | 8 | 幂等：已存在则改用 `gh release upload --clobber` |
+| 10 | 把 Release 产物**下载回来**，校验内容与 sha256 | 9 | 不能只信本地文件 |
 
-### `--no-aur`: skip the three AUR steps
+### 失败与恢复
 
-When the AUR account cannot be registered (hit in practice), `./scripts/release --no-aur`
-runs the whole flow without touching AUR: steps **9, 10, 13** are skipped, and `PKGBUILD` and
-`.SRCINFO` are not changed by a single byte.
-
-The action list printed before stage two **changes accordingly** — the three AUR items do not
-appear, numbering shifts, and it states "`--no-aur` in use". The point of that list is to let
-a person confirm "what is about to happen" before pressing Enter; listing something and then
-not doing it would be a lie.
-
-⚠️ It is **not a rehearsal**: pushing main, tagging, and creating the Release all happen —
-**it really releases**, it just does not release to AUR. To only check without releasing, use
-`--dry-run`.
-
-### Why step 9 must follow step 8
-
-AUR's `sha256sums` needs the checksum of the **tag source tarball on GitHub**, and that
-tarball is only generated by GitHub after the tag is pushed. So the AUR update **cannot** be
-moved earlier into stage one — the only dependency in the flow that cannot be reordered; the
-script has a dedicated comment for this.
-
-(The alternative is to have AUR use a `git+...#tag=` source, which needs no checksum and
-could be updated earlier; but versioned releases use tarball + checksum to match AUR
-convention and to guard against upstream tampering, so it was not adopted.)
-
-### Failure and recovery
-
-- Any stage-one step fails: nothing was released; fix and rerun.
-- Stage two fails midway: the script states exactly which step it stopped at. **Do not delete
-  the tag and start over**; keep what was pushed and fill in the missing parts by hand (steps
-  9–13 are all idempotent and can be rerun individually).
-- A step-12 failure **must be stopped and investigated** — it means what was built locally
-  differs from what users download.
+- 第一阶段任何一步失败：什么都没发出去，修好重跑。
+- 第二阶段中途失败：脚本会说明停在哪一步。**不要删标签重来**；保留已推送的东西，手工补齐缺的部分（第 9–10 步都幂等，可以单独重跑）。
+- 第 10 步失败**必须停下排查** —— 它意味着本地构建出的东西与用户下载到的不一致。
 
 ---
 
-## 5. Cleanup logic
+## 5. 清理逻辑
 
-### 5.1 Build and packaging artifacts (implemented: `scripts/clean`)
+### 5.1 构建与打包产物（已实现：`scripts/clean`）
 
-**When it triggers**
+**何时触发**
 
-1. **Before** a release starts — called automatically by `scripts/release`, ensuring the
-   build starts from a clean state
-2. **After** a successful release — can be run again as well
-3. **Manually** — anytime disk space is tight
+1. 发版开始**之前** —— 由 `scripts/release` 自动调用，保证构建从干净状态开始
+2. 发版成功**之后** —— 也可以再手动跑
+3. **手动** —— 磁盘紧张时随时
 
-**What it clears (default)**
+**默认清掉什么**
 
-| Clears | Location | Measured usage |
+| 默认清理 | 位置 | 实测占用 |
 |---|---|---|
-| ✅ | `target/package/` | 4.7 MiB |
-| ✅ | tarballs in `dist/` for **versions other than the current one** | 3.2 MiB / version |
-| ✅ | AUR repo's `src/`, `pkg/` | — |
-| ✅ | upstream source copies fetched by makepkg in the AUR repo | — |
-| ✅ | the `.pkg.tar.zst` from the previous build in the AUR repo | 5.6 MiB |
+| 是 | `target/package/` | 4.7 MiB |
+| 是 | `dist/` 里**非当前版本**的 tarball | 3.2 MiB / 版本 |
 
-About **10 MiB** per run; keeping several versions means hundreds of MiB.
+每次约 **8 MiB**；留几个版本就是几百 MiB。
 
-**Explicitly left alone** (clearing them needs an explicit flag)
+**明确不动**（要清得加显式开关）
 
-| Flag | What it clears extra | Why not by default |
+| 开关 | 额外清什么 | 为什么不默认 |
 |---|---|---|
-| `--all` | the whole `target/` | Destroys incremental compilation; the next full rebuild takes ~3 minutes. **But it is the biggest item here**: measured `target/` at **26 GiB** (`debug/` 25 GiB — clippy and test output; `release/` 1.2 GiB). When disk is tight this beats everything else combined |
-| `--cache` | `~/.cache/kugou-tui` (including downloaded songs) | That is **user data**, not a build artifact |
+| `--all` | 整个 `target/` | 会毁掉增量编译，下次全量重建约 3 分钟。**但它是这里最大的一项**：实测 `target/` 有 **26 GiB**（`debug/` 25 GiB —— clippy 与测试产物；`release/` 1.2 GiB）。磁盘紧张时这一项比其他所有加起来还管用 |
+| `--cache` | `~/.cache/kugou-tui`（含已下载的歌曲） | 那是**用户数据**，不是构建产物 |
 
-`--dry-run` only reports, does not delete. Before every deletion it confirms "this really is
-what we think it is" — if the AUR directory has no `PKGBUILD`, it skips outright, preferring
-to delete nothing.
+`--dry-run` 只报告不删除。每次删除前都会确认「这确实是我们要删的东西」—— 宁可什么都不删。
 
-### 5.2 Runtime memory (implemented: `src/audio/streaming.rs`)
+### 5.2 运行期内存（已实现：`src/audio/streaming.rs`）
 
-The streaming buffer **keeps only a tail window** (`MAX_KEPT_BYTES = 4 MiB`; past that it is
-reclaimed to `TARGET_KEPT_BYTES = 1 MiB`), and bytes outside the window are read back from
-the on-disk `.part` file with positioned reads (Unix `pread` / Windows `seek_read`). Resident
-memory is therefore decoupled from track size: a 64 MiB Hi-Res file occupies only a few MiB,
-and seeking back into a reclaimed region still plays (that part is on disk). Design and
-measurements in [DESIGN.md](DESIGN.md#streaming-playback).
+边下边播的缓冲**只留尾部窗口**（`MAX_KEPT_BYTES = 4 MiB`；超过就回收到 `TARGET_KEPT_BYTES = 1 MiB`），窗口之外的字节用定位读（Unix `pread` / Windows `seek_read`）从磁盘上的 `.part` 文件读回。常驻内存因此与曲目大小解耦：64 MiB 的 Hi-Res 文件只占几 MiB，往回 seek 到已回收区域照样能播（那部分在磁盘上）。设计与实测见 [DESIGN.md](DESIGN.md#边下边播)。
 
-Trigger and watermarks: `push` checks "reclaim once only when the memory window exceeds
-`max`", dropping to `target` in one go — not on every push, since reclaiming is a
-`Vec::split_off` plus an allocation and frequent calls are costly. This "act only on
-overflow, drop all the way to target" pattern matches the disk cache's `EVICT_TARGET_RATIO`
-(drop to 80%).
+触发与水位：`push` 时检查「只有内存窗口超过 `max` 才回收一次」，且一次降到 `target` —— 不是每次 push 都做，因为回收是一次 `Vec::split_off` 加一次分配，频繁调用代价高。这个「只在溢出时动手、一次降到底」的模式与磁盘缓存的 `EVICT_TARGET_RATIO`（降到 80%）一致。
 
-Only bytes **before the read position** are dropped; bytes after it never are (the decoder is
-about to read them). The look-back window is defined by "how far behind the read position",
-independent of the clock, so there is no timed reclamation.
+只丢**读位置之前**的字节；之后的永不丢（解码器马上要读）。回看窗口由「落后读位置多远」定义，与时钟无关，所以没有定时回收。
 
-Guard test: `streaming::tests::keeps_only_a_bounded_window_in_memory` (asserts window length
-rather than RSS — unit tests share a process with parallel tests and the allocator cache, so
-`VmRSS` cannot be asserted; see [MAINTENANCE.md](MAINTENANCE.md) §5). RSS-level comparison
-experiments are done out of process; method and baseline in
-[MAINTENANCE.md](MAINTENANCE.md) §6.
+守护测试：`streaming::tests::keeps_only_a_bounded_window_in_memory`（断言窗口长度而非 RSS —— 单元测试与并行测试、分配器缓存共用一个进程，`VmRSS` 断言不了；见 [MAINTENANCE.md](MAINTENANCE.md) §5）。RSS 层面的对照实验在进程外做，方法与基线见 [MAINTENANCE.md](MAINTENANCE.md) §6。

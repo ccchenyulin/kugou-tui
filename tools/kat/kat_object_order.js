@@ -3,7 +3,12 @@
 // 而 JS 对象键序是插入序。Rust 侧若用默认的 BTreeMap（字典序）就会得到别的串。
 //
 // 用法：KUGOU_UPSTREAM=/path/to/KuGouMusicApi node tools/kat/kat_object_order.js
-const path = process.env.KUGOU_UPSTREAM || '/home/xibie/KuGouMusicApi';
+const path = process.env.KUGOU_UPSTREAM;
+if (!path) {
+  console.error('KUGOU_UPSTREAM 未设置：请指向 KuGouMusicApi 的 clone 路径，例如\n' +
+    '  KUGOU_UPSTREAM=/path/to/KuGouMusicApi node tools/kat/kat_object_order.js');
+  process.exit(1);
+}
 const helper = require(path + '/util/helper.js');
 
 const out = {};

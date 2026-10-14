@@ -11,7 +11,12 @@
 //
 // 用法：KUGOU_UPSTREAM=/path/to/KuGouMusicApi node tools/kat/kat_write.js
 const http = require('http');
-const path = process.env.KUGOU_UPSTREAM || '/home/xibie/KuGouMusicApi';
+const path = process.env.KUGOU_UPSTREAM;
+if (!path) {
+  console.error('KUGOU_UPSTREAM 未设置：请指向 KuGouMusicApi 的 clone 路径，例如\n' +
+    '  KUGOU_UPSTREAM=/path/to/KuGouMusicApi node tools/kat/kat_write.js');
+  process.exit(1);
+}
 const { spawnSync } = require('child_process');
 const forge = require(path + '/node_modules/node-forge');
 const CryptoJS = require(path + '/node_modules/crypto-js');

@@ -1,7 +1,12 @@
 // 用上游 KuGouMusicApi 的真实实现生成 KAT 基准值。
 // 只用于开发期对照，不进入仓库。
-// 上游 KuGouMusicApi 的 clone 路径；默认按开发机布局，可用 KUGOU_UPSTREAM 覆盖。
-const path = process.env.KUGOU_UPSTREAM || '/home/xibie/KuGouMusicApi';
+// 上游 KuGouMusicApi 的 clone 路径，必须由 KUGOU_UPSTREAM 指定。
+const path = process.env.KUGOU_UPSTREAM;
+if (!path) {
+  console.error('KUGOU_UPSTREAM 未设置：请指向 KuGouMusicApi 的 clone 路径，例如\n' +
+    '  KUGOU_UPSTREAM=/path/to/KuGouMusicApi node tools/kat/kat_gen.js');
+  process.exit(1);
+}
 const { cryptoMd5, cryptoRSAEncrypt, rsaEncrypt2 } = require(path + '/util/crypto.js');
 
 const FIXED = {
