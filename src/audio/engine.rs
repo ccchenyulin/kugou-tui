@@ -85,15 +85,6 @@ impl PlaybackState {
             _ => Self::Stopped,
         }
     }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Stopped => "已停止",
-            Self::Loading => "缓冲中",
-            Self::Playing => "播放中",
-            Self::Paused => "已暂停",
-        }
-    }
 }
 
 /// 音频线程上报的离散事件。
@@ -142,9 +133,10 @@ pub enum AudioEvent {
 /// RSS——见 `logger::rss_kib` 那个追踪开关。
 ///
 /// 门控精确到 glibc：`malloc_trim` 是 glibc 专有符号，Darwin 的 libc 里没有，
-/// 用 `cfg(unix)` 会让 macOS 构建直接失败。Windows 的 MSVC 堆本来就积极归还。
+/// 用 `cfg(unix)` 会让 macOS 构建直接失败。Windows 的 MSVC 堆本来就积极归还；
+/// 单写 `target_env = "gnu"` 还会误伤 `*-pc-windows-gnu`，那条 libc 也没这符号。
 pub fn trim_heap() {
-    #[cfg(target_env = "gnu")]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     unsafe {
         libc::malloc_trim(0);
     }
@@ -294,6 +286,22 @@ impl AudioHandle {
     /// 内部，会通过 [`AudioEvent::Failed`] 上报到界面，不走这里。
     pub fn spawn_failed(&self) -> bool {
         self.thread.is_none()
+    }
+
+    /// 仅供测试：造一个**不接音频线程**的句柄。
+    ///
+    /// 命令发出去没人收（`send` 本来就忽略失败），但状态读写的还是同一份
+    /// `Shared`，所以 `mark_loading` 这类同步写状态的方法行为不变。测试要的是
+    /// 「状态字段对不对、调用炸不炸」，没必要真的去开音频设备。
+    #[cfg(test)]
+    pub(crate) fn detached() -> Self {
+        let (command_tx, _command_rx) = unbounded();
+        Self {
+            command_tx,
+            shared: Arc::new(Shared::new(1.0)),
+            levels: AudioLevels::new(),
+            thread: None,
+        }
     }
 
     /// 当前播放电平（0.0 ~ 1.0 的一串格子，旧的在前）。
@@ -1593,7 +1601,7 @@ mod tests {
     /// ```bash
     /// cargo test --release mmap_threshold_effect_probe -- --ignored --nocapture
     /// ```
-    #[cfg(target_env = "gnu")]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     #[test]
     #[ignore = "诊断用，靠 --ignored 手动跑"]
     fn mmap_threshold_effect_probe() {

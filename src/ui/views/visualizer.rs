@@ -16,22 +16,43 @@
 //! * **缓动**：原始电平每 ~15ms 跳一次，直接画会抖。这里用「快起慢落」（起振 20ms、
 //!   回落 140ms）做指数平滑，柱子才既跟手又不抖。缓动按**真实时间**计算，所以帧率
 //!   从 5fps 提到 30fps 时快慢观感不变（见 `AppState::advance_visualizer`）。
-//! * **峰值刻度**：柱顶那条线落得比柱子慢，是频谱仪的标志性观感。
+//! * **峰值刻度**：柱顶那条线落得比柱子慢，是频谱仪的标志性观感。它画成一条
+//!   和柱体不同色的 `▔`，一眼能认出是「近期最高」而不是柱子的一部分。
+//! * **亚格分辨率 + 柱内渐变**：柱高按 1/8 格取整（`▁▂▃▄▅▆▇`），柱顶是连续的；
+//!   颜色按**柱内**相对高度取，每根柱子读起来是一列，而不是一条横向色带。
+//! * 柱区底下有一条暗色**地面线**，柱子有落脚点；空状态（未播放 / 缓冲）整块居中。
 //! * 本页没有列表，整块主区都归它（见 `ui::render_main`）。
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
 
 use crate::app::state::AppState;
 use crate::audio::engine::PlaybackState;
 use crate::keymap::key_hint_for;
-use crate::ui::theme::Theme;
+use crate::ui::theme::{Theme, mix};
 use crate::ui::widgets::panel;
 
 /// 缓冲动画的一帧序列。用点字符做旋转，比整块文字闪烁克制。
 const SPINNER: [char; 8] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
+
+/// 柱顶收口用的竖直填充块：1/8 … 8/8。
+///
+/// 一整格只用 `█` 的话柱高被量化到整行，低矮的柱子会在「空 / 满」之间整行跳变；
+/// 用这一组字符，柱顶就能落在一格之内的任意 1/8 处，起伏是连续的（cava / btop
+/// 那类频谱的观感）。
+const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// 每格切成 8 个刻度。`height` 行的柱区就是 `height * 8` 个刻度。
+const EIGHTHS: usize = 8;
+
+/// 柱体最多占几列。
+///
+/// 宽屏下步长会变大，若把多出来的列全给柱体，柱子会胖成一块块方砖。封顶之后
+/// 余量让给**空隙**——柱子始终是一根根细柱，铺满宽度靠的是间距而不是体量。
+const MAX_BODY: usize = 2;
 
 /// 绘制可视化页面。
 pub fn render_visualizer(
@@ -50,19 +71,28 @@ pub fn render_visualizer(
         return;
     }
 
-    // 节奏：频谱占满剩余空间，底部依次是「曲目信息」和「说明」，中间留一行呼吸
-    let [bars_area, _gap, info_area] = Layout::vertical([
+    // 节奏：频谱占满剩余空间，其下依次是「地面线」「呼吸」「曲目信息」
+    let [bars_area, floor_area, _gap, info_area] = Layout::vertical([
         Constraint::Min(2),
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
     .areas(inner);
 
-    // 左右各留 2 列内边距，柱子不会贴着边框，观感更稳
+    // 左右各留 2 列内边距，柱子不贴边框，观感更稳
     let bars_area = shrink_horizontal(bars_area, 2);
+    let floor_area = shrink_horizontal(floor_area, 2);
+
+    // 空状态（未播放 / 缓冲）跨过地面线整块居中：只把内容塞进柱区的话，
+    // 视觉重心会明显偏高，下面空一大片。
+    let content_area = Rect {
+        height: info_area.y.saturating_sub(bars_area.y),
+        ..bars_area
+    };
 
     match state.playback {
-        PlaybackState::Loading => render_buffering(frame, bars_area, state, theme),
+        PlaybackState::Loading => render_buffering(frame, content_area, state, theme),
         PlaybackState::Playing if !state.smooth_spectrum.is_empty() => {
             render_bars(
                 frame,
@@ -71,8 +101,9 @@ pub fn render_visualizer(
                 &state.peak_spectrum,
                 theme,
             );
+            render_floor(frame, floor_area, theme);
         }
-        _ => render_idle(frame, bars_area, state, theme),
+        _ => render_idle(frame, content_area, state, theme),
     }
 
     render_track_info(frame, info_area, state, theme);
@@ -118,10 +149,19 @@ fn bar_stride(area_width: usize, bands: usize) -> usize {
     if area_width > bands { 2 } else { 1 }
 }
 
-/// 画柱状频谱：底部对齐，越高越亮，柱顶带一条缓慢下落的峰值刻度。
+/// 画柱状频谱：底部对齐，柱内自下而上做渐变，柱顶用半块字符收口，柱顶之上
+/// 有一条缓慢下落的峰值刻度。
 ///
-/// 每行只用一个 `Span`：整行共用一个颜色即可（按行做渐变），不必为每个字符建 Span。
-/// 一个 80×20 的网格若逐字符建 Span 就是 1600 个，白白拖慢大尺寸终端下的帧。
+/// 三处和早先不同：
+///
+/// * **亚格分辨率**。柱高按 1/8 格取整，柱顶落在 `▁▂▃▄▅▆▇` 上，不再整行跳变。
+/// * **柱内渐变**。颜色由「这一格在**本柱**里的相对高度」决定，于是每根柱子读起来
+///   是一列（底暗顶亮），而不是所有柱子共用同一条横向色带。
+/// * **峰值是独立标记**。柱顶之上的峰值画成 `▔` 并用对比色，和柱体的填充块区分开
+///   ——不再是和柱子同色的、看着像下划线的浮线。
+///
+/// 每根柱子每行一个 `Span`（柱体同宽同色，一格 Span 就够）：最坏 `频段数 × 行数`
+/// 个，量级很小，不必逐字符建 Span。
 fn render_bars(frame: &mut Frame, area: Rect, levels: &[f32], peaks: &[f32], theme: &Theme) {
     let height = area.height as usize;
     if height == 0 || levels.is_empty() {
@@ -134,8 +174,9 @@ fn render_bars(frame: &mut Frame, area: Rect, levels: &[f32], peaks: &[f32], the
     if bars == 0 {
         return;
     }
-    // 柱体宽度：stride 够就留 1 列空隙，窄到放不下才让柱子贴着
-    let body = stride.saturating_sub(1).max(1);
+    // 柱体封顶，步长里多出来的列全给空隙
+    let body = stride.saturating_sub(1).clamp(1, MAX_BODY);
+    let gap = stride.saturating_sub(body);
 
     // 频段数通常多于柱子数，把一段频段压成一根柱子。
     // 取**最大值**而不是平均值：平均会把鼓点那一下的尖峰抹平，柱子就只剩一团钝钝的起伏。
@@ -154,15 +195,19 @@ fn render_bars(frame: &mut Frame, area: Rect, levels: &[f32], peaks: &[f32], the
     let columns = aggregate(levels);
     let caps = aggregate(peaks);
 
+    // 每根柱子先把刻度算好：柱体高度（1/8 格为单位）和峰值落在第几格。
+    let marks: Vec<BarMark> = columns
+        .iter()
+        .zip(&caps)
+        .map(|(&level, &cap)| BarMark::new(level, cap, height))
+        .collect();
+
     // 柱子整块居中。
     //
     // `bars = min(宽度 / stride, 频段数)`：当「宽度 / stride」比频段数大时，柱子
     // 只占 `bars * stride` 列，剩下的列全是空的。靠左铺的话右边会空出一大条
     // ——112 列的终端下实测空 15 列，看着像图没画完。居中的话两侧留白对称，
     // 一眼能看出是「画完了、就这么宽」。
-    //
-    // 不改成「把柱子加宽铺满」是因为那会得到宽度不一的柱子：79 列塞 64 根柱子，
-    // 多出来的 15 列只能分给其中一部分，柱体粗细不匀比留白更难看。
     let used = (bars - 1) * stride + body;
     let pad = (area.width as usize).saturating_sub(used) / 2;
 
@@ -170,58 +215,115 @@ fn render_bars(frame: &mut Frame, area: Rect, levels: &[f32], peaks: &[f32], the
     for row in 0..height {
         // 从底部数起的行号，用来判断这一格要不要点亮
         let from_bottom = height - row;
-        let style = bar_style(row, height, theme);
 
-        let mut text = String::with_capacity(used + pad);
-        for _ in 0..pad {
-            text.push(' ');
+        let mut spans: Vec<Span> = Vec::with_capacity(bars + 1);
+        if pad > 0 {
+            spans.push(Span::raw(" ".repeat(pad)));
         }
-        for (bar, &level) in columns.iter().enumerate() {
-            let filled = (level * height as f32).round() as usize;
-            let cap = (caps[bar] * height as f32).round() as usize;
-            let cell = if filled > 0 && from_bottom <= filled {
-                '█'
-            } else if cap > 0 && from_bottom == cap {
-                '▔'
-            } else {
-                ' '
-            };
-            // 柱体横向铺 `body` 列：宽屏下柱子变宽而不是右边留一片空白
+        for (bar, mark) in marks.iter().enumerate() {
+            let (glyph, style) = bar_cell(from_bottom, mark, theme);
+            let mut chunk = String::with_capacity(body + gap);
             for _ in 0..body {
-                text.push(cell);
+                chunk.push(glyph);
             }
             // 柱间空隙。最后一根后面不留，否则右边会多出一列空白
             if bar + 1 < bars {
-                for _ in body..stride {
-                    text.push(' ');
+                for _ in 0..gap {
+                    chunk.push(' ');
                 }
             }
+            spans.push(Span::styled(chunk, style));
         }
-        lines.push(Line::from(Span::styled(text, style)));
+        lines.push(Line::from(spans));
     }
 
-    frame.render_widget(ratatui::widgets::Paragraph::new(lines), area);
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// 柱子的颜色：底部暗、顶部亮，形成渐变。
+/// 一根柱子的刻度。
+struct BarMark {
+    /// 柱体高度，以 1/8 格为单位。
+    filled: usize,
+    /// 峰值所在的行（从底部数）；0 表示这一根不画峰值（没有、或还没高过柱顶）。
+    peak_cell: usize,
+}
+
+impl BarMark {
+    fn new(level: f32, cap: f32, height: usize) -> Self {
+        let scale = (height * EIGHTHS) as f32;
+        let filled = (level.clamp(0.0, 1.0) * scale).round() as usize;
+        let peak = (cap.clamp(0.0, 1.0) * scale).round() as usize;
+
+        // 峰值只在**高过柱顶一整格**时才画：否则它会和柱顶撞在同一格里，
+        // 要么被柱体盖住，要么糊成一团。柱顶追上去时峰值消失、回落时再浮现，
+        // 正是频谱仪该有的行为。
+        let fill_cell = filled.div_ceil(EIGHTHS);
+        let peak_cell = peak.div_ceil(EIGHTHS);
+        Self {
+            filled,
+            peak_cell: if peak_cell > fill_cell { peak_cell } else { 0 },
+        }
+    }
+}
+
+/// 一格该画什么字符、用什么颜色。
+fn bar_cell(from_bottom: usize, mark: &BarMark, theme: &Theme) -> (char, Style) {
+    let lo = (from_bottom - 1) * EIGHTHS;
+    let hi = from_bottom * EIGHTHS;
+
+    if mark.filled >= hi {
+        ('█', bar_style(from_bottom, mark.filled, theme))
+    } else if mark.filled > lo {
+        // 柱顶落在这一格之内：取对应高度的填充块收口
+        let partial = mark.filled - lo; // 1..=7
+        (
+            BLOCKS[partial - 1],
+            bar_style(from_bottom, mark.filled, theme),
+        )
+    } else if mark.peak_cell == from_bottom {
+        ('▔', peak_style(theme))
+    } else {
+        (' ', Style::default())
+    }
+}
+
+/// 柱子的颜色：按「这一格在**本柱**里的相对高度」取色，底部暗、柱顶亮。
 ///
-/// 用主题的语义色而不是硬编码色值，16 色模式下也能正确降级。
-fn bar_style(row: usize, height: usize, theme: &Theme) -> Style {
-    let ratio = if height <= 1 {
-        1.0
-    } else {
-        row as f32 / (height - 1) as f32
-    };
+/// 关键是**柱内**相对高度而不是绝对高度：用绝对高度的话所有柱子在同一行同色，
+/// 又变回一整条横向色带。三段渐变（暗槽 → 中调 → 柱顶）给柱子一点纵深。
+/// 全部走主题语义色，16 色模式下 [`mix`] 会退化成两端取一，不会拼出假 RGB。
+fn bar_style(from_bottom: usize, filled: usize, theme: &Theme) -> Style {
+    let rows = (filled as f32 / EIGHTHS as f32).max(1.0);
+    let t = (from_bottom as f32 / rows).clamp(0.0, 1.0);
 
-    let base = if ratio > 0.8 {
-        theme.accent
-    } else if ratio > 0.5 {
-        theme.accent_dim
+    let color = if t < 0.5 {
+        mix(theme.progress_bg, theme.accent_dim, t * 2.0)
     } else {
-        theme.text_dim
+        mix(theme.accent_dim, theme.accent, (t - 0.5) * 2.0)
     };
+    Style::default().fg(color)
+}
 
-    Style::default().fg(base).add_modifier(Modifier::BOLD)
+/// 峰值刻度：用正文色（中性、亮）配一个居中的 `▔`，和彩色的柱体区分开。
+///
+/// 不用强调色是因为柱顶本身就是强调色，同色的话那条浮线又会被读成柱子的一部分。
+fn peak_style(theme: &Theme) -> Style {
+    Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
+}
+
+/// 柱区的**地面线**：一排暗色横线，给柱子一个落脚的地方，眼睛有参照。
+fn render_floor(frame: &mut Frame, area: Rect, theme: &Theme) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let rule = "─".repeat(area.width as usize);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            rule,
+            Style::default().fg(theme.border),
+        ))),
+        area,
+    );
 }
 
 /// 未播放：给一句能直接照做的引导，而不是干瘪的「无数据」。
@@ -230,67 +332,128 @@ fn bar_style(row: usize, height: usize, theme: &Theme) -> Style {
 /// 显示「已暂停 —— 按 Space 继续」。可停止是「播完了 / 还没开始」，按 Space 是
 /// **从头播**；暂停是「停在半路」，按 Space 是**接着播**。混成一句的话，用户
 /// 按下 Space 的下一秒就知道界面在骗人。
+///
+/// 观感上是一个「空状态」：一个安静的图标 + 主句 + 次级提示，整块居中，而不是
+/// 一行孤零零的句子漂在中间。
 fn render_idle(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     // 空格键可能在 `[keymap]` 里被改过，所以提示里的键名实时取。
     let play_pause = key_hint_for("Space");
-    let text = match state.playback {
-        PlaybackState::Paused => &format!("已暂停 —— 按 {play_pause} 接着播"),
+    let (headline, hint) = match state.playback {
+        PlaybackState::Paused => ("已暂停".to_string(), format!("按 {play_pause} 接着播")),
         PlaybackState::Stopped if state.current.is_some() => {
-            &format!("已停止 —— 按 {play_pause} 从头播")
+            ("已停止".to_string(), format!("按 {play_pause} 从头播"))
         }
-        PlaybackState::Stopped => "未在播放 —— 到「歌单」或「排行榜」里按 Enter 播一首",
+        PlaybackState::Stopped => (
+            "未在播放".to_string(),
+            "到「歌单」或「排行榜」里按 Enter 播一首".to_string(),
+        ),
         // 走到这里说明是 Playing 但还没采到频谱（刚起播的那一瞬）。
         // 说「已暂停」或「已停止」都是谎话，那就照实说在采数据
-        PlaybackState::Loading | PlaybackState::Playing => "正在播放 —— 频谱数据还没到",
+        PlaybackState::Loading | PlaybackState::Playing => {
+            ("正在播放".to_string(), "频谱数据还没到".to_string())
+        }
     };
-    frame.render_widget(
-        ratatui::widgets::Paragraph::new(Line::from(Span::styled(text, theme.dim())))
-            .alignment(Alignment::Center),
+
+    render_centered(
+        frame,
         area,
+        vec![
+            Line::from(Span::styled("♪", Style::default().fg(theme.accent_dim))),
+            Line::from(""),
+            Line::from(Span::styled(
+                headline,
+                theme.body().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(hint, theme.dim())),
+        ],
     );
 }
 
-/// 缓冲中：转点 + 百分比。下载进度已有节流，这里只做显示。
+/// 缓冲中：转点 + 进度条 + 百分比。下载进度已有节流，这里只做显示。
 fn render_buffering(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     // 每 3 拍换一帧，约 600ms 转一圈（按默认 tick），不刺眼
     let glyph = SPINNER[(state.ticks / 3) as usize % SPINNER.len()];
-    let mut spans = vec![Span::styled(format!("{glyph} 缓冲中"), theme.now_playing())];
-    if let Some((received, total)) = state.download_progress
-        && let Some(total) = total
+
+    let mut lines = vec![
+        Line::from(Span::styled(glyph.to_string(), theme.now_playing())),
+        Line::from(""),
+        Line::from(Span::styled(
+            "缓冲中",
+            theme.body().add_modifier(Modifier::BOLD),
+        )),
+    ];
+
+    // 只知道收了多少、不知道总量时不给百分比：宁可不画，也不给个假的分母
+    if let Some((received, Some(total))) = state.download_progress
         && total > 0
     {
-        spans.push(Span::styled(
-            format!("  {}%", (received * 100 / total).min(100)),
-            theme.dim(),
-        ));
+        let percent = (received * 100 / total).min(100);
+        lines.push(Line::from(progress_spans(percent, theme)));
     }
+
+    render_centered(frame, area, lines);
+}
+
+/// 缓冲进度条：填充段用强调色、空槽用暗色，末尾跟百分比。
+fn progress_spans(percent: u64, theme: &Theme) -> Vec<Span<'static>> {
+    const WIDTH: usize = 24;
+    let filled = ((percent.min(100) as usize) * WIDTH / 100).min(WIDTH);
+
+    vec![
+        Span::styled("━".repeat(filled), theme.now_playing()),
+        Span::styled(
+            "─".repeat(WIDTH - filled),
+            Style::default().fg(theme.border),
+        ),
+        Span::styled(format!("  {percent}%"), theme.dim()),
+    ]
+}
+
+/// 曲目信息：歌名最重（强调色加粗），歌手与进度退到次要层级。
+///
+/// 早先是一整行同色的「歌手 - 歌名  时间」，没有主次，扫一眼分不出哪个是歌名。
+fn render_track_info(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+    let mut spans: Vec<Span> = Vec::new();
+    match &state.current {
+        Some(song) => {
+            spans.push(Span::styled(song.name.clone(), theme.now_playing()));
+            spans.push(Span::styled("  ·  ", theme.dim()));
+            spans.push(Span::styled(song.singer_text(), theme.dim()));
+        }
+        None => spans.push(Span::styled("—", theme.dim())),
+    }
+    spans.push(Span::styled("    ", theme.dim()));
+    spans.push(Span::styled(
+        format!(
+            "{:02}:{:02}",
+            state.position_ms / 60_000,
+            (state.position_ms / 1000) % 60
+        ),
+        theme.dim(),
+    ));
+
     frame.render_widget(
-        ratatui::widgets::Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
+        Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
         area,
     );
 }
 
-/// 曲目信息：歌名居中，后面跟当前进度，两者用不同层级区分。
-fn render_track_info(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
-    let title = state
-        .current
-        .as_ref()
-        .map(|song| format!("{} - {}", song.singer_text(), song.name))
-        .unwrap_or_else(|| "—".to_string());
-    let position = format!(
-        "  {:02}:{:02}",
-        state.position_ms / 60_000,
-        (state.position_ms / 1000) % 60
-    );
-
-    frame.render_widget(
-        ratatui::widgets::Paragraph::new(Line::from(vec![
-            Span::styled(title, theme.title()),
-            Span::styled(position, theme.dim()),
-        ]))
-        .alignment(Alignment::Center),
-        area,
-    );
+/// 把若干行整块水平居中 + 垂直居中地放进 `area`。
+fn render_centered(frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let height = (lines.len() as u16).min(area.height);
+    let target = if area.height > height {
+        Rect {
+            y: area.y + (area.height - height) / 2,
+            height,
+            ..area
+        }
+    } else {
+        area
+    };
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), target);
 }
 
 #[cfg(test)]
@@ -460,22 +623,72 @@ mod tests {
         );
     }
 
-    /// 宽屏下柱子要横向铺满，而不是只占左边一段。
+    /// 宽屏下柱子要横向铺开，而不是只占左边一段。
     ///
     /// 这是之前那个 bug：stride 写死 2，柱数被频段数（64）截断后，多出来的
     /// 列全空着，全屏看右边一大片空白。
+    ///
+    /// 现在柱体宽度封顶（[`MAX_BODY`]），宽屏下多出来的步长让给**空隙**，不再把
+    /// 柱子拉成方砖——所以这里量的是「首尾柱子之间的跨度」和「单根柱体的最大宽度」，
+    /// 而不是填充列数。
     #[test]
     fn bars_stretch_to_fill_wide_terminal() {
         let width: usize = 100;
         let buffer = bars_of(width as u16, 2, &[1.0; 4]);
-        let filled = (0..width as u16)
-            .filter(|&x| buffer[(x, 1)].symbol() == "█")
-            .count();
-        // 4 根柱子把 100 列几乎占满，只剩柱间空隙
+        let lit: Vec<usize> = (0..width)
+            .filter(|&x| buffer[(x as u16, 1)].symbol() == "█")
+            .collect();
+        assert!(!lit.is_empty(), "应当有柱子被点亮");
+
+        // 单根柱体不超过上限
+        let mut run = 1usize;
+        let mut widest = 1usize;
+        for pair in lit.windows(2) {
+            if pair[1] == pair[0] + 1 {
+                run += 1;
+                widest = widest.max(run);
+            } else {
+                run = 1;
+            }
+        }
         assert!(
-            filled >= width - 8,
-            "宽屏下柱子该铺满：100 列里只填了 {filled} 列"
+            widest <= MAX_BODY,
+            "柱体被拉宽到 {widest} 列，超过了上限 {MAX_BODY}"
         );
+
+        // 首尾仍横跨大部分宽度
+        let span = lit[lit.len() - 1] - lit[0] + 1;
+        assert!(span >= width / 2, "柱子只横跨 {span} / {width} 列");
+    }
+
+    /// 亚格分辨率：柱顶落在一格之内时用半块字符收口，不再整行跳变。
+    #[test]
+    fn bar_top_uses_sub_cell_blocks() {
+        // 高度 3 行 = 24 个 1/8 刻度。0.5 → 12 刻度 → 底部一整行、第二行半格。
+        let buffer = bars_of(2, 3, &[0.5]);
+        assert_eq!(buffer[(0, 2)].symbol(), "█", "最底一行应满格");
+        assert_eq!(buffer[(0, 1)].symbol(), "▄", "第二行应是半格");
+        assert_eq!(buffer[(0, 0)].symbol(), " ", "顶行应是空的");
+    }
+
+    /// 峰值明显高于柱体时，在它所在的行画一个独立标记，而不是把柱体加高。
+    #[test]
+    fn peak_above_the_bar_draws_a_marker() {
+        let area = Rect::new(0, 0, 2, 4);
+        let mut terminal = Terminal::new(TestBackend::new(2, 4)).expect("测试后端可用");
+        let theme = Theme::for_config(ThemeName::Default, false);
+        // 高度 4 行 = 32 刻度。柱体 0.25 → 8 刻度（底行满）；峰值 0.9 → 29 刻度（顶行）。
+        let levels = [0.25f32];
+        let peaks = [0.9f32];
+        let drawn = terminal
+            .draw(|frame| render_bars(frame, area, &levels, &peaks, &theme))
+            .expect("绘制成功");
+        let buffer = &drawn.buffer;
+
+        assert_eq!(buffer[(0, 3)].symbol(), "█", "柱体应在底行");
+        let marker = (0..4).find(|&y| buffer[(0, y)].symbol() == "▔");
+        let marker = marker.expect("应当画出峰值标记");
+        assert!(marker < 3, "峰值标记应在柱体之上，实际在第 {marker} 行");
     }
 
     /// 窄屏放不下空隙时，柱子贴着画（不塌陷、不错位）。

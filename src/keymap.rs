@@ -231,8 +231,7 @@ pub fn install_custom(bindings: &BTreeMap<String, String>) -> usize {
 /// 这个漏项真的发生过：`context_menu`（`;` 打开歌曲右键菜单）在 `resolve_normal`
 /// 与 `CHEATSHEET` 里都有，帮助面板也照常显示，但名字表里没有它——于是用户照着
 /// 文档去 `[keymap]` 里写 `context_menu = "m"` 时得到的是「未知动作 context_menu」，
-/// 而那个动作明明存在。`CONTRIBUTING.md` 把「记得同步这张表」写成了一条人工步骤，
-/// 见 `every_cheatsheet_shortcut_can_be_rebound_by_name`——那条测试把它变成机械检查。
+/// 而那个动作明明存在。这条测试把它变成机械检查，不靠人工同步。
 ///
 /// **带参数的动作不在其中**：`Char` / `Digit` / `SeekTo` / `SeekBy` 的值来自运行时
 /// （`SwitchTab` 那类「需要数字」的写法同理），配置文件里写不出完整语义。
@@ -923,8 +922,7 @@ mod tests {
     /// （`;` 打开歌曲右键菜单）在 `resolve_normal` 与 `CHEATSHEET` 里都有，帮助面板
     /// 也照常显示，但 `action_from_name` 里没有它的名字——用户照文档写
     /// `context_menu = "m"` 得到的是「未知动作 context_menu」，而那个动作明明存在。
-    /// `CONTRIBUTING.md` 把「记得同步这张表」写成了一条人工步骤，这条测试把它
-    /// 变成机械检查。
+    /// 这条测试把它变成机械检查，不靠人工同步。
     ///
     /// 为什么这个方向能自动查、而上面那条的**反方向**（绑了但面板没写）不能：
     /// `CHEATSHEET` 与 `REBINDABLE` 都是数据，两边可以对着数；`resolve_normal`

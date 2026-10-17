@@ -35,7 +35,7 @@
 #
 # # 本地等价命令
 #
-# 见 `CONTRIBUTING.md`「提交前请跑这三条」与 `docs/MAINTENANCE.md` §1.6。
+# 见 `README.md` 的「开发」一节。
 # `cargo fmt --check` 只在 Linux 那一栏跑：格式化与平台无关，三栏各跑一遍是浪费。
 
 name: CI
@@ -43,7 +43,15 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+      - "assets/**"
   pull_request:
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+      - "assets/**"
   workflow_dispatch:
 
 # 同一分支连续推送时取消前一次，省额度也省得看一堆过期结果。
@@ -78,6 +86,13 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+      # 关掉默认 feature 的那套组合也编一遍。它换掉整个 bootstrap 模块
+      # （走 `src/bootstrap_disabled.rs` 的替身），是最容易在后续改动里
+      # 悄悄编不过的组合——而它恰恰是「不想让二进制带 Node 引导」的人用的。
+      # 与 fmt 同理：feature 组合与平台无关，只在 Linux 这一栏查。
+      - run: cargo clippy --all-targets --no-default-features -- -D warnings
+      - run: cargo test --no-default-features
 
   windows:
     name: Windows

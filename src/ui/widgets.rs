@@ -12,47 +12,24 @@ use crate::api::model::Song;
 use crate::audio::engine::PlaybackState;
 use crate::ui::theme::Theme;
 
-/// 把一段文本编码成二维码，渲染成可直接显示的行。
+/// 判断**已经渲染好**的二维码行能否完整塞进 `max_width × max_rows`；装得下就返回一份。
 ///
-/// # 为什么用半块字符
+/// # 为什么收「已渲染的行」而不是「内容」
 ///
-/// 终端字符的高度约为宽度的两倍。若一个模块占一个字符，二维码会被纵向拉成两倍；
-/// 把一个二维码渲染成**能塞进给定区域**的字符行；塞不下返回 `None`。
+/// 二维码在收到时就按当前 `aspect` 渲染好并存进 `login.qr` 了（见 `Loaded::LoginQr`），
+/// 这里再编码一遍纯属浪费——实测单次编码约 0.9ms，而登录弹窗每帧都会走到这里。
 ///
-/// # 为什么需要边界
+/// # 为什么装不下返回 `None`
 ///
-/// 二维码的行数是**内容长度决定的，不能压缩**：半块字符一个字符承载上下两个
-/// 模块，所以 H 个模块恒定占 `ceil(H/2)` 行、W 列——再密就只能扭曲比例、扫不出来。
-/// 汽水的扫码地址（`bff-pc.qishui.com/ucenter_web/app/sdk-next?...`）比酷狗的
-/// 长得多，编出来的版本自然更高，在行数不多的终端上会直接撑满屏幕。
-///
-/// 所以这里不缩放（缩放等于毁掉可扫性），而是**判断装不装得下**：
-/// 装不下就返回 `None`，让界面改成给一句能照做的提示——比画一个被裁掉、
-/// 扫不出来的二维码有用。
-pub fn qr_lines_fitted(
-    content: &str,
-    aspect: f32,
-    max_width: usize,
-    max_rows: usize,
-) -> Option<Vec<String>> {
-    let modules = qr_modules(content)?;
-    let width = modules.first().map(Vec::len).unwrap_or(0);
-    let height = modules.len();
-    if width == 0 || height == 0 {
+/// 二维码的行数由内容长度决定、不能压缩：半块字符一个字符承载上下两个模块，
+/// H 个模块恒定占 `ceil(H/2)` 行、W 列，缩放等于毁掉可扫性。装不下时返回 `None`，
+/// 让界面改成给一句能照做的提示——比画一个被裁掉、扫不出来的二维码有用。
+pub fn qr_lines_fitted(lines: &[String], max_width: usize, max_rows: usize) -> Option<Vec<String>> {
+    let width = lines.first().map(|line| line.chars().count()).unwrap_or(0);
+    if width == 0 || width > max_width || lines.len() > max_rows {
         return None;
     }
-
-    // 宽字符字体（aspect < 1.5）用一字符一行；否则半块字符（一字符两行模块）。
-    let (rows, lines) = if aspect < 1.5 {
-        (height, render_full_blocks(&modules))
-    } else {
-        (height.div_ceil(2), render_half_blocks(&modules))
-    };
-
-    if width > max_width || rows > max_rows {
-        return None;
-    }
-    Some(lines)
+    Some(lines.to_vec())
 }
 
 /// 渲染二维码**所需**的行列数（用来在装不下时告诉用户差多少）。
@@ -187,6 +164,29 @@ pub fn selection_list<'a>(items: Vec<ListItem<'a>>, theme: &Theme) -> List<'a> {
         .scroll_padding(2)
 }
 
+/// 列表行是否落在「可能出现在屏幕上」的窗口内。
+///
+/// [`List`] 必须收到与真实列表**等长**的 items（它靠 `items.len()` 维护滚动
+/// 偏移、并按 offset 迭代），所以不能只把可见那几行传进去。但真正昂贵的只有
+/// [`song_row`] / [`entry_row`] 里的字符串格式化与显示宽度扫描；窗口外的行用
+/// 等高的空占位顶上去即可，滚动、高亮、滚动条的行为分毫不动。上千首的歌单或
+/// 队列下，这一层能把每帧的构造量从 O(整表) 降到 O(可见)。
+///
+/// 窗口取「当前偏移」与「选中项」两侧各一屏多：按 End 或鼠标跳转时 ratatui 会把
+/// 选中项滚进视野，那一屏也得是真行，否则会闪一帧空白。
+pub fn row_is_visible(
+    index: usize,
+    offset: usize,
+    selected: Option<usize>,
+    visible_rows: usize,
+) -> bool {
+    let focus = selected.unwrap_or(offset);
+    let margin = visible_rows.saturating_add(1);
+    let low = offset.min(focus).saturating_sub(margin);
+    let high = offset.max(focus).saturating_add(margin);
+    index >= low && index <= high
+}
+
 /// 统一的带边框面板。
 ///
 /// `focused` 决定边框亮度——这是界面里唯一表示「键盘焦点在哪」的视觉线索，
@@ -253,18 +253,49 @@ pub fn song_row(
     context: RowContext,
     theme: &Theme,
 ) -> ListItem<'static> {
+    let (name_width, singer_width, album_width) = song_columns(context.width);
+    let line = Line::from(song_spans(
+        number,
+        song,
+        context,
+        name_width,
+        singer_width,
+        album_width,
+        theme,
+    ));
+    ListItem::new(line)
+}
+
+/// 歌名 / 歌手 / 专辑三列各占多少列（放不下的列返回 0，调用方整列省略）。
+///
+/// 三列合计不得超过可用宽度，否则整行会溢出，把右侧时长挤成 `03:2` 这种半截——
+/// 80×24 下歌词并排后歌曲栏只剩 ~25 列时就会发生。所以各列的下限（歌名 8、
+/// 歌手 6）先被 `flexible` 夹住；窄终端里「少一列」远比「截断时长」可读。
+fn song_columns(width: usize) -> (usize, usize, usize) {
     // 序号 4 列 + 时长 6 列 + 4 个空格分隔
     const NUMBER_WIDTH: usize = 4;
     const DURATION_WIDTH: usize = 6;
     const GAPS: usize = 4;
 
-    let flexible = context
-        .width
-        .saturating_sub(NUMBER_WIDTH + DURATION_WIDTH + GAPS);
-    let name_width = (flexible * 45 / 100).max(8);
-    let singer_width = (flexible * 25 / 100).max(6);
-    let album_width = flexible.saturating_sub(name_width + singer_width + 2);
+    let flexible = width.saturating_sub(NUMBER_WIDTH + DURATION_WIDTH + GAPS);
+    let name = (flexible * 45 / 100).max(8).min(flexible);
+    let singer = (flexible * 25 / 100)
+        .max(6)
+        .min(flexible.saturating_sub(name));
+    let album = flexible.saturating_sub(name + singer + 2);
+    (name, singer, album)
+}
 
+/// 组装歌曲行的各段。宽度为 0 的列直接省略，保证整行不溢出。
+fn song_spans(
+    number: usize,
+    song: &Song,
+    context: RowContext,
+    name_width: usize,
+    singer_width: usize,
+    album_width: usize,
+    theme: &Theme,
+) -> Vec<Span<'static>> {
     // ASCII 标记，避免字体缺字。
     //
     // 播放中刻意**不用** `>`：列表的选中标记已经占用了 `> `，两个 `>` 并排
@@ -295,28 +326,31 @@ pub fn song_row(
         theme.body()
     };
 
-    let line = Line::from(vec![
-        // 序号从 1 开始：用户看的是「第几首」，不是数组下标
-        Span::styled(format!("{marker}{:>3} ", number + 1), number_style),
-        Span::styled(
+    // 序号从 1 开始：用户看的是「第几首」，不是数组下标
+    let mut spans = vec![Span::styled(
+        format!("{marker}{:>3} ", number + 1),
+        number_style,
+    )];
+    if name_width > 0 {
+        spans.push(Span::styled(
             format!("{} ", truncate_to_width(&song.name, name_width)),
             name_style,
-        ),
-        Span::styled(
+        ));
+    }
+    if singer_width > 0 {
+        spans.push(Span::styled(
             format!("{} ", truncate_to_width(&song.singer_text(), singer_width)),
             theme.dim(),
-        ),
-        Span::styled(
-            format!(
-                "{} ",
-                truncate_to_width(display_album(song), album_width.max(1))
-            ),
+        ));
+    }
+    if album_width > 0 {
+        spans.push(Span::styled(
+            format!("{} ", truncate_to_width(display_album(song), album_width)),
             theme.dim(),
-        ),
-        Span::styled(song.duration_text(), theme.dim()),
-    ]);
-
-    ListItem::new(line)
+        ));
+    }
+    spans.push(Span::styled(song.duration_text(), theme.dim()));
+    spans
 }
 
 /// 专辑名缺失时给个占位，避免列塌陷。
@@ -464,6 +498,48 @@ mod tests {
         assert_eq!(human_bytes(5 * 1024 * 1024), "5.0 MiB");
     }
 
+    /// 歌曲行在任何可用宽度下都不能溢出：80×24 时歌曲面板只剩 ~25 列，
+    /// 老的三列 floor（歌名 8 / 歌手 6 / 专辑 1）会把时长挤成 `03:2`。
+    #[test]
+    fn song_row_never_overflows_the_available_width() {
+        let song = Song {
+            name: "龙卷风".to_string(),
+            singers: vec![crate::api::model::Singer {
+                id: 0,
+                name: "周杰伦".to_string(),
+            }],
+            album_name: "Jay".to_string(),
+            duration_ms: 200_000,
+            ..Default::default()
+        };
+        let theme = Theme::for_config(crate::ui::theme::ThemeName::Default, false);
+
+        // 面板自身的最小宽度是 10（见 `too_small`）：序号 4 列 + 时长 6 列是硬开销。
+        for width in 10..=80 {
+            let (name, singer, album) = song_columns(width);
+            let context = RowContext {
+                width,
+                is_current: true,
+                playback: PlaybackState::Playing,
+                hover: false,
+            };
+            let spans = song_spans(1, &song, context, name, singer, album, &theme);
+            let total: usize = spans.iter().map(|span| display_width(&span.content)).sum();
+            assert!(
+                total <= width,
+                "宽度 {width} 溢出：占 {total} 列（name={name} singer={singer} album={album}）"
+            );
+        }
+    }
+
+    /// 窄宽度下专辑列整列省略，而不是压成 1 列把时长挤出界。
+    #[test]
+    fn song_columns_drop_the_album_when_there_is_no_room() {
+        assert_eq!(song_columns(25), (8, 3, 0));
+        let (_, _, wide_album) = song_columns(120);
+        assert!(wide_album > 0, "宽终端应保留专辑列");
+    }
+
     #[test]
     fn centered_rect_is_clamped_to_area() {
         let area = Rect::new(0, 0, 40, 10);
@@ -484,6 +560,33 @@ mod tests {
         assert_eq!(popup.height, 10);
     }
 
+    // ---- 只构造可见窗口的行 ----
+
+    #[test]
+    fn row_window_covers_the_offset_plus_a_screenful() {
+        // 没有选中项时以偏移为焦点：一屏 10 行，上下各多留一屏多。
+        assert!(row_is_visible(0, 0, None, 10));
+        assert!(row_is_visible(11, 0, None, 10));
+        assert!(!row_is_visible(12, 0, None, 10));
+    }
+
+    #[test]
+    fn row_window_follows_the_selected_item_off_screen() {
+        // 选中项被滚到视野外时（例如按 End），它那一屏也得是真行，
+        // 否则 ratatui 把选中项滚进来时会闪一帧空白。
+        assert!(row_is_visible(100, 90, Some(100), 10));
+        assert!(row_is_visible(85, 90, Some(100), 10));
+        assert!(!row_is_visible(78, 90, Some(100), 10));
+        assert!(!row_is_visible(112, 90, Some(100), 10));
+    }
+
+    #[test]
+    fn row_window_survives_empty_and_tiny_lists() {
+        // 空列表（visible_rows 为 0）也不能越界或反向。
+        assert!(row_is_visible(0, 0, None, 0));
+        assert!(!row_is_visible(2, 0, None, 0));
+    }
+
     // ---- 二维码按可用区域自适应 ----
 
     /// 汽水的扫码地址明显比酷狗长，编出来的二维码也更大——这正是
@@ -493,8 +596,9 @@ mod tests {
     #[test]
     fn fitted_qr_renders_when_there_is_enough_room() {
         let (width, rows) = qr_needed_size(SODA_SCAN_URL, 2.0).expect("能编码");
-        // 给足空间就该画得出来，行数要与「所需尺寸」一致
-        let lines = qr_lines_fitted(SODA_SCAN_URL, 2.0, width, rows).expect("空间够时应渲染");
+        let rendered = qr_lines(SODA_SCAN_URL, 2.0).expect("能编码");
+        // 给足空间就该原样返回，行数要与「所需尺寸」一致
+        let lines = qr_lines_fitted(&rendered, width, rows).expect("空间够时应渲染");
         assert_eq!(lines.len(), rows, "渲染行数应与所需行数一致");
         assert!(lines.iter().all(|line| line.chars().count() == width));
     }
@@ -504,10 +608,13 @@ mod tests {
     #[test]
     fn fitted_qr_refuses_when_the_area_is_too_small() {
         let (width, rows) = qr_needed_size(SODA_SCAN_URL, 2.0).unwrap();
+        let rendered = qr_lines(SODA_SCAN_URL, 2.0).unwrap();
         // 少一行就不画
-        assert!(qr_lines_fitted(SODA_SCAN_URL, 2.0, width, rows - 1).is_none());
+        assert!(qr_lines_fitted(&rendered, width, rows - 1).is_none());
         // 少一列也不画
-        assert!(qr_lines_fitted(SODA_SCAN_URL, 2.0, width - 1, rows).is_none());
+        assert!(qr_lines_fitted(&rendered, width - 1, rows).is_none());
+        // 还没收到二维码（空输入）也不能当作「装得下」
+        assert!(qr_lines_fitted(&[], width, rows).is_none());
     }
 
     /// 所需尺寸要与实际渲染对得上——否则提示里的「需要多少行」会误导用户。
@@ -515,7 +622,8 @@ mod tests {
     fn needed_size_matches_what_gets_rendered() {
         for aspect in [1.0_f32, 2.0] {
             let (width, rows) = qr_needed_size("https://example.com/short", aspect).unwrap();
-            let lines = qr_lines_fitted("https://example.com/short", aspect, width, rows).unwrap();
+            let rendered = qr_lines("https://example.com/short", aspect).unwrap();
+            let lines = qr_lines_fitted(&rendered, width, rows).unwrap();
             assert_eq!(lines.len(), rows, "aspect={aspect}");
             assert_eq!(lines[0].chars().count(), width, "aspect={aspect}");
         }
@@ -538,7 +646,7 @@ mod tests {
         // 极长内容超过二维码容量上限
         let huge = "x".repeat(10_000);
         assert!(qr_needed_size(&huge, 2.0).is_none());
-        assert!(qr_lines_fitted(&huge, 2.0, 200, 100).is_none());
+        assert!(qr_lines(&huge, 2.0).is_none());
     }
 
     // ---- 尺寸回归 ----
@@ -579,5 +687,27 @@ mod tests {
             width <= 53,
             "长地址的宽度应被 L 级别压在 53 以内，实际 {width}（是否被改回 M 了？）"
         );
+    }
+
+    // ---- 基准（默认不跑：`cargo test -- --ignored --nocapture`）----
+
+    /// 量化「每帧重新编码二维码」的代价，用来决定要不要缓存渲染结果。
+    ///
+    /// 阈值 300µs：低于它就不值得为缓存引入状态字段与失效逻辑——缓存漏失效
+    /// 会画出扫不出来的旧码，比省下的几百微秒贵得多。
+    #[test]
+    #[ignore = "基准测试，靠 --ignored 手动跑"]
+    fn bench_qr_encoding_cost() {
+        const ITERATIONS: u32 = 200;
+        // 热身一次，把首次的惰性分配排除在外。
+        let _ = qr_lines(SODA_SCAN_URL, 2.0).expect("能编码");
+
+        let start = std::time::Instant::now();
+        for _ in 0..ITERATIONS {
+            let lines = qr_lines(SODA_SCAN_URL, 2.0).expect("能编码");
+            std::hint::black_box(&lines);
+        }
+        let per_call = start.elapsed() / ITERATIONS;
+        println!("二维码编码（汽水地址）：{per_call:?}/次（{ITERATIONS} 次平均）");
     }
 }

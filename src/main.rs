@@ -46,6 +46,12 @@
 mod api;
 mod app;
 mod audio;
+// 关掉 `node-bootstrap` 时换成同名函数的替身，调用点（`main.rs`、`app/cloud.rs`）
+// 因此不需要各自再包一层 `#[cfg]`——少一处 cfg 就少一处两边行为漂移的机会。
+#[cfg(feature = "node-bootstrap")]
+mod bootstrap;
+#[cfg(not(feature = "node-bootstrap"))]
+#[path = "bootstrap_disabled.rs"]
 mod bootstrap;
 mod cli;
 mod config;
@@ -63,6 +69,9 @@ mod tray;
 mod ui;
 mod util;
 mod window;
+// WebSocket 服务：跨平台（只依赖 tokio 的 TcpListener 与 rustls），不像 MPRIS
+// 那样需要桌面环境。
+mod ws;
 
 use anyhow::Context;
 use clap::Parser;
@@ -96,8 +105,9 @@ fn main() -> anyhow::Result<()> {
     //
     // 门控必须精确到 glibc：`mallopt` / `M_MMAP_THRESHOLD` 是 glibc 专有符号，
     // Darwin（macOS）同属 Unix 但 libc 里没有这两样，用 `cfg(unix)` 会直接编译失败。
-    // Windows 的 MSVC 堆本来就积极归还，同样不需要。
-    #[cfg(target_env = "gnu")]
+    // Windows 的 MSVC 堆本来就积极归还，同样不需要；而 `target_env = "gnu"` 单用
+    // 会连 `*-pc-windows-gnu` 一起命中——那条工具链的 libc 也没有这些符号。
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     unsafe {
         // M_MMAP_THRESHOLD 的惯例写法是传 -3（glibc 的内部编号）
         libc::mallopt(libc::M_MMAP_THRESHOLD, 256 * 1024);
@@ -162,6 +172,25 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
     if cli.api_start {
+        // native 后端没有「服务」这个东西，`--api-start` 的语义（把服务留在后台
+        // 常驻）无从谈起。明确说清而不是打印一句「已就绪」——那会让用户以为
+        // 后台真有个进程，下次启动时又找不到。
+        //
+        // 走 stderr 而不是 stdout：这条是「你要的东西不存在」的说明，不是成功
+        // 输出。stdout 上那句「接口服务已就绪：<地址>」是给脚本抓地址用的，
+        // native 下不该往同一个流里塞一句格式类似但没有地址的话。退出码仍是 0
+        // ——这不是错误，只是无事可做。
+        if config
+            .api_backend
+            .effective_for(config.active_source_kind())
+            == crate::api::ApiBackend::Native
+        {
+            eprintln!(
+                "当前后端为 native：{} 的接口在进程内实现，没有需要常驻的本机服务。",
+                config.active_source_kind().label()
+            );
+            return Ok(());
+        }
         // 显式要求常驻：本次拉起的实例不随进程退出停止
         bootstrap::detach();
         println!("接口服务已就绪：{}", config.api_base);
@@ -229,9 +258,20 @@ fn print_effective_config(config: &Config) {
     println!("kugou-tui {}", env!("CARGO_PKG_VERSION"));
     println!("配置文件  : {}", Config::path().display());
     println!("日志文件  : {}", Config::log_path().display());
+    // 后端要说清「这一项实际生效在哪些音源上」：native 只覆盖酷狗两个平台，
+    // 用户对着网易云看到「native」会以为整程序都不用 Node 了。
+    let kind = config.active_source_kind();
+    println!(
+        "API 后端  : {}{}",
+        config.api_backend.label(),
+        if config.api_backend.effective_for(kind) != config.api_backend {
+            "（当前音源不适用，实际走 node）"
+        } else {
+            ""
+        }
+    );
     println!("API 地址  : {}", config.api_base);
     // 顺带提示服务端该配什么 `platform`：两个平台的鉴权不通用，配错了会退化成试听
-    let kind = config.active_source_kind();
     println!(
         "当前音源  : {}{}",
         kind.label(),

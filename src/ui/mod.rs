@@ -16,7 +16,7 @@
 //!
 //! 三个自适应点：
 //!
-//! * 侧边栏宽度随终端宽度伸缩（20~30 列），窄于 56 列时自动隐藏；
+//! * 侧边栏宽度随终端宽度伸缩（24~32 列），窄于 56 列时自动隐藏；
 //! * 歌词面板在宽终端里占右侧一列，窄终端里改为上下对半；
 //! * 播放队列为空时高度归零，把空间还给列表。
 //!
@@ -44,7 +44,12 @@ const MIN_HEIGHT: u16 = 8;
 /// 侧边栏低于这个宽度就隐藏，把空间让给内容。
 const SIDEBAR_MIN_TOTAL_WIDTH: u16 = 56;
 /// 内容区达到这个宽度时，歌词改为右侧独立列。
-const LYRIC_SIDE_BY_SIDE_WIDTH: u16 = 100;
+///
+/// 取 52 而不是更宽：`Min(20)` 的歌词列在这个宽度下仍有 22 列（够放一句中文），
+/// 而上下对半会把本来就不高的中区再劈成两半——80×24 那种终端里歌词干脆整块
+/// 消失，120×36 里也只剩两行。右侧独立列让两块都拿到中区的**全部高度**，比
+/// 上下对半更耐矮终端。再窄（<52）才退回上下对半。
+const LYRIC_SIDE_BY_SIDE_WIDTH: u16 = 52;
 
 /// 渲染一帧。
 pub fn render(frame: &mut Frame, state: &mut AppState) {
@@ -85,31 +90,25 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     };
 
     if let Some(sidebar_area) = sidebar_area {
-        // 命中区必须按**渲染时的实际行号**算。
-        //
-        // 侧边栏按分组渲染（`Tab::SIDEBAR_ORDER`，顺序与 `ALL` 不同）且每组
-        // 前面插一行标题，所以行号不再是「标题行 + 序号」这么简单。这里照着
-        // `render_sidebar` 的推进方式走一遍：遇到新分组先跳过标题行，再登记
-        // 该标签那一行。算错的话点「搜索」会跳到别的页，而且没有任何提示。
+        // 命中区必须按**渲染时的实际行号**算，而唯一可靠的做法是复用渲染时那份
+        // 逐行计划（`views::sidebar_nav_rows`）——两边各算各的，改一行内容就可能
+        // 让点「搜索」跳到别的页，而且没有任何提示。
         //
         // 命中的是**显示顺序里的位置**（`SIDEBAR_ORDER` 的下标），app 层用
         // `Tab::from_sidebar_index` 换回标签页——两边都按同一份顺序走，才不会
         // 「屏幕上点第一个、跳到了数字键意义上的第一个」。
-        let mut row = sidebar_area.y + 2; // 跳过上边框与 "kugou-tui 1/10" 标题行
-        let mut current_group: Option<&'static str> = None;
-        for (index, tab) in Tab::SIDEBAR_ORDER.iter().enumerate() {
-            if Some(tab.group()) != current_group {
-                current_group = Some(tab.group());
-                row += 1; // 分组标题行，不可点击
-            }
-            if row >= sidebar_area.bottom() {
+        let inner = views::render_sidebar(frame, sidebar_area, state, &theme);
+        for (offset, row) in views::sidebar_nav_rows().iter().enumerate() {
+            let views::SidebarRow::Tab { index, .. } = row else {
+                continue;
+            };
+            let y = inner.y + offset as u16;
+            if y >= inner.bottom() {
                 break;
             }
-            let rect = Rect::new(sidebar_area.x, row, sidebar_area.width, 1);
-            state.add_hit_zone(rect, HitTarget::Tab(index), 0, Tab::SIDEBAR_ORDER.len());
-            row += 1;
+            let rect = Rect::new(sidebar_area.x, y, sidebar_area.width, 1);
+            state.add_hit_zone(rect, HitTarget::Tab(*index), 0, Tab::SIDEBAR_ORDER.len());
         }
-        views::render_sidebar(frame, sidebar_area, state, &theme);
     }
 
     render_main(frame, main_area, state, &theme);
@@ -226,6 +225,9 @@ fn render_main(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Them
         Constraint::Min(3),
         Constraint::Length(queue_height),
     ])
+    // 与外层一致：相邻面板之间留一空行。紧贴着两块边框会连成一条双线，
+    // 整屏看起来像一堵墙（外层布局、侧边栏/主区之间也都是这么留的）。
+    .spacing(1)
     .areas(area);
 
     // 命中区：Primary（搜索框不计入），Secondary（歌曲），Queue。
@@ -353,18 +355,33 @@ impl AppState {
 /// 把主区域中部切成「列表 + 歌词」。
 ///
 /// 宽终端左右分栏（列表更宽，符合阅读顺序）；窄终端上下对半，两者都能看到。
+/// 两栏之间同样留一空行/一列，与外层及其它面板保持一致。
 fn split_middle(area: Rect, lyrics_enabled: bool) -> (Rect, Option<Rect>) {
-    if !lyrics_enabled || area.width < 40 || area.height < 6 {
+    if !lyrics_enabled || area.width < 40 {
         return (area, None);
     }
 
     if area.width >= LYRIC_SIDE_BY_SIDE_WIDTH {
-        let [list, lyric] =
-            Layout::horizontal([Constraint::Percentage(56), Constraint::Min(30)]).areas(area);
+        // 左右分栏只要够画一个面板就分（两块共用同一高度）。
+        if area.height < 3 {
+            return (area, None);
+        }
+        // 列表略宽（56%），歌词拿剩下的、但不低于 20 列——这是「歌词右侧一列」
+        // 在窄终端仍然读得出来的下限。
+        let [list, lyric] = Layout::horizontal([Constraint::Percentage(56), Constraint::Min(20)])
+            .spacing(1)
+            .areas(area);
         (list, Some(lyric))
     } else {
-        let [list, lyric] =
-            Layout::vertical([Constraint::Percentage(50), Constraint::Min(3)]).areas(area);
+        // 上下对半：两块面板各要 3 行，再加中间一空行——不够就整块让位，
+        // 免得挤出一块只有边框、没有内容的空面板。歌词给一个 4 行的下限，
+        // 免得对半之后它只剩两行、连一句完整的都读不下来。
+        if area.height < 7 {
+            return (area, None);
+        }
+        let [list, lyric] = Layout::vertical([Constraint::Percentage(50), Constraint::Min(4)])
+            .spacing(1)
+            .areas(area);
         (list, Some(lyric))
     }
 }
@@ -440,4 +457,88 @@ fn render_too_small(frame: &mut Frame, area: Rect) {
         area.width, area.height, MIN_WIDTH, MIN_HEIGHT
     );
     frame.render_widget(Paragraph::new(text).alignment(Alignment::Center), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    /// 侧边栏每个标签的鼠标命中区，必须落在它**渲染时**的那一行上。
+    ///
+    /// 命中区与渲染共用 `views::sidebar_nav_rows()` 这一份逐行计划。这条测试从渲染
+    /// 结果反推每个标签的行号，再验证点上去确实切到那个标签——一旦两边行号错位
+    /// （比如以后又在导航前加了一行），这里会立刻失败，而不是让用户点「搜索」
+    /// 跳到别的页。
+    #[test]
+    fn sidebar_click_zones_line_up_with_the_rendered_tabs() {
+        let mut state = AppState::new(Config::default());
+        state.sidebar_visible = true;
+
+        let (width, height) = (100u16, 40u16);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("建测试终端");
+        terminal
+            .draw(|frame| render(frame, &mut state))
+            .expect("渲染整帧");
+
+        // 侧边栏面板上边框占 1 行，内区从 y=1 开始；导航行依次排开。
+        // 侧边栏最窄 24 列（`sidebar_width`），第 2 列落在标签行内。
+        const INNER_Y: u16 = 1;
+        let mut checked = 0usize;
+        for (offset, row) in views::sidebar_nav_rows().iter().enumerate() {
+            let views::SidebarRow::Tab { tab, .. } = row else {
+                continue;
+            };
+            let y = INNER_Y + offset as u16;
+            let zone = state
+                .hit_test(2, y)
+                .unwrap_or_else(|| panic!("第 {y} 行的导航项应有命中区"));
+            match zone.target {
+                HitTarget::Tab(index) => assert_eq!(
+                    Tab::from_sidebar_index(index),
+                    Some(*tab),
+                    "第 {y} 行的命中区指向的标签与渲染不符"
+                ),
+                other => panic!("第 {y} 行应是标签命中区，实际是 {other:?}"),
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, Tab::SIDEBAR_ORDER.len(), "每个标签都要有命中区");
+    }
+
+    /// 各种终端尺寸下整帧渲染都不得 panic。
+    ///
+    /// 布局里到处加了 1 行/1 列的间距，窗口缩小时某些区域很容易变成 0 尺寸；
+    /// 这条把常见尺寸与各标签页都扫一遍，防止某个分支在极小尺寸下崩掉。
+    #[test]
+    fn frame_renders_without_panicking_across_sizes() {
+        let widths = [30u16, 40, 55, 56, 57, 80, 100, 120, 160, 200];
+        let heights = [8u16, 9, 10, 16, 24, 30, 36, 50];
+        let tabs = [
+            Tab::Home,
+            Tab::Search,
+            Tab::Playlists,
+            Tab::Queue,
+            Tab::Visualizer,
+            Tab::Settings,
+        ];
+
+        for &tab in &tabs {
+            for &width in &widths {
+                for &height in &heights {
+                    let mut state = AppState::new(Config::default());
+                    state.tab = tab;
+                    let mut terminal =
+                        Terminal::new(TestBackend::new(width, height)).expect("建测试终端");
+                    terminal
+                        .draw(|frame| render(frame, &mut state))
+                        .unwrap_or_else(|error| {
+                            panic!("{tab:?} 在 {width}x{height} 渲染失败：{error}")
+                        });
+                }
+            }
+        }
+    }
 }

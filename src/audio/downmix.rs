@@ -181,8 +181,7 @@ where
     }
 
     /// 必须转发，否则进度条与方向键 seek 全部静默失效（`Source::try_seek` 的默认
-    /// 实现直接返回 `NotSupported`）。`LevelMeter` 踩过同一个坑，见
-    /// `docs/MAINTENANCE.md` §5。
+    /// 实现直接返回 `NotSupported`）。`LevelMeter` 踩过同一个坑。
     fn try_seek(&mut self, position: Duration) -> Result<(), SeekError> {
         // 跳转后内层从新位置重新开始，当前这半帧作废
         self.slot = 0;

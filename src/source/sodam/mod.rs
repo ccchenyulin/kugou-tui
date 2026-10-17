@@ -32,11 +32,11 @@ use std::sync::Mutex;
 
 use serde::Deserialize;
 
+use crate::api::ApiClient;
 use crate::api::catalog::StreamUrl;
-use crate::api::client::ApiClient;
 use crate::api::model::{Lyric, Song};
 use crate::error::{AppError, Result};
-use crate::logger::{LEVEL_DEBUG, LEVEL_INFO, tlog};
+use crate::logger::{LEVEL_DEBUG, LEVEL_INFO, LEVEL_WARN, tlog};
 
 pub use client::AppCredentials;
 
@@ -331,10 +331,13 @@ pub async fn song_stream_url(
         //
         // 查询失败时退回用户设置（\`unwrap_or(true)\`）：宁可对非会员多要一档
         // （服务端会自己降级），也不要让真会员被莫名降到免费档。
-        let preference = preference_for_account(
-            libresoda::soda::account::is_vip_account(soda).unwrap_or(true),
-            preference,
-        );
+        let is_vip = libresoda::soda::account::is_vip_account(soda).unwrap_or_else(|error| {
+            // 查询失败按会员处理（服务端会自己降级），但错误不能无声无息——
+            // 否则非会员被当成会员去要高档位，日志里查不到任何线索。
+            tlog!(LEVEL_WARN, "汽水会员权益查询失败，按会员处理：{error}");
+            true
+        });
+        let preference = preference_for_account(is_vip, preference);
         soda.set_quality_preference(preference);
 
         // 时长与 VIP 标记要用于「这是不是试听片段」的判断。
@@ -522,9 +525,10 @@ pub async fn cover_url(api: &ApiClient, song: &Song) -> Result<Option<String>> {
     blocking("取封面", move || {
         match libresoda::soda::track::fetch_song_detail(soda, &track_id) {
             Ok(detail) => Ok(Some(detail.cover).filter(|url| !url.trim().is_empty())),
-            // 封面拿不到不该让整首歌失败——界面退回占位图即可。
+            // 封面拿不到不该让整首歌失败——界面退回占位图即可。但级别要与其他
+            // 音源的封面失败一致用 WARN，否则默认日志里这条永远看不到。
             Err(error) => {
-                tlog!(LEVEL_DEBUG, "汽水封面查询失败：{error}");
+                tlog!(LEVEL_WARN, "汽水封面查询失败：{error}");
                 Ok(None)
             }
         }
@@ -569,10 +573,14 @@ pub async fn create_qr_session(api: &ApiClient) -> Result<String> {
 
 /// 第 2 步：取二维码内容。
 pub fn scan_url_for(token: &str) -> Result<String> {
-    SCAN_URLS
+    // 锁中毒和「token 不在表里」是两码事：前者是别处 panic 过，后者才是会话过期。
+    // 以前用 `.ok()` 把两者都归成 None，于是内部错误被报成「请重新按 L」，用户白扫一次。
+    let guard = SCAN_URLS
         .lock()
-        .ok()
-        .and_then(|slot| slot.as_ref().and_then(|map| map.get(token).cloned()))
+        .map_err(|_| AppError::Other("汽水二维码会话状态已损坏（内部错误）".to_string()))?;
+    guard
+        .as_ref()
+        .and_then(|map| map.get(token).cloned())
         .filter(|url| !url.is_empty())
         .ok_or_else(|| AppError::NotFound("汽水二维码会话已过期，请重新按 L".to_string()))
 }
@@ -1054,5 +1062,13 @@ mod tests {
         let parsed: SearchResponse =
             serde_json::from_slice(r#"{"result_groups":[{"data":[{}]}]}"#.as_bytes()).unwrap();
         assert!(parsed.result_groups[0].data[0].entity.track.id.is_empty());
+    }
+
+    /// 会话过期与锁中毒要分开报：拿一个从没登记过的 token，应当得到「会话已过期」，
+    /// 而不是内部错误。
+    #[test]
+    fn scan_url_for_reports_an_unknown_token_as_expired() {
+        let error = scan_url_for("这个 token 从没登记过").unwrap_err();
+        assert!(matches!(error, AppError::NotFound(_)), "实际：{error:?}");
     }
 }

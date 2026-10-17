@@ -1,4 +1,4 @@
-﻿<#
+﻿﻿<#
 .SYNOPSIS
     kugou-tui —— Windows 构建 + 打包。
 
@@ -7,12 +7,12 @@
 
     为什么要单独写一个：仓库里其余脚本（`release`、`make-release-tarball`、
     `kugou-tui` 启动器）都是 bash，Windows 上默认跑不了。构建本身两条命令就够
-    （`cargo build --release`），真正容易漏的是**打包**——发行包里必须同时带上
-    `scripts/` 与 `docs/`，否则拿到包的人配不起接口服务。手工拼目录漏东西
-    是常态（0.3.7 那版就漏了），所以固化成一个脚本。
+    （`cargo build --release`），真正容易漏的是**打包**——发行包里必须带上
+    `scripts/`，否则拿到包的人配不起接口服务。手工拼目录漏东西是常态
+    （0.3.7 那版就漏了），所以固化成一个脚本。
 
-    **包里带哪几份脚本，以「文档提到过的」为准**：README 与 docs/INSTALL.md 让
-    Windows 用户跑的是 `.\scripts\kugou-tui.ps1` / `.\scripts\kugou-api-install.ps1`，
+    **包里带哪几份脚本，以「文档提到过的」为准**：README 让 Windows 用户跑的
+    是 `.\scripts\kugou-tui.ps1` / `.\scripts\kugou-api-install.ps1`，
     所以 PowerShell 那几份必须在包里；bash 那几份也一起带上，Git Bash / WSL 下
     照常能用，成本只有几 KB。
 
@@ -110,14 +110,12 @@ try {
 
     if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
     $stageScripts = Join-Path $stage 'scripts'
-    $stageDocs = Join-Path $stage 'docs'
     New-Item -ItemType Directory -Force -Path $stageScripts | Out-Null
-    New-Item -ItemType Directory -Force -Path $stageDocs | Out-Null
 
     Copy-Item $bin (Join-Path $stage "kugou-tui$exeSuffix")
     # 六份脚本，两类用途，都要带上：
     #
-    #   *.ps1  —— Windows 原生用法，也是 README / INSTALL.md 里写的那些命令
+    #   *.ps1  —— Windows 原生用法，也是 README 里写的那些命令
     #   *.sh   —— Git Bash / WSL 下照常能跑，成本只是一个几 KB 的文件
     #
     # 以前只拷了 bash 那三份，于是解压后 `.\scripts\kugou-tui.ps1` 根本不存在，
@@ -135,10 +133,9 @@ try {
         }
         Copy-Item $source $stageScripts
     }
-    foreach ($file in 'LICENSE', 'README.md', 'CHANGELOG.md', 'KEYBINDINGS.md') {
+    foreach ($file in 'LICENSE', 'README.md', 'CHANGELOG.md') {
         Copy-Item (Join-Path $repoDir $file) $stage
     }
-    Copy-Item (Join-Path (Join-Path $repoDir 'docs') '*.md') $stageDocs
 
     # Compress-Archive 不认已存在的目标，先删。
     if (Test-Path $zip) { Remove-Item -Force $zip }

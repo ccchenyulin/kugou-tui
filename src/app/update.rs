@@ -462,17 +462,20 @@ impl App {
     /// 菜单可以作用在队列里**任意**一首上，而 `x`（remove_selected_from_queue）
     /// 只认当前选中那首——直接复用的话，右键第 5 首会删掉第 2 首。
     fn remove_song_from_queue(&mut self, song: &Song) {
-        let Some(index) = self
-            .state
-            .queue
-            .items()
-            .iter()
-            .position(|item| item.hash == song.hash)
+        let selected = self.state.queue_cursor.selected();
+        let Some((index, selected_after)) =
+            queue_removal(self.state.queue.items(), selected, &song.hash)
         else {
             self.state.warn("这首歌不在播放队列里");
             return;
         };
         if let Some(removed) = self.state.queue.remove(index) {
+            // 删掉选中项**之前**的歌会让后面整体前移，高亮要跟着挪一格才不会跳到别的歌上；
+            // 删的正好是选中项（含最后一项）时保持下标，越界交给 `clamp_queue_cursor` 收回末尾。
+            if let Some(next) = selected_after {
+                self.state.queue_cursor.select(Some(next));
+            }
+            self.clamp_queue_cursor();
             self.state.info(format!("已从队列移除《{}》", removed.name));
         }
     }
@@ -683,7 +686,7 @@ impl App {
 
         // 帮助面板是模态的：只放行滚动与关闭。
         //
-        // `CHEATSHEET` 有 38 条，而 34 行的终端只放得下 26 条，所以滚动必须放行。
+        // `CHEATSHEET` 有 40 条，而 34 行的终端只放得下 26 条，所以滚动必须放行。
         // 早先这里只认「关闭」，`j`/`k`/PgDn 全被吞掉，最后 12 条——也就是整块
         // 播放控制（Space / n·p / ←·→ / +·- / m / r / l / [·] / W）——永远看不到。
         if self.state.help.is_open() {
@@ -1165,7 +1168,9 @@ impl App {
             return Ok(self.api.clone());
         }
         let profile = self.state.config.sources.profile(kind);
-        crate::api::ApiClient::new(
+        crate::api::ApiClient::for_backend(
+            self.state.config.api_backend,
+            kind,
             &profile.api_base,
             profile.cookie_header(kind),
             self.state.config.proxy.as_deref(),
@@ -1915,6 +1920,8 @@ impl App {
                 let empty = lyric.is_empty();
                 self.state.lyric.lyric = lyric;
                 self.state.lyric.load.succeed();
+                // 拿到真歌词：不管空不空，都清掉上一次「纯音乐」的结论。
+                self.state.lyric.instrumental = false;
                 // 换歌了：过渡状态一并复位，否则新歌的第一句会从上一首的某一行
                 // 淡过来，看着像歌词串了。
                 self.state.lyric.reset_transition();
@@ -1930,7 +1937,35 @@ impl App {
                 }
                 self.state.lyric.lyric = crate::api::model::Lyric::default();
                 self.state.lyric.load.fail(reason);
+                // 失败不是「纯音乐」——别让上一次的结论在这里复活。
+                self.state.lyric.instrumental = false;
                 self.state.lyric.reset_transition();
+            }
+
+            Loaded::LyricUnavailable { hash } => {
+                // 「找不到歌词」：接口通了，只是这首歌确实没有歌词（纯音乐）。
+                // 与失败区分开——面板说「纯音乐，请欣赏」，不是一条错误。
+                if self.state.lyric.hash.as_deref() != Some(hash.as_str()) {
+                    return;
+                }
+                self.state.lyric.lyric = crate::api::model::Lyric::default();
+                // 标记成成功：这不是「载入中」，也不是「载入失败」。
+                self.state.lyric.load.succeed();
+                self.state.lyric.instrumental = true;
+                self.state.lyric.reset_transition();
+                tlog!(
+                    crate::logger::LEVEL_DEBUG,
+                    "歌曲 {hash} 没有匹配到歌词（纯音乐）"
+                );
+            }
+
+            Loaded::StreamFailed { song, error } => {
+                // 与其它 Stream* 事件一致：用户切歌后，旧歌迟到的失败要丢弃，
+                // 否则源级失败会误跳走、单曲级失败会误停正在放的那首。
+                if !self.is_current(&song) {
+                    return;
+                }
+                self.handle_stream_failed(*song, error);
             }
 
             Loaded::StreamReady {
@@ -2207,6 +2242,15 @@ impl App {
             } => {
                 self.state.busy = None;
                 self.state.download_progress = None;
+                // 取链/下载失败时，播放状态可能还停在 `start_playback` 设的
+                // `Loading`，而引擎在没装载任何东西时不会去清它（`sync()` 见
+                // `!loaded` 直接返回）。不收回来就会一直显示「缓冲中」，Space 也被
+                // `Loading` 吃掉。只在确实处于 `Loading` 时才动播放状态，免得把正在
+                // 放的那首误停（封面/歌词之外的失败也走这条）。
+                if self.state.playback == PlaybackState::Loading {
+                    self.audio.stop();
+                    self.state.playback = PlaybackState::Stopped;
+                }
                 tlog!(crate::logger::LEVEL_ERROR, "{context}：{error}");
                 // 凭据被服务端作废后，界面若还挂着「登录 是」就是谎言——用户会
                 // 以为登录态是好的、转而去怀疑别处。标记失效后，按 L 直接进扫码
@@ -2284,6 +2328,71 @@ impl App {
             LoadingTarget::RankSongs => self.state.ranks.songs.load.fail(reason),
             LoadingTarget::UserInfo => self.state.user_info_load.fail(reason),
         }
+    }
+
+    /// 取流失败（`request_stream` 拿不到直链）的统一处理。
+    ///
+    /// 与 [`Loaded::Failed`] 分开走：只有这里知道失败的是**哪首歌**，而「源不可用
+    /// 就自动跳下一首」正需要这个信息（`Failed` 的文案和预取取链完全相同，分不出
+    /// 是播放还是预取）。
+    pub(super) fn handle_stream_failed(&mut self, song: Song, error: crate::error::AppError) {
+        self.state.busy = None;
+        self.state.download_progress = None;
+        tlog!(
+            crate::logger::LEVEL_ERROR,
+            "获取《{}》的播放地址失败：{error}",
+            song.name
+        );
+        if error.is_login_expired() {
+            self.state.logged_in = false;
+        }
+
+        if !is_source_level_failure(&error) {
+            // 单曲级失败（版权受限、VIP 试听无权限…）：换源也没用，保持原有行为，
+            // 只把「缓冲中」收掉。
+            self.state
+                .error(format!("无法播放《{}》：{}", song.name, error.user_hint()));
+            self.abort_loading();
+            return;
+        }
+
+        // 源级失败：记下这个源，本轮不再对它发请求。
+        let source = song.source;
+        if !self.failed_sources.contains(&source) {
+            self.failed_sources.push(source);
+        }
+        self.state.warn(format!(
+            "「{}」暂时不可用（{error}），尝试下一首",
+            source.label()
+        ));
+
+        let current = self.state.queue.cursor().unwrap_or(0);
+        let skipped = self.auto_skip_count;
+        match auto_skip_next(
+            self.state.queue.items(),
+            current,
+            |kind| self.failed_sources.contains(&kind),
+            self.state.queue.mode(),
+            skipped,
+        ) {
+            AutoSkip::Play(index) => {
+                self.auto_skip_count = skipped + 1;
+                self.sync_queue_cursor(index);
+                if let Some(next) = self.state.queue.jump_to(index).cloned() {
+                    self.start_playback(next, 0);
+                }
+            }
+            AutoSkip::Stop => {
+                self.state.warn("队列里没有其他可播放的来源了，已停止");
+                self.abort_loading();
+            }
+        }
+    }
+
+    /// 用户手动切歌 / 暂停 / 起播新歌时清零自动跳歌的计数。
+    pub(super) fn reset_auto_skip(&mut self) {
+        self.auto_skip_count = 0;
+        self.failed_sources.clear();
     }
 
     fn start_download(&mut self, song: Song, url: String, start_at_ms: u64, is_trial: bool) {
@@ -2459,6 +2568,9 @@ impl App {
         };
 
         self.state.lyric.load.begin();
+        // 新一次取词开始：清掉上一次「纯音乐」的结论，否则切到一首有歌词的歌时
+        // 标记会残留（成功分支也会清，但这里先清能保证请求在飞期间不显示旧结论）。
+        self.state.lyric.instrumental = false;
         self.runtime.spawn(async move {
             match source.fetch_lyric(&api, &song).await {
                 Ok(lyric) => bus.emit(Loaded::Lyric {
@@ -2471,10 +2583,18 @@ impl App {
                         "获取《{}》的歌词失败：{error}",
                         song.name
                     );
-                    // 走 LyricFailed 而不是塞一份空歌词：空歌词会被面板渲染成
-                    // 「暂无歌词」，等于替这首歌断言「它本来就没有歌词」。
-                    // 也不走 Loaded::Failed——那会往状态栏写错误，而歌词失败
-                    // 不影响播放，每切一首歌闪一条太吵。
+                    // 「找不到歌词」是歌本身的正常状态（纯音乐），不是错误：面板
+                    // 应当说「纯音乐，请欣赏」，而不是报一次取词失败。
+                    if matches!(error, crate::error::AppError::NotFound(_)) {
+                        bus.emit(Loaded::LyricUnavailable {
+                            hash: song.hash.clone(),
+                        });
+                        return;
+                    }
+                    // 其余（网络 / 服务端）才是真失败。走 LyricFailed 而不是塞一份
+                    // 空歌词：空歌词会被面板渲染成「暂无歌词」，等于替这首歌断言
+                    // 「它本来就没有歌词」。也不走 Loaded::Failed——那会往状态栏写
+                    // 错误，而歌词失败不影响播放，每切一首歌闪一条太吵。
                     bus.emit(Loaded::LyricFailed {
                         hash: song.hash.clone(),
                         reason: error.user_hint(),
@@ -2788,6 +2908,8 @@ impl App {
             self.sync_mpris();
             self.sync_tray();
         }
+        // WebSocket 服务跨平台，所以不放进上面的 cfg 块
+        self.sync_ws();
 
         if self.state.playback == PlaybackState::Playing {
             self.update_active_lyric();
@@ -2963,6 +3085,80 @@ fn accepts_open_item<K: PartialEq>(open: Option<K>, arriving: K) -> bool {
     open.is_some_and(|current| current == arriving)
 }
 
+/// 从队列里删掉 `hash` 对应的一首时，决定「删哪个下标」与「删完后高亮落在哪」。
+///
+/// 优先删**选中那一份**：右键菜单就是冲着它打开的，而队列里可能有同 hash 的重复项，
+/// 按 hash 找第一份会删错歌。删掉选中项之前的歌会让后面整体前移，所以此时高亮要跟着
+/// 前移一格；删的是选中项本身或它之后的项则保持下标（越界由调用方 clamp）。
+fn queue_removal(
+    items: &[Song],
+    selected: Option<usize>,
+    hash: &str,
+) -> Option<(usize, Option<usize>)> {
+    let index = match selected {
+        Some(selected) if items.get(selected).is_some_and(|song| song.hash == hash) => selected,
+        _ => items.iter().position(|song| song.hash == hash)?,
+    };
+    let selected_after = match selected {
+        Some(selected) if index < selected => Some(selected - 1),
+        other => other,
+    };
+    Some((index, selected_after))
+}
+
+/// 一次连续自动跳歌最多尝试多少首（还会再和队列长度取小）。
+const MAX_AUTO_SKIP: usize = 5;
+
+/// 「源不可用」失败后，自动跳歌的下一步动作。
+#[derive(Debug, PartialEq, Eq)]
+enum AutoSkip {
+    /// 跳到队列里这个下标（源可用的第一首）。
+    Play(usize),
+    /// 没有可跳的了，停下。
+    Stop,
+}
+
+/// 「源级」失败：连不上、未登录、本地服务没起来。
+///
+/// 换一首同源的歌也好不了，所以值得跳到别的源去。版权受限、VIP 试听无权限这类是
+/// **单曲级**，换源也没用，保持原有报错行为。
+fn is_source_level_failure(error: &crate::error::AppError) -> bool {
+    error.is_connectivity()
+        || error.is_auth_related()
+        || matches!(
+            error,
+            crate::error::AppError::Service(_) | crate::error::AppError::NonJsonBody { .. }
+        )
+}
+
+/// 决定「源不可用」失败后往哪儿跳。
+///
+/// * 单曲循环不跳：循环的语义就是同一首，跳走等于破坏模式。
+/// * 只往后找、不绕回，避免在同一条队列里打转。
+/// * 已确认失败的源直接跳过（`source_unavailable`），不再对同源歌发必然失败的请求。
+/// * 跳过的次数达到 `min(队列长度, MAX_AUTO_SKIP)` 就停，防止整条队列都连不上时无限重试。
+fn auto_skip_next(
+    songs: &[Song],
+    current: usize,
+    source_unavailable: impl Fn(crate::source::SourceKind) -> bool,
+    mode: crate::app::queue::PlaybackMode,
+    skipped: usize,
+) -> AutoSkip {
+    if mode == crate::app::queue::PlaybackMode::RepeatOne {
+        return AutoSkip::Stop;
+    }
+    if skipped >= songs.len().min(MAX_AUTO_SKIP) {
+        return AutoSkip::Stop;
+    }
+    songs
+        .iter()
+        .enumerate()
+        .skip(current + 1)
+        .find(|(_, song)| !source_unavailable(song.source))
+        .map(|(index, _)| AutoSkip::Play(index))
+        .unwrap_or(AutoSkip::Stop)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3108,5 +3304,376 @@ mod tests {
         assert!(accepts_open_item(Some("3_abc"), "3_abc"));
         assert!(!accepts_open_item(Some("3_abc"), "3_def"));
         assert!(!accepts_open_item::<&str>(None, "3_abc"));
+    }
+
+    /// 从队列移除时高亮要跟着被删位置挪，不能跳到别的歌上或越界丢失。
+    #[test]
+    fn queue_removal_keeps_the_highlight_on_the_same_song() {
+        let song = |hash: &str| Song {
+            hash: hash.to_string(),
+            ..Song::default()
+        };
+        let items = vec![song("a"), song("b"), song("c"), song("d")];
+
+        // 删选中项之后的歌：高亮不动
+        assert_eq!(queue_removal(&items, Some(2), "d"), Some((3, Some(2))));
+        // 删选中项之前的歌：后面整体前移，高亮跟着前移一格（仍是原来那首 c）
+        assert_eq!(queue_removal(&items, Some(2), "a"), Some((0, Some(1))));
+        // 删选中项自身（在末尾）：下标保持，越界交给 clamp 收回
+        assert_eq!(queue_removal(&items, Some(3), "d"), Some((3, Some(3))));
+        // 没有选中项时只按 hash 找
+        assert_eq!(queue_removal(&items, None, "c"), Some((2, None)));
+        // 不在队列里
+        assert_eq!(queue_removal(&items, Some(1), "zzz"), None);
+
+        // 同 hash 重复：优先删选中那一份，而不是第一份
+        let dup = vec![song("x"), song("y"), song("x")];
+        assert_eq!(queue_removal(&dup, Some(2), "x"), Some((2, Some(2))));
+        assert_eq!(queue_removal(&dup, Some(0), "x"), Some((0, Some(0))));
+    }
+
+    /// 取流/装载还没成功就失败时，「缓冲中」必须被收掉——否则按 Space 没反应。
+    #[test]
+    fn abort_loading_clears_the_buffering_state() {
+        let mut app = App::for_test();
+        app.state.playback = PlaybackState::Loading;
+        app.state.busy = Some("缓冲《某首》".to_string());
+        app.state.download_progress = Some((10, Some(100)));
+
+        app.abort_loading();
+
+        assert_eq!(app.state.playback, PlaybackState::Stopped);
+        assert!(app.state.busy.is_none(), "缓冲标签要收掉");
+        assert!(app.state.download_progress.is_none(), "下载进度要收掉");
+    }
+
+    /// `Loaded::Failed` 只在**确实处于 Loading** 时收掉加载态。
+    ///
+    /// 正在播的那首不能被无关失败误停——封面/歌词之外的失败也走这条事件。
+    #[test]
+    fn load_failure_only_stops_while_loading() {
+        let mut app = App::for_test();
+
+        app.state.playback = PlaybackState::Loading;
+        app.handle_loaded(Loaded::Failed {
+            context: "获取《x》的播放地址失败".to_string(),
+            error: crate::error::AppError::Other("源不可用".to_string()),
+            target: None,
+        });
+        assert_eq!(app.state.playback, PlaybackState::Stopped);
+
+        app.state.playback = PlaybackState::Playing;
+        app.handle_loaded(Loaded::Failed {
+            context: "取封面失败".to_string(),
+            error: crate::error::AppError::Other("网络抖动".to_string()),
+            target: None,
+        });
+        assert_eq!(
+            app.state.playback,
+            PlaybackState::Playing,
+            "正在播的歌不能被误停"
+        );
+    }
+
+    /// 加载途中切到另一首歌：新歌的状态要盖掉旧的，不能串（歌名、歌词归属都跟着换）。
+    #[test]
+    fn switching_songs_mid_load_overwrites_the_previous_one() {
+        let mut app = App::for_test();
+        let song = |hash: &str, name: &str| Song {
+            hash: hash.to_string(),
+            name: name.to_string(),
+            ..Song::default()
+        };
+
+        app.start_playback(song("a", "第一首"), 0);
+        assert_eq!(
+            app.state.current.as_ref().map(|s| s.name.as_str()),
+            Some("第一首")
+        );
+        assert_eq!(app.state.playback, PlaybackState::Loading);
+        assert_eq!(app.state.lyric.hash.as_deref(), Some("a"));
+
+        app.start_playback(song("b", "第二首"), 0);
+        assert_eq!(
+            app.state.current.as_ref().map(|s| s.name.as_str()),
+            Some("第二首"),
+            "旧歌不能盖住新歌"
+        );
+        assert_eq!(app.state.playback, PlaybackState::Loading);
+        assert_eq!(
+            app.state.lyric.hash.as_deref(),
+            Some("b"),
+            "歌词归属要跟着新歌走"
+        );
+    }
+
+    fn song_from(source: crate::source::SourceKind, hash: &str) -> Song {
+        Song {
+            source,
+            hash: hash.to_string(),
+            ..Song::default()
+        }
+    }
+
+    /// 取词回「找不到」时按纯音乐处理：标记立起来、载入算成功、不报错。
+    #[test]
+    fn lyric_not_found_marks_the_track_as_instrumental() {
+        let mut app = App::for_test();
+        app.state.current = Some(song_from(crate::source::SourceKind::Kugou, "a"));
+        app.state.lyric.hash = Some("a".to_string());
+        app.state.lyric.load.begin();
+
+        app.handle_loaded(Loaded::LyricUnavailable {
+            hash: "a".to_string(),
+        });
+
+        assert!(app.state.lyric.instrumental, "应标记为纯音乐");
+        assert!(app.state.lyric.load.error().is_none(), "纯音乐不是失败");
+        assert!(!app.state.lyric.load.is_loading(), "载入要收尾");
+        assert!(app.state.lyric.lyric.is_empty());
+    }
+
+    /// 真失败不能被当成纯音乐——面板要照旧报「取失败」。
+    #[test]
+    fn lyric_failure_is_not_marked_instrumental() {
+        let mut app = App::for_test();
+        app.state.lyric.hash = Some("a".to_string());
+
+        app.handle_loaded(Loaded::LyricFailed {
+            hash: "a".to_string(),
+            reason: "网络请求失败".to_string(),
+        });
+
+        assert!(!app.state.lyric.instrumental, "失败不是纯音乐");
+        assert!(app.state.lyric.load.error().is_some(), "失败原因要留下");
+    }
+
+    /// 切到有歌词的歌时，上一次「纯音乐」的标记要清掉，不能残留到下一首。
+    #[test]
+    fn a_real_lyric_clears_a_stale_instrumental_flag() {
+        let mut app = App::for_test();
+        app.state.lyric.hash = Some("a".to_string());
+        app.state.lyric.instrumental = true;
+
+        app.handle_loaded(Loaded::Lyric {
+            hash: "a".to_string(),
+            lyric: crate::api::model::Lyric::default(),
+        });
+
+        assert!(!app.state.lyric.instrumental, "拿到真结果后标记要复位");
+    }
+
+    /// 迟到的「纯音乐」结果（已切歌）要丢弃，不能把当前歌标成纯音乐。
+    #[test]
+    fn a_stale_instrumental_result_is_ignored() {
+        let mut app = App::for_test();
+        app.state.lyric.hash = Some("b".to_string());
+
+        app.handle_loaded(Loaded::LyricUnavailable {
+            hash: "a".to_string(),
+        });
+
+        assert!(!app.state.lyric.instrumental, "旧歌的结果不能盖住当前歌");
+    }
+
+    /// 中间那首的源不可用时，跳到后面第一个源可用的歌。
+    #[test]
+    fn auto_skip_jumps_to_the_next_playable_source() {
+        use crate::source::SourceKind::{Kugou, Netease};
+        let queue = vec![
+            song_from(Kugou, "a"),
+            song_from(Netease, "b"),
+            song_from(Kugou, "c"),
+        ];
+        // 第 0 首（酷狗）失败、酷狗整源不可用 → 跳到第 1 首（网易云）
+        let next = auto_skip_next(
+            &queue,
+            0,
+            |kind| kind == Kugou,
+            crate::app::queue::PlaybackMode::Sequential,
+            0,
+        );
+        assert_eq!(next, AutoSkip::Play(1));
+    }
+
+    /// 后面全是不可用的源：停。
+    #[test]
+    fn auto_skip_stops_when_no_source_is_playable() {
+        use crate::source::SourceKind::{Kugou, Netease, Sodam};
+        let queue = vec![
+            song_from(Kugou, "a"),
+            song_from(Netease, "b"),
+            song_from(Sodam, "c"),
+        ];
+        let next = auto_skip_next(
+            &queue,
+            0,
+            |_| true,
+            crate::app::queue::PlaybackMode::Sequential,
+            0,
+        );
+        assert_eq!(next, AutoSkip::Stop);
+    }
+
+    /// 只往后找、不绕回：失败的是最后一首时，前面可用的也不跳。
+    #[test]
+    fn auto_skip_never_wraps_around() {
+        use crate::source::SourceKind::{Kugou, Netease};
+        let queue = vec![song_from(Netease, "a"), song_from(Kugou, "b")];
+        let next = auto_skip_next(
+            &queue,
+            1,
+            |_| true,
+            crate::app::queue::PlaybackMode::Sequential,
+            0,
+        );
+        assert_eq!(next, AutoSkip::Stop);
+    }
+
+    /// 达到次数上限就停——哪怕后面还有可播的歌，也不无限重试。
+    #[test]
+    fn auto_skip_stops_at_the_attempt_limit() {
+        use crate::source::SourceKind::{Kugou, Netease};
+        let queue = vec![song_from(Kugou, "a"), song_from(Netease, "b")];
+        // 第 1 首可用，但已经跳满 min(队列长度, MAX_AUTO_SKIP) = 2 次 → 停
+        let next = auto_skip_next(
+            &queue,
+            0,
+            |kind| kind == Kugou,
+            crate::app::queue::PlaybackMode::Sequential,
+            2,
+        );
+        assert_eq!(next, AutoSkip::Stop);
+
+        // 队列比上限长时，上限封顶在 MAX_AUTO_SKIP
+        let long: Vec<Song> = (0..20).map(|i| song_from(Kugou, &i.to_string())).collect();
+        let next = auto_skip_next(
+            &long,
+            0,
+            |_| false,
+            crate::app::queue::PlaybackMode::Sequential,
+            MAX_AUTO_SKIP,
+        );
+        assert_eq!(next, AutoSkip::Stop);
+    }
+
+    /// 单曲循环不跳：循环的语义就是同一首。
+    #[test]
+    fn auto_skip_does_not_jump_in_repeat_one() {
+        use crate::source::SourceKind::{Kugou, Netease};
+        let queue = vec![song_from(Kugou, "a"), song_from(Netease, "b")];
+        let next = auto_skip_next(
+            &queue,
+            0,
+            |_| true,
+            crate::app::queue::PlaybackMode::RepeatOne,
+            0,
+        );
+        assert_eq!(next, AutoSkip::Stop);
+    }
+
+    /// 源级失败：跳到队列里下一个源可用的歌，并累计跳歌次数。
+    #[test]
+    fn stream_failure_skips_to_the_next_playable_song() {
+        use crate::source::SourceKind::{Kugou, Netease};
+        let mut app = App::for_test();
+        app.state
+            .queue
+            .replace_with(vec![song_from(Kugou, "a"), song_from(Netease, "b")], 0);
+        app.state.playback = PlaybackState::Loading;
+
+        app.handle_stream_failed(
+            song_from(Kugou, "a"),
+            crate::error::AppError::Service("本地服务未启动".to_string()),
+        );
+
+        assert_eq!(app.auto_skip_count, 1, "跳了一次");
+        assert!(app.failed_sources.contains(&Kugou), "失败的源要记下");
+        assert_eq!(
+            app.state.current.as_ref().map(|s| s.hash.as_str()),
+            Some("b"),
+            "跳到下一首可播的歌"
+        );
+    }
+
+    /// 单曲级失败（版权/权限）不跳歌，只收掉加载态。
+    #[test]
+    fn single_song_failure_does_not_skip() {
+        use crate::source::SourceKind::Kugou;
+        let mut app = App::for_test();
+        app.state.queue.replace_with(vec![song_from(Kugou, "a")], 0);
+        app.state.current = Some(song_from(Kugou, "a"));
+        app.state.playback = PlaybackState::Loading;
+        app.state.busy = Some("缓冲".to_string());
+
+        app.handle_stream_failed(
+            song_from(Kugou, "a"),
+            crate::error::AppError::NotFound("版权受限".to_string()),
+        );
+
+        assert_eq!(app.auto_skip_count, 0, "单曲级失败不跳歌");
+        assert!(app.failed_sources.is_empty());
+        assert_eq!(app.state.playback, PlaybackState::Stopped, "加载态要收掉");
+        assert!(app.state.busy.is_none());
+        assert_eq!(
+            app.state.current.as_ref().map(|s| s.hash.as_str()),
+            Some("a"),
+            "还停在原来那首上"
+        );
+    }
+
+    /// 整个队列的源都不可用：停在 Stopped，不卡在 Loading。
+    #[test]
+    fn stream_failure_stops_when_no_source_is_playable() {
+        let mut app = App::for_test();
+        // Song::default() 的来源是酷狗；两首同源，跳无可跳
+        app.state
+            .queue
+            .replace_with(vec![Song::default(), Song::default()], 0);
+        app.state.playback = PlaybackState::Loading;
+
+        app.handle_stream_failed(
+            Song::default(),
+            crate::error::AppError::Service("未启动".to_string()),
+        );
+
+        assert_eq!(app.state.playback, PlaybackState::Stopped);
+    }
+
+    /// 用户手动切歌会清零自动跳歌的计数与失败源。
+    #[test]
+    fn manual_track_change_clears_the_auto_skip_state() {
+        let mut app = App::for_test();
+        app.auto_skip_count = 3;
+        app.failed_sources.push(crate::source::SourceKind::Kugou);
+
+        app.next_track(true);
+
+        assert_eq!(app.auto_skip_count, 0);
+        assert!(app.failed_sources.is_empty());
+    }
+
+    /// 用户切歌后，旧歌迟到的取流失败要被丢弃：不跳歌、不停当前播放、不计失败源。
+    #[test]
+    fn stale_stream_failure_is_ignored() {
+        use crate::source::SourceKind::{Kugou, Netease};
+        let mut app = App::for_test();
+        app.state.current = Some(song_from(Netease, "b"));
+        app.state.playback = PlaybackState::Playing;
+
+        // A 的取流失败姗姗来迟，但 A 已经不是当前歌
+        app.handle_loaded(Loaded::StreamFailed {
+            song: Box::new(song_from(Kugou, "a")),
+            error: crate::error::AppError::Service("本地服务未启动".to_string()),
+        });
+
+        assert_eq!(
+            app.state.current.as_ref().map(|s| s.hash.as_str()),
+            Some("b"),
+            "当前歌不能被换掉"
+        );
+        assert_eq!(app.state.playback, PlaybackState::Playing, "不能误停");
+        assert_eq!(app.auto_skip_count, 0, "不能误跳歌");
+        assert!(!app.failed_sources.contains(&Kugou), "不能记失败源");
     }
 }

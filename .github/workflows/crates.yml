@@ -72,29 +72,33 @@ jobs:
       - name: 检查依赖可发布性
         run: |
           set -euo pipefail
-          # crates.io 要求每个依赖都有 version（git / 无 version 的 path 都不行）：
-          # 发布包必须只引用 registry 上的版本。
-          if grep -qE '^\s*[A-Za-z0-9_-]+\s*=.*(git\s*=|path\s*=)' Cargo.toml; then
-            echo "::error title=依赖缺少 version::Cargo.toml 里有 git / 纯 path 依赖，cargo publish 必然失败。"
+          # crates.io 要求每个依赖都有 version：git 依赖、以及**没有 version 的**
+          # path 依赖，都会在打包阶段被拒。但 path + version 双写是合法的（本地走
+          # path，发布时剥掉 path、用 registry 上的 version），不能误判——主包的
+          # `libresoda-fork` 就是这种写法。
+          git_deps=$(grep -nE '^\s*[A-Za-z0-9_-]+\s*=.*git\s*=' Cargo.toml || true)
+          path_no_version=$(grep -nE '^\s*[A-Za-z0-9_-]+\s*=.*path\s*=' Cargo.toml |
+            grep -vE 'version\s*=' || true)
+          if [ -n "$git_deps$path_no_version" ]; then
+            echo "::error title=依赖缺少 version::Cargo.toml 里有 git 依赖或缺少 version 的 path 依赖，cargo publish 必然失败。"
             echo
-            echo "当前不可发布的依赖条目："
-            grep -nE '^\s*[A-Za-z0-9_-]+\s*=.*(git\s*=|path\s*=)' Cargo.toml | sed 's/^/  /'
+            echo "命中的条目："
+            printf '%s\n%s\n' "$git_deps" "$path_no_version" | sed '/^$/d' | sed 's/^/  /'
             echo
             echo "cargo 的原始报错（已实测确认，失败发生在打包阶段、编译之前）："
             echo
             echo "  error: failed to verify manifest at Cargo.toml"
             echo "  Caused by:"
             echo "    all dependencies must have a version requirement specified when publishing."
-            echo "    dependency libresoda does not specify a version"
             echo
             echo "解决方向（详见本工作流文件顶部的注释）："
             echo "  1. 给随包内置的 crates/libresoda 换个名字发到 crates.io，"
-            echo "     然后这里改成 version 依赖（crates.io 要求名字不与上游冲突）"
+            echo "     然后这里改成 path + version 双写（crates.io 要求名字不与上游冲突）"
             echo "  2. 等上游 sodahub-org/libresoda 自己发 crates.io"
             echo "  3. 不在 crates.io 发，只走 GitHub Release"
             exit 1
           fi
-          echo "依赖检查通过：没有 git 依赖。"
+          echo "依赖检查通过：没有 git 依赖，path 依赖都带 version。"
 
       # 版本号必须与 Cargo.toml 一致，否则会发出一个「版本对不上」的包——
       # 而 crates.io 的版本号一旦占用就不可撤回。

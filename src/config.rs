@@ -35,6 +35,12 @@ const DEFAULT_CACHE_LIMIT_MIB: u64 = 512;
 const DEFAULT_QUALITY: &str = "128";
 const APP_DIR_NAME: &str = "kugou-tui";
 
+/// WebSocket 服务的默认端口。
+///
+/// 与 MoeKoeMusic 一致（其文档写 `ws://127.0.0.1:6520/`），这样面向它的第三方
+/// 客户端不用改配置就能连上。
+pub const DEFAULT_WS_PORT: u16 = 6520;
+
 /// `/song/url` 支持的音质取值。
 ///
 /// 前五个是常规音质；`viper_*` 是酷狗的「蝰蛇音效」系列，仅部分歌曲支持，
@@ -161,7 +167,7 @@ pub struct Config {
     /// 块）、不画实时频谱、刷新间隔降到 5fps。听歌本身不受影响。
     ///
     /// 实测正常模式播放中约 16.9 MiB（VmRSS），关掉这几样能再降一截——在低配
-    /// 机器或电池供电时有用。分场景数字见 `docs/DESIGN.md`。
+    /// 机器或电池供电时有用。
     #[serde(default)]
     pub lite_mode: bool,
 
@@ -201,6 +207,26 @@ pub struct Config {
     /// 切换音源时，`api_base` / `cookie` / `dfid` 会从选中的音源同步过来。
     /// 这三个字段仍是运行时实际读取的值，这样改动面最小，也不会漏掉某处引用。
     pub sources: SourceSet,
+
+    /// 酷狗接口由哪套后端实现。
+    ///
+    /// 默认 `native`（内嵌的纯 Rust 实现，不需要 Node.js）。`node` 是本机
+    /// KuGouMusicApi 回退；两个酷狗平台共享这个开关，网易云与汽水不受影响。
+    #[serde(default)]
+    pub api_backend: crate::api::ApiBackend,
+
+    /// 是否启动 WebSocket 服务，供第三方客户端读取播放状态、歌词并遥控播放。
+    ///
+    /// 默认开启。**只监听 `127.0.0.1`**，不接受来自其他主机的连接；命令行可用
+    /// `--no-ws` 临时关闭。协议与 MoeKoeMusic 兼容，见 `ws.rs` 的模块注释。
+    #[serde(default = "default_ws")]
+    pub ws: bool,
+
+    /// WebSocket 服务监听的端口。
+    ///
+    /// 默认 6520（与 MoeKoeMusic 相同，面向它的客户端可直接连上）。
+    #[serde(default = "default_ws_port")]
+    pub ws_port: u16,
 }
 
 /// 把命令行传上来的可选字符串收拾成「有内容才 Some」。
@@ -234,6 +260,17 @@ fn default_tray() -> bool {
     // 非 Unix 平台上托盘（StatusNotifierItem）与 MPRIS 都是 D-Bus 接口，根本
     // 不存在，默认就关——免得配置里留一个「开了也不会有反应」的 true。
     cfg!(unix)
+}
+
+fn default_ws() -> bool {
+    // 与 `tray` 不同，WebSocket 不依赖桌面环境，各平台行为一致，所以默认就开。
+    // 它只绑 127.0.0.1，且控制面只映射到已有的播放 `Action`，风险可控；
+    // 不用的人用 `--no-ws` 或配置里 `ws = false` 关掉即可。
+    true
+}
+
+fn default_ws_port() -> u16 {
+    DEFAULT_WS_PORT
 }
 
 /// 首页那块大封面怎么铺满它的区域。
@@ -310,6 +347,9 @@ impl Default for Config {
             api_auto_start: default_api_auto_start(),
             api_dir: None,
             sources: SourceSet::default(),
+            api_backend: crate::api::ApiBackend::default(),
+            ws: default_ws(),
+            ws_port: default_ws_port(),
         }
     }
 }
@@ -489,6 +529,15 @@ impl Config {
         }
         if cli.no_api_start {
             self.api_auto_start = false;
+        }
+        if let Some(backend) = cli.api {
+            self.api_backend = backend;
+        }
+        if cli.no_ws {
+            self.ws = false;
+        }
+        if let Some(port) = cli.ws_port {
+            self.ws_port = port;
         }
 
         // 汽水的凭据与签名：只覆盖**显式传了**的项，其余保留配置文件里的值。
@@ -698,7 +747,7 @@ pub fn default_cache_dir() -> PathBuf {
 /// * **可测**——`dirs` 在 Windows 上走的是 Win32 的 Known Folder（`SHGetKnownFolderPath`），
 ///   环境变量（`APPDATA` 等）管不着它，没有这个开关就没法在 Windows 上把
 ///   「配置能活过一次重启」那条测试隔离到临时目录里，只能跳过。
-fn config_root() -> PathBuf {
+pub(crate) fn config_root() -> PathBuf {
     if let Some(dir) = std::env::var_os("KUGOU_TUI_CONFIG_DIR") {
         // 空值当作没设：`KUGOU_TUI_CONFIG_DIR=` 这种写法在 shell 里很常见，
         // 而一个空路径会让配置落到当前目录，比忽略它更难查。
@@ -731,7 +780,7 @@ pub fn expand_tilde(path: &Path) -> PathBuf {
 ///
 /// 刻意用 `set_permissions` 而不是依赖 umask：umask 是进程级、由启动环境决定的，
 /// 不能让「凭据文件谁能读」取决于用户从哪个 shell 启动程序。
-fn restrict_permissions(path: &Path, mode: u32) -> Result<()> {
+pub(crate) fn restrict_permissions(path: &Path, mode: u32) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -926,6 +975,37 @@ volume = 0.5
         // 断言字面量而不是那个函数：这里要锁的是「对外承诺的默认值就是 200ms」，
         // 拿常量比自己跟自己比，改了默认值也照样通过。
         assert_eq!(parsed.lyric_anim_ms, 200);
+        // 新增的 `api_backend` 同理：老配置里没有这一项，落到默认值。
+        // 默认值就是 [`crate::api::ApiBackend::Native`]（接口内嵌，不需要 Node）。
+        assert_eq!(parsed.api_backend, crate::api::ApiBackend::Native);
+    }
+
+    /// `--api node` 要能覆盖配置里的默认值，也要能落盘、读回。
+    #[test]
+    fn cli_api_backend_overrides_and_round_trips() {
+        let cli = Cli::parse_from(["kugou-tui", "--api", "node"]);
+        let mut config = Config::default();
+        assert_eq!(config.api_backend, crate::api::ApiBackend::Native);
+
+        config.merge_cli(&cli);
+        assert_eq!(config.api_backend, crate::api::ApiBackend::Node);
+
+        let text = toml::to_string_pretty(&config).expect("要能序列化");
+        assert!(text.contains("api_backend = \"node\""), "实际：\n{text}");
+        let parsed: Config = toml::from_str(&text).expect("要能读回");
+        assert_eq!(parsed.api_backend, crate::api::ApiBackend::Node);
+    }
+
+    /// 不传 `--api` 时保留配置里已有的值，不要被默认值抹掉。
+    #[test]
+    fn missing_api_flag_keeps_the_configured_backend() {
+        let cli = Cli::parse_from(["kugou-tui"]);
+        let mut config = Config {
+            api_backend: crate::api::ApiBackend::Native,
+            ..Config::default()
+        };
+        config.merge_cli(&cli);
+        assert_eq!(config.api_backend, crate::api::ApiBackend::Native);
     }
 
     #[test]

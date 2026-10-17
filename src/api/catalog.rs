@@ -29,11 +29,11 @@
 
 use serde_json::Value;
 
-use crate::api::client::ApiClient;
 use crate::api::model::{
     Artist, Playlist, RankBoard, Song, artist_from_json, extract_songs, pick_array, pick_i64,
     pick_string, playlist_from_json, rank_board_from_json,
 };
+use crate::api::node::NodeApi;
 use crate::api::{data_of, extract_list};
 use crate::error::{AppError, Result};
 use crate::logger::tlog;
@@ -50,7 +50,7 @@ const MAX_PAGES: u32 = 60;
 /// 并发翻页时一批发多少页。太大容易触发上游限流，太小提速不明显；6 是个折中。
 const CONCURRENT_PAGES: u32 = 6;
 
-impl ApiClient {
+impl NodeApi {
     // ------------------------------------------------------------------
     // 搜索
     // ------------------------------------------------------------------
@@ -247,122 +247,9 @@ impl ApiClient {
     // 取全（翻页）
     // ------------------------------------------------------------------
 
-    /// 逐页取全量歌曲的通用实现（**并发**翻页）。
-    ///
-    /// # 为什么要并发
-    ///
-    /// 歌单接口硬限每页 30 条，400 首歌就是 14 次往返。串行做的话 RTT 直接累加，
-    /// 大歌单要等好几秒——而这几秒里界面只有一个"加载中"。改成一批页同时发，
-    /// 耗时就接近单页的延迟。
-    ///
-    /// # 批次策略
-    ///
-    /// 不知道总数，所以**先取第 1 页**：它满页说明后面可能还有，就按
-    /// [`CONCURRENT_PAGES`] 一批继续取；某一页不满就停（同串行版的判定）。
-    /// 一批里只要有一页失败就整体报错，避免静默漏歌。
-    async fn collect_all_pages<F, Fut>(&self, make: F) -> Result<Vec<Song>>
-    where
-        F: Fn(ApiClient, u32) -> Fut,
-        Fut: std::future::Future<Output = Result<Vec<Song>>> + Send + 'static,
-    {
-        let mut all: Vec<Song> = Vec::new();
-
-        // 第 1 页单独取：确定后面还有没有内容，避免一上来就并发一堆空请求
-        let first = make(self.clone(), 1).await?;
-        // 只有**空**才说明真没了。
-        //
-        // 不能用「不足 PAGE_LIMIT」判断：解析时会有条目被过滤掉
-        // （缺 hash、字段类型不对等），一页 30 条剩 29 条是常事，
-        // 那样会误判成"没有下一页"，歌单直接被截断在 29 首。
-        all.extend(first);
-        if all.is_empty() {
-            return Ok(all);
-        }
-
-        let mut page: u32 = 2;
-        while page <= MAX_PAGES {
-            let batch_end = (page + CONCURRENT_PAGES - 1).min(MAX_PAGES);
-
-            let mut set = tokio::task::JoinSet::new();
-            for batch_page in page..=batch_end {
-                // 每页一份克隆：ApiClient 内部是 Arc，克隆很便宜。
-                // 把页码跟着结果一起搬回来——下面要按页码重排，见 `collected`。
-                let future = make(self.clone(), batch_page);
-                set.spawn(async move { future.await.map(|songs| (batch_page, songs)) });
-            }
-
-            // `join_next()` 返回的是**任务完成顺序**，不是发起顺序。并发请求谁先回来
-            // 是不确定的，直接按返回顺序 `extend` 会让整表的页序被打乱：
-            // 榜单尤其致命——它的「顺序」就是榜单本身的内容。
-            //
-            // 所以先把一批的结果收进 `collected`，再按页码排好序拼上去。
-            let mut collected: Vec<(u32, Vec<Song>)> = Vec::with_capacity(
-                (batch_end.saturating_sub(page) + 1)
-                    .try_into()
-                    .unwrap_or(usize::MAX),
-            );
-
-            let mut stop = false;
-            while let Some(joined) = set.join_next().await {
-                match joined {
-                    Ok(Ok((_batch_page, songs))) => {
-                        // 同理，只有空页才停；短页后面可能还有内容
-                        if songs.is_empty() {
-                            stop = true;
-                        }
-                        collected.push((_batch_page, songs));
-                    }
-                    Ok(Err(error)) => {
-                        // 页码越界 = 后面没有了，属正常终止，保留已取到的内容。
-                        if error.is_page_out_of_range() {
-                            stop = true;
-                            continue;
-                        }
-
-                        // 后续某页失败（限流、超时、上游偶发错误）：
-                        // **不再让整次失败**，而是记日志并停在已取到的内容上。
-                        //
-                        // 之前整次失败时，界面会退回首屏那一页——用户刚做完一次
-                        // 搜索、紧接着打开几百首的歌单时很容易碰到，表现为
-                        // "明明有几百首却只显示 30 首"。部分结果比没有强，
-                        // 而且首屏已经显示过了，中断只是少后面几页。
-                        if all.is_empty() {
-                            // 一首都还没取到，那确实是失败
-                            return Err(error);
-                        }
-                        crate::logger::tlog!(
-                            crate::logger::LEVEL_WARN,
-                            "翻到第 {page} 页起失败，保留已取到的 {} 首：{error}",
-                            all.len()
-                        );
-                        stop = true;
-                    }
-                    Err(error) => {
-                        // 任务本身panic/取消。不该发生，报出来而不是静默丢页
-                        crate::logger::tlog!(crate::logger::LEVEL_WARN, "翻页任务失败：{error}");
-                        return Err(AppError::Other(format!("翻页任务失败：{error}")));
-                    }
-                }
-            }
-
-            // 按页码重排再拼——顺序错了整张表就是乱的（见上面那条注释）
-            collected.sort_by_key(|(batch_page, _)| *batch_page);
-            for (_batch_page, songs) in collected {
-                all.extend(songs);
-            }
-
-            if stop {
-                break;
-            }
-            page = batch_end + 1;
-        }
-
-        Ok(all)
-    }
-
     /// 歌单内**全部**歌曲（公开歌单）。
     pub async fn playlist_tracks_all(&self, global_id: &str, fresh: bool) -> Result<Vec<Song>> {
-        self.collect_all_pages(|client, page| {
+        collect_all_pages(self.clone(), |client, page| {
             let global_id = global_id.to_string();
             async move {
                 client
@@ -375,7 +262,7 @@ impl ApiClient {
 
     /// 用户歌单内**全部**歌曲（自建/收藏，按数字 `listid`）。
     pub async fn user_playlist_tracks_all(&self, list_id: i64, fresh: bool) -> Result<Vec<Song>> {
-        self.collect_all_pages(move |client, page| async move {
+        collect_all_pages(self.clone(), move |client, page| async move {
             client
                 .user_playlist_tracks(list_id, page, PAGE_LIMIT, fresh)
                 .await
@@ -385,7 +272,7 @@ impl ApiClient {
 
     /// 歌手**全部**歌曲。`sort` 同 [`Self::artist_tracks`]。
     pub async fn artist_tracks_all(&self, artist_id: i64, sort: &str) -> Result<Vec<Song>> {
-        self.collect_all_pages(|client, page| {
+        collect_all_pages(self.clone(), |client, page| {
             let sort = sort.to_string();
             async move {
                 client
@@ -401,7 +288,7 @@ impl ApiClient {
     /// `/rank/audio` 不像歌单那样硬限 30（传 100 能回 100），但统一按页取更省心，
     /// 也避免榜单扩容后要回头改。
     pub async fn rank_tracks_all(&self, rank_id: i64) -> Result<Vec<Song>> {
-        self.collect_all_pages(move |client, page| async move {
+        collect_all_pages(self.clone(), move |client, page| async move {
             client.rank_tracks(rank_id, page, PAGE_LIMIT).await
         })
         .await
@@ -411,208 +298,296 @@ impl ApiClient {
     // 播放直链
     // ------------------------------------------------------------------
 
-    /// 取播放直链。
+    /// 取播放直链。算法见 [`resolve_stream_url`]，两个后端共用。
     ///
     /// 注意：该接口依赖 `dfid`，缺失时酷狗会返回「本次请求需要验证」并给出空 url。
-    /// 调用方应保证 [`crate::api::cloud::ApiClient::fetch_device_fingerprint`] 已成功执行。
-    ///
-    /// # 为什么分两步
-    ///
-    /// `free_part=true` 的含义是「返回试听部分」。实测只要带上它，服务端就直接给
-    /// 60 秒试听片段（937 KiB ≈ 60 秒），**即使账号有会员也被降级**——这正是
-    /// 「VIP 歌曲只能听几十秒」的直接原因。
-    ///
-    /// 所以先按完整版请求；只有完整版确实拿不到（未登录 / 会员类型不匹配 /
-    /// 需单独购买）时，才退而求其次要试听片段，并明确标记 [`StreamUrl::is_trial`]，
-    /// 由界面告诉用户这是片段、不要误当成播完了。
+    /// 调用方应保证 [`crate::api::cloud::NodeApi::fetch_device_fingerprint`] 已成功执行。
     pub async fn song_stream_url(&self, song: &Song, quality: &str) -> Result<StreamUrl> {
-        // 登录用户先调 `/privilege/lite` 问「这账号能听哪几档音质」——不同音质的
-        // hash 不一样（VIP 用户有 flac 的 hash，普通用户没有），用同一个 hash
-        // 试所有音质会一直碰壁。**这是「设了 flac 但没 VIP 就只能听试听片段」的
-        // 真凶**：之前直接拿原 hash 调 `/song/url`，服务端一看这个 hash 没 flac
-        // 权限就给空 url。
-        //
-        // 未登录或 `/privilege/lite` 失败时回退到「原 hash + 用户选的音质」——
-        // 不能因为这个查询挂了就完全走不通。
-        let mut candidates = self.privilege_candidates(song, quality).await;
+        resolve_stream_url(self, song, quality).await
+    }
+}
 
-        // 蝰蛇系列（viper_clear / viper_atmos / viper_tape）是酷狗的**付费加项**，
-        // 需要独立的「蝰蛇 VIP」——普通 VIP / TVIP 账号设了它，上游会直接拒绝
-        // （实测 error_code 31863），表现为「所有歌都播不了」。
-        //
-        // 兜底思路：**降到这个账号实际能用的最高音质**，而不是无条件降到 128。
-        // 用户要的是「能听」，不是「能听但音质最差」——他是 VIP 就该拿到 flac
-        // 而不是 128。所以先从 `/privilege/lite` 给的可用音质里挑一个非蝰蛇的
-        // （那份列表已经是该账号有权限的），实在没有才退到 128。
-        if VIPER_QUALITIES.contains(&quality) {
-            let fallback = candidates
-                .iter()
-                .map(|(_, candidate_quality)| candidate_quality)
-                .find(|candidate_quality| !VIPER_QUALITIES.contains(&candidate_quality.as_str()))
-                .cloned()
-                .unwrap_or_else(|| VIPER_FALLBACK_QUALITY.to_string());
-            candidates.push((song.hash.clone(), fallback));
+/// 逐页取全量歌曲的通用实现（**并发**翻页）。
+///
+/// # 为什么要并发
+///
+/// 歌单接口硬限每页 30 条，400 首歌就是 14 次往返。串行做的话 RTT 直接累加，
+/// 大歌单要等好几秒——而这几秒里界面只有一个"加载中"。改成一批页同时发，
+/// 耗时就接近单页的延迟。
+///
+/// # 批次策略
+///
+/// 不知道总数，所以**先取第 1 页**：它满页说明后面可能还有，就按
+/// [`CONCURRENT_PAGES`] 一批继续取；某一页不满就停（同串行版的判定）。
+/// 一批里只要有一页失败就整体报错，避免静默漏歌。
+pub(crate) async fn collect_all_pages<C, F, Fut>(client: C, make: F) -> Result<Vec<Song>>
+where
+    C: Clone + Send + 'static,
+    F: Fn(C, u32) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<Song>>> + Send + 'static,
+{
+    let mut all: Vec<Song> = Vec::new();
+
+    // 第 1 页单独取：确定后面还有没有内容，避免一上来就并发一堆空请求
+    let first = make(client.clone(), 1).await?;
+    // 只有**空**才说明真没了。
+    //
+    // 不能用「不足 PAGE_LIMIT」判断：解析时会有条目被过滤掉
+    // （缺 hash、字段类型不对等），一页 30 条剩 29 条是常事，
+    // 那样会误判成"没有下一页"，歌单直接被截断在 29 首。
+    all.extend(first);
+    if all.is_empty() {
+        return Ok(all);
+    }
+
+    let mut page: u32 = 2;
+    while page <= MAX_PAGES {
+        let batch_end = (page + CONCURRENT_PAGES - 1).min(MAX_PAGES);
+
+        let mut set = tokio::task::JoinSet::new();
+        for batch_page in page..=batch_end {
+            // 每页一份克隆：NodeApi 内部是 Arc，克隆很便宜。
+            // 把页码跟着结果一起搬回来——下面要按页码重排，见 `collected`。
+            let future = make(client.clone(), batch_page);
+            set.spawn(async move { future.await.map(|songs| (batch_page, songs)) });
         }
 
-        let mut last_full = None;
-        for (hash, q) in &candidates {
-            // 单个候选失败（比如服务端对某个组合直接 502）**不能**中断整个流程
-            // ——我们要的是「试出第一个能用的组合」，不是「第一个组合必须成功」。
-            let response = match self.request_song_url_with_hash(song, hash, q, false).await {
-                Ok(response) => response,
-                Err(error) => {
-                    tlog!(
-                        crate::logger::LEVEL_DEBUG,
-                        "/song/url 候选失败（hash={hash} quality={q}）：{}，继续下一个",
-                        error.user_hint()
+        // `join_next()` 返回的是**任务完成顺序**，不是发起顺序。并发请求谁先回来
+        // 是不确定的，直接按返回顺序 `extend` 会让整表的页序被打乱：
+        // 榜单尤其致命——它的「顺序」就是榜单本身的内容。
+        //
+        // 所以先把一批的结果收进 `collected`，再按页码排好序拼上去。
+        let mut collected: Vec<(u32, Vec<Song>)> = Vec::with_capacity(
+            (batch_end.saturating_sub(page) + 1)
+                .try_into()
+                .unwrap_or(usize::MAX),
+        );
+
+        let mut stop = false;
+        while let Some(joined) = set.join_next().await {
+            match joined {
+                Ok(Ok((_batch_page, songs))) => {
+                    // 同理，只有空页才停；短页后面可能还有内容
+                    if songs.is_empty() {
+                        stop = true;
+                    }
+                    collected.push((_batch_page, songs));
+                }
+                Ok(Err(error)) => {
+                    // 页码越界 = 后面没有了，属正常终止，保留已取到的内容。
+                    if error.is_page_out_of_range() {
+                        stop = true;
+                        continue;
+                    }
+
+                    // 后续某页失败（限流、超时、上游偶发错误）：
+                    // **不再让整次失败**，而是记日志并停在已取到的内容上。
+                    //
+                    // 之前整次失败时，界面会退回首屏那一页——用户刚做完一次
+                    // 搜索、紧接着打开几百首的歌单时很容易碰到，表现为
+                    // "明明有几百首却只显示 30 首"。部分结果比没有强，
+                    // 而且首屏已经显示过了，中断只是少后面几页。
+                    if all.is_empty() {
+                        // 一首都还没取到，那确实是失败
+                        return Err(error);
+                    }
+                    crate::logger::tlog!(
+                        crate::logger::LEVEL_WARN,
+                        "翻到第 {page} 页起失败，保留已取到的 {} 首：{error}",
+                        all.len()
                     );
-                    continue;
+                    stop = true;
                 }
-            };
-            // mp4 容器的候选要跳过（与 MoeKoeMusic 同款条件）：同一首歌的
-            // mp4 版是另一条转码链路出的文件，母版与 flac/mp3 不同——播它
-            // 就是「听着和别的客户端不一样」。跳过它试下一档。
-            if actual_audio_format(&response).0.as_deref() == Some("mp4") {
-                tlog!(
-                    crate::logger::LEVEL_DEBUG,
-                    "/song/url 候选是 mp4 容器，跳过试下一档（hash={hash} quality={q}）"
-                );
-                continue;
-            }
-            if let Some(url) = extract_stream_url(&response) {
-                // 拿到直链不等于拿到了**用户要的那一档**：服务端会静默降级
-                // （请求 flac 回 mp3/128 kbps，`status` 仍是 1）。这里顺手核一次，
-                // 让界面能照实说，而不是标着 flac 放 128。
-                let (ext_name, bit_rate) = actual_audio_format(&response);
-                let mut notes = Vec::new();
-                if q != quality && VIPER_QUALITIES.contains(&quality) {
-                    notes.push(format!(
-                        "{quality} 不可用（需要蝰蛇 VIP），已降级到标准 {q}"
-                    ));
+                Err(error) => {
+                    // 任务本身panic/取消。不该发生，报出来而不是静默丢页
+                    crate::logger::tlog!(crate::logger::LEVEL_WARN, "翻页任务失败：{error}");
+                    return Err(AppError::Other(format!("翻页任务失败：{error}")));
                 }
-                if let Some(note) = downgrade_note(quality, ext_name.as_deref(), bit_rate) {
-                    notes.push(note);
-                }
-                return Ok(StreamUrl {
-                    url,
-                    is_trial: false,
-                    reason: (!notes.is_empty()).then(|| notes.join("；")),
-                });
-            }
-            last_full = Some(response);
-        }
-
-        // 完整版拿不到，先记下原因再退到试听片段
-        let reason = last_full.as_ref().and_then(|root| self.fail_reason(root));
-
-        // 试听兜底：这一路失败也别抛出去了——上面完整版已经试过一轮，能到这里说明
-        // 全都没成，应该给用户一个**完整的原因**而不是最后这次的网络错误。
-        let trial = self
-            .request_song_url_with_hash(song, &song.hash, quality, true)
-            .await
-            .unwrap_or_else(|error| {
-                tlog!(
-                    crate::logger::LEVEL_DEBUG,
-                    "试听兜底请求失败：{}",
-                    error.user_hint()
-                );
-                Value::Null
-            });
-        if let Some(url) = extract_stream_url(&trial) {
-            return Ok(StreamUrl {
-                url,
-                is_trial: true,
-                reason,
-            });
-        }
-
-        // 两次都没有。优先把服务端给的原因透出去，比笼统的「可能需要 VIP」有用得多。
-        for root in last_full.iter().chain(std::iter::once(&trial)) {
-            // KuGouMusicApi 的 `/song/url` 把真正的失败信息放在 `data` 嵌套层里，
-            // 顶层只有元数据——所以读两层。
-            let data = root.get("data").unwrap_or(root);
-            if let Some(message) = pick_string(data, &["error", "error_msg", "msg", "errmsg"]) {
-                let status = pick_i64(data, &["status"]).unwrap_or(0);
-                let reason = self.status_reason(status).unwrap_or(message);
-                return Err(AppError::Api {
-                    path: "/song/url".to_string(),
-                    code: pick_i64(data, &["errcode", "error_code"]).unwrap_or(status),
-                    message: reason,
-                });
-            }
-
-            // `fail_process` 会说明卡在哪一步，实测见过 ["pkg","buy"]（需购买/开通）
-            if let Some(process) = data.get("fail_process").and_then(Value::as_array)
-                && !process.is_empty()
-            {
-                let steps = process
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .collect::<Vec<_>>()
-                    .join("/");
-                return Err(AppError::NotFound(format!(
-                    "《{}》需要开通或购买（{}）",
-                    song.name, steps
-                )));
             }
         }
 
-        Err(AppError::NotFound(format!(
-            "《{}》没有可用的播放地址（可能需要 VIP、已下架或版权受限）",
-            song.name
-        )))
+        // 按页码重排再拼——顺序错了整张表就是乱的（见上面那条注释）
+        collected.sort_by_key(|(batch_page, _)| *batch_page);
+        for (_batch_page, songs) in collected {
+            all.extend(songs);
+        }
+
+        if stop {
+            break;
+        }
+        page = batch_end + 1;
     }
 
-    /// 把这一首歌的**所有** hash 配上用户选的音质，作为兜底候选。
-    ///
-    /// 顺序：主 hash 在前，`audio_info` 里的其它 hash 在后。
-    ///
-    /// # 为什么不能只用 `song.hash`
-    ///
-    /// 搜索接口给的 `FileHash` 常指向**已下架**的版本（酷狗搜索保留历史 hash），
-    /// 而 `audio_info.hash_320` / `hash_128` 等往往还是能播的——这就是用户说的
-    /// 「下架歌曲收藏到歌单里就能听」：歌单接口给的正是 `audio_info` 那一组 hash。
-    ///
-    /// 所以 `/privilege/lite` 查不到、或者服务端根本没有这个接口（旧版
-    /// KuGouMusicApi）时，把整组 hash 挨个试一遍，而不是只抱着失效的那个不放。
-    fn fallback_candidates(song: &Song, quality: &str) -> Vec<(String, String)> {
-        let mut candidates = vec![(song.hash.clone(), quality.to_string())];
-        for hash in song.extra_hashes.values() {
-            if *hash != song.hash {
-                candidates.push((hash.clone(), quality.to_string()));
-            }
-        }
-        candidates
+    Ok(all)
+}
+
+/// 一次取流要用到的两个上游请求。两个后端各自实现：`NodeApi` 打本机服务，
+/// `NativeApi` 直连网关。**取流算法本身只此一份**，见 [`resolve_stream_url`]。
+///
+/// 只抽象到「发哪一个请求」这一层，不抽象参数拼装——两边的拼装规则本来就不同
+/// （native 要签名、要 `x-router` 头），硬凑一个共同签名只会两边都别扭。
+pub(crate) trait StreamSource {
+    /// 问服务端「这个 hash 在登录账号下能听哪几档音质」。
+    async fn privilege_lite(&self, song: &Song) -> Result<Value>;
+
+    /// 发一次 `/song/url`。`free_part` 决定是否只要试听片段。
+    async fn song_url(&self, hash: &str, quality: &str, free_part: bool) -> Result<Value>;
+}
+
+/// 取播放直链的共享实现。
+///
+/// # 为什么分两步
+///
+/// `free_part=true` 的含义是「返回试听部分」。实测只要带上它，服务端就直接给
+/// 60 秒试听片段（937 KiB ≈ 60 秒），**即使账号有会员也被降级**——这正是
+/// 「VIP 歌曲只能听几十秒」的直接原因。
+///
+/// 所以先按完整版请求；只有完整版确实拿不到（未登录 / 会员类型不匹配 /
+/// 需单独购买）时，才退而求其次要试听片段，并明确标记 [`StreamUrl::is_trial`]，
+/// 由界面告诉用户这是片段、不要误当成播完了。
+pub(crate) async fn resolve_stream_url<S: StreamSource>(
+    source: &S,
+    song: &Song,
+    quality: &str,
+) -> Result<StreamUrl> {
+    // 登录用户先调 `/privilege/lite` 问「这账号能听哪几档音质」——不同音质的
+    // hash 不一样（VIP 用户有 flac 的 hash，普通用户没有），用同一个 hash
+    // 试所有音质会一直碰壁。**这是「设了 flac 但没 VIP 就只能听试听片段」的
+    // 真凶**：之前直接拿原 hash 调 `/song/url`，服务端一看这个 hash 没 flac
+    // 权限就给空 url。
+    //
+    // 未登录或 `/privilege/lite` 失败时回退到「原 hash + 用户选的音质」——
+    // 不能因为这个查询挂了就完全走不通。
+    let mut candidates = privilege_candidates(source, song, quality).await;
+
+    // 蝰蛇系列（viper_clear / viper_atmos / viper_tape）是酷狗的**付费加项**，
+    // 需要独立的「蝰蛇 VIP」——普通 VIP / TVIP 账号设了它，上游会直接拒绝
+    // （实测 error_code 31863），表现为「所有歌都播不了」。
+    //
+    // 兜底思路：**降到这个账号实际能用的最高音质**，而不是无条件降到 128。
+    // 用户要的是「能听」，不是「能听但音质最差」——他是 VIP 就该拿到 flac
+    // 而不是 128。所以先从 `/privilege/lite` 给的可用音质里挑一个非蝰蛇的
+    // （那份列表已经是该账号有权限的），实在没有才退到 128。
+    if VIPER_QUALITIES.contains(&quality) {
+        let fallback = candidates
+            .iter()
+            .map(|(_, candidate_quality)| candidate_quality)
+            .find(|candidate_quality| !VIPER_QUALITIES.contains(&candidate_quality.as_str()))
+            .cloned()
+            .unwrap_or_else(|| VIPER_FALLBACK_QUALITY.to_string());
+        candidates.push((song.hash.clone(), fallback));
     }
 
-    /// 把 `/privilege/lite` 的响应转换成「按用户选的音质降级排序」的候选列表。
-    ///
-    /// 没拿到响应或解析不出候选时，回退到 `fallback_candidates`——这一首歌的所有
-    /// hash 挨个试。走老路不一定能拿到，但至少不会因为这个查询失败就整条堵死。
-    async fn privilege_candidates(&self, song: &Song, quality: &str) -> Vec<(String, String)> {
-        let response = match self.request_privilege_lite(song).await {
-            Ok(value) => value,
+    let mut last_full = None;
+    for (hash, q) in &candidates {
+        // 单个候选失败（比如服务端对某个组合直接 502）**不能**中断整个流程
+        // ——我们要的是「试出第一个能用的组合」，不是「第一个组合必须成功」。
+        let response = match source.song_url(hash, q, false).await {
+            Ok(response) => response,
             Err(error) => {
                 tlog!(
                     crate::logger::LEVEL_DEBUG,
-                    "/privilege/lite 失败：{}，按整组 hash 兜底",
+                    "/song/url 候选失败（hash={hash} quality={q}）：{}，继续下一个",
                     error.user_hint()
                 );
-                return Self::fallback_candidates(song, quality);
+                continue;
             }
         };
-        let candidates = parse_quality_candidates(&response, quality, &song.hash);
-        if candidates.is_empty() {
-            // 服务端认这个 hash 但没给任何可用档位——多半是下架歌曲。
-            // 换这一首歌的其它 hash 再试，别只咬着失效的那个。
-            return Self::fallback_candidates(song, quality);
+        // mp4 容器的候选要跳过（与 MoeKoeMusic 同款条件）：同一首歌的
+        // mp4 版是另一条转码链路出的文件，母版与 flac/mp3 不同——播它
+        // 就是「听着和别的客户端不一样」。跳过它试下一档。
+        if actual_audio_format(&response).0.as_deref() == Some("mp4") {
+            tlog!(
+                crate::logger::LEVEL_DEBUG,
+                "/song/url 候选是 mp4 容器，跳过试下一档（hash={hash} quality={q}）"
+            );
+            continue;
         }
-        candidates
-            .into_iter()
-            .map(|candidate| (candidate.hash, candidate.quality))
-            .collect()
+        if let Some(url) = extract_stream_url(&response) {
+            // 拿到直链不等于拿到了**用户要的那一档**：服务端会静默降级
+            // （请求 flac 回 mp3/128 kbps，`status` 仍是 1）。这里顺手核一次，
+            // 让界面能照实说，而不是标着 flac 放 128。
+            let (ext_name, bit_rate) = actual_audio_format(&response);
+            let mut notes = Vec::new();
+            if q != quality && VIPER_QUALITIES.contains(&quality) {
+                notes.push(format!(
+                    "{quality} 不可用（需要蝰蛇 VIP），已降级到标准 {q}"
+                ));
+            }
+            if let Some(note) = downgrade_note(quality, ext_name.as_deref(), bit_rate) {
+                notes.push(note);
+            }
+            return Ok(StreamUrl {
+                url,
+                is_trial: false,
+                reason: (!notes.is_empty()).then(|| notes.join("；")),
+            });
+        }
+        last_full = Some(response);
     }
 
+    // 完整版拿不到，先记下原因再退到试听片段
+    let reason = last_full.as_ref().and_then(fail_reason);
+
+    // 试听兜底：这一路失败也别抛出去了——上面完整版已经试过一轮，能到这里说明
+    // 全都没成，应该给用户一个**完整的原因**而不是最后这次的网络错误。
+    let trial = source
+        .song_url(&song.hash, quality, true)
+        .await
+        .unwrap_or_else(|error| {
+            tlog!(
+                crate::logger::LEVEL_DEBUG,
+                "试听兜底请求失败：{}",
+                error.user_hint()
+            );
+            Value::Null
+        });
+    if let Some(url) = extract_stream_url(&trial) {
+        return Ok(StreamUrl {
+            url,
+            is_trial: true,
+            reason,
+        });
+    }
+
+    // 两次都没有。优先把服务端给的原因透出去，比笼统的「可能需要 VIP」有用得多。
+    for root in last_full.iter().chain(std::iter::once(&trial)) {
+        // KuGouMusicApi 的 `/song/url` 把真正的失败信息放在 `data` 嵌套层里，
+        // 顶层只有元数据——所以读两层。
+        let data = root.get("data").unwrap_or(root);
+        if let Some(message) = pick_string(data, &["error", "error_msg", "msg", "errmsg"]) {
+            let status = pick_i64(data, &["status"]).unwrap_or(0);
+            let reason = status_reason(status).unwrap_or(message);
+            return Err(AppError::Api {
+                path: "/song/url".to_string(),
+                code: pick_i64(data, &["errcode", "error_code"]).unwrap_or(status),
+                message: reason,
+            });
+        }
+
+        // `fail_process` 会说明卡在哪一步，实测见过 ["pkg","buy"]（需购买/开通）
+        if let Some(process) = data.get("fail_process").and_then(Value::as_array)
+            && !process.is_empty()
+        {
+            let steps = process
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("/");
+            return Err(AppError::NotFound(format!(
+                "《{}》需要开通或购买（{}）",
+                song.name, steps
+            )));
+        }
+    }
+
+    Err(AppError::NotFound(format!(
+        "《{}》没有可用的播放地址（可能需要 VIP、已下架或版权受限）",
+        song.name
+    )))
+}
+
+impl NodeApi {
     /// 问服务端「这个 hash 在登录账号下能听哪几档音质」。
     ///
     /// 酷狗为每档音质维护**独立的文件指纹（hash）**——VIP 用户拿到的 flac hash
@@ -646,44 +621,6 @@ impl ApiClient {
 
         let query = vec![("hash", hashes.join(","))];
         self.get_json_uncached("/privilege/lite", &query).await
-    }
-
-    /// 从响应里读出「为什么给不了完整版」。
-    ///
-    /// `fail_process` 是服务端给的步骤数组，实测见过 `["pkg","buy"]`（需开通或购买）。
-    /// 读不到就返回 None，交给调用方用通用文案。
-    fn fail_reason(&self, root: &Value) -> Option<String> {
-        let data = root.get("data").unwrap_or(root);
-        let array = data.get("fail_process").and_then(Value::as_array)?;
-        let steps: Vec<&str> = array.iter().filter_map(Value::as_str).collect();
-        if steps.is_empty() {
-            return None;
-        }
-        Some(match steps.join("/").as_str() {
-            "pkg" => "需要开通会员".to_string(),
-            "pkg/buy" => "需要开通会员或单独购买该专辑".to_string(),
-            other => format!("服务端返回 {other}"),
-        })
-    }
-
-    /// 把服务端 `status` 字段翻译成人话。
-    ///
-    /// KuGouMusicApi 把上游酷狗的状态码转成自己的 `status`，下面是实测过的几个：
-    ///
-    /// * `1` 成功（这一支不会是这条路径返回的——`status == 1` 时已经拿到 url 了）
-    /// * `2` 需要验证（缺 dfid 或 token），界面提示去登录 / 检查设备指纹
-    /// * `3` 该歌曲暂无版权，下架或地区限制
-    /// * 其它  透出服务端原文
-    fn status_reason(&self, status: i64) -> Option<String> {
-        match status {
-            0 => None,
-            2 => Some("需要登录或重新登录后再试".to_string()),
-            // 实测 `3` 不等于「无版权」：同一首歌带 `audio_id` 是 status=1 有直链，
-            // 带 `/privilege/lite` 返回的那个（mixsongid）就是 status=3、空 url。
-            // 所以它是「请求里的文件标识与账号权限对不上」，别再误导成下架。
-            3 => Some("服务端拒绝了这个请求（文件标识与账号权限不匹配）".to_string()),
-            other => Some(format!("服务端返回 {other}")),
-        }
     }
 
     /// 发一次 `/song/url`。`free_part` 决定是否只要试听片段。
@@ -721,7 +658,6 @@ impl ApiClient {
     /// 的那组，不是 `/privilege/lite` 那组），并把结论记回这里。
     async fn request_song_url_with_hash(
         &self,
-        _song: &Song,
         hash: &str,
         quality: &str,
         free_part: bool,
@@ -736,6 +672,110 @@ impl ApiClient {
         }
 
         self.get_json_uncached("/song/url", &query).await
+    }
+}
+
+/// `NodeApi` 的取流实现：两个请求都打本机 KuGouMusicApi。
+impl StreamSource for NodeApi {
+    async fn privilege_lite(&self, song: &Song) -> Result<Value> {
+        self.request_privilege_lite(song).await
+    }
+
+    async fn song_url(&self, hash: &str, quality: &str, free_part: bool) -> Result<Value> {
+        self.request_song_url_with_hash(hash, quality, free_part)
+            .await
+    }
+}
+
+/// 把这一首歌的**所有** hash 配上用户选的音质，作为兜底候选。
+///
+/// 顺序：主 hash 在前，`audio_info` 里的其它 hash 在后。
+///
+/// # 为什么不能只用 `song.hash`
+///
+/// 搜索接口给的 `FileHash` 常指向**已下架**的版本（酷狗搜索保留历史 hash），
+/// 而 `audio_info.hash_320` / `hash_128` 等往往还是能播的——这就是用户说的
+/// 「下架歌曲收藏到歌单里就能听」：歌单接口给的正是 `audio_info` 那一组 hash。
+///
+/// 所以 `/privilege/lite` 查不到、或者服务端根本没有这个接口（旧版
+/// KuGouMusicApi）时，把整组 hash 挨个试一遍，而不是只抱着失效的那个不放。
+fn fallback_candidates(song: &Song, quality: &str) -> Vec<(String, String)> {
+    let mut candidates = vec![(song.hash.clone(), quality.to_string())];
+    for hash in song.extra_hashes.values() {
+        if *hash != song.hash {
+            candidates.push((hash.clone(), quality.to_string()));
+        }
+    }
+    candidates
+}
+
+/// 把 `/privilege/lite` 的响应转换成「按用户选的音质降级排序」的候选列表。
+///
+/// 没拿到响应或解析不出候选时，回退到 `fallback_candidates`——这一首歌的所有
+/// hash 挨个试。走老路不一定能拿到，但至少不会因为这个查询失败就整条堵死。
+async fn privilege_candidates<S: StreamSource>(
+    source: &S,
+    song: &Song,
+    quality: &str,
+) -> Vec<(String, String)> {
+    let response = match source.privilege_lite(song).await {
+        Ok(value) => value,
+        Err(error) => {
+            tlog!(
+                crate::logger::LEVEL_DEBUG,
+                "/privilege/lite 失败：{}，按整组 hash 兜底",
+                error.user_hint()
+            );
+            return fallback_candidates(song, quality);
+        }
+    };
+    let candidates = parse_quality_candidates(&response, quality, &song.hash);
+    if candidates.is_empty() {
+        // 服务端认这个 hash 但没给任何可用档位——多半是下架歌曲。
+        // 换这一首歌的其它 hash 再试，别只咬着失效的那个。
+        return fallback_candidates(song, quality);
+    }
+    candidates
+        .into_iter()
+        .map(|candidate| (candidate.hash, candidate.quality))
+        .collect()
+}
+
+/// 从响应里读出「为什么给不了完整版」。
+///
+/// `fail_process` 是服务端给的步骤数组，实测见过 `["pkg","buy"]`（需开通或购买）。
+/// 读不到就返回 None，交给调用方用通用文案。
+fn fail_reason(root: &Value) -> Option<String> {
+    let data = root.get("data").unwrap_or(root);
+    let array = data.get("fail_process").and_then(Value::as_array)?;
+    let steps: Vec<&str> = array.iter().filter_map(Value::as_str).collect();
+    if steps.is_empty() {
+        return None;
+    }
+    Some(match steps.join("/").as_str() {
+        "pkg" => "需要开通会员".to_string(),
+        "pkg/buy" => "需要开通会员或单独购买该专辑".to_string(),
+        other => format!("服务端返回 {other}"),
+    })
+}
+
+/// 把服务端 `status` 字段翻译成人话。
+///
+/// KuGouMusicApi 把上游酷狗的状态码转成自己的 `status`，下面是实测过的几个：
+///
+/// * `1` 成功（这一支不会是这条路径返回的——`status == 1` 时已经拿到 url 了）
+/// * `2` 需要验证（缺 dfid 或 token），界面提示去登录 / 检查设备指纹
+/// * `3` 该歌曲暂无版权，下架或地区限制
+/// * 其它  透出服务端原文
+fn status_reason(status: i64) -> Option<String> {
+    match status {
+        0 => None,
+        2 => Some("需要登录或重新登录后再试".to_string()),
+        // 实测 `3` 不等于「无版权」：同一首歌带 `audio_id` 是 status=1 有直链，
+        // 带 `/privilege/lite` 返回的那个（mixsongid）就是 status=3、空 url。
+        // 所以它是「请求里的文件标识与账号权限对不上」，别再误导成下架。
+        3 => Some("服务端拒绝了这个请求（文件标识与账号权限不匹配）".to_string()),
+        other => Some(format!("服务端返回 {other}")),
     }
 }
 
@@ -800,7 +840,7 @@ struct QualityCandidate {
 /// # 为什么要按 `album_audio_id` 分两遍
 ///
 /// 请求时是把「主 hash + `audio_info` 里那几个 hash」逗号拼接一起发的
-/// （见 [`ApiClient::request_privilege_lite`]），响应因此可能是**多个 item**，
+/// （见 [`NodeApi::request_privilege_lite`]），响应因此可能是**多个 item**，
 /// 每个 item 自带一组 variant。把全部 item 的 variant 混进一张表（老写法）意味着
 /// **谁先出现谁赢**——而服务端并不保证 item 的顺序，一旦某个 hash 指向的是
 /// **另一个版本**（同曲不同版 / 翻唱 / 铃声），就可能挑到别的版本的文件。
@@ -811,7 +851,7 @@ struct QualityCandidate {
 /// 2. 第 1 遍一个候选都没拿到时才放开到全部 item。这一路必须留着：
 ///    「搜索给的 hash 已下架、歌在 `audio_info` 的另一个 hash 下」靠的就是它。
 ///
-/// 两遍都空就返回空，由调用方退回 [`ApiClient::fallback_candidates`]。
+/// 两遍都空就返回空，由调用方退回 [`fallback_candidates`]。
 fn parse_quality_candidates(
     response: &Value,
     requested: &str,
@@ -989,7 +1029,7 @@ pub struct StreamUrl {
 /// 「当前用户可写」处理。**只有 `/user/playlist` 能这么假设**：歌单广场返回的是
 /// 别人创建的歌单，同样带 `specialid` 却没有 `is_self`，误判会把陌生人的歌单
 /// 标成「可写」，还能被设成同步目标。
-fn collect_playlists(root: &Value, assume_own: bool) -> Vec<Playlist> {
+pub(crate) fn collect_playlists(root: &Value, assume_own: bool) -> Vec<Playlist> {
     extract_list(
         root,
         &["info", "list", "lists", "special_list", "data"],
@@ -1013,7 +1053,7 @@ fn collect_playlists(root: &Value, assume_own: bool) -> Vec<Playlist> {
 /// 然后掉进 `extract_list` 的兜底扫描，只命中第一组（热门 60 人），
 /// A–Z 全表被静默丢掉，同时每加载一次就刷一条「请核对字段布局」的警告。
 /// 所以先把各组的 `singer` 展平再解析。
-fn collect_artists(root: &Value) -> Vec<Artist> {
+pub(crate) fn collect_artists(root: &Value) -> Vec<Artist> {
     let data = data_of(root);
     let mut artists = Vec::new();
     for group in pick_array(data, &["info", "list", "singer_list"]) {
@@ -1215,8 +1255,7 @@ mod tests {
         let quality = std::env::var("KUGOU_TUI_PROBE_QUALITY").unwrap_or(config.quality);
         println!("API={api_base}  hash={hash}  请求档位={quality}");
 
-        let client =
-            ApiClient::new(&api_base, cookie, config.proxy.as_deref()).expect("构造客户端");
+        let client = NodeApi::new(&api_base, cookie, config.proxy.as_deref()).expect("构造客户端");
         let song = Song {
             hash: hash.clone(),
             name: "probe".to_string(),
@@ -1254,10 +1293,7 @@ mod tests {
 
         // ---- 降级链逐档 /song/url：看每一档实际给的是什么文件 ----
         for tier in fallback_chain(&quality) {
-            let response = match client
-                .request_song_url_with_hash(&song, &hash, tier, false)
-                .await
-            {
+            let response = match client.request_song_url_with_hash(&hash, tier, false).await {
                 Ok(response) => response,
                 Err(error) => {
                     println!("{tier:>6}: 请求失败 {}", error.user_hint());
@@ -1398,7 +1434,7 @@ mod tests {
     /// 榜单内容本身。
     #[tokio::test]
     async fn concurrent_pages_are_assembled_in_page_order() {
-        let client = ApiClient::new(&spawn_paged_server(), None, None).expect("构造客户端");
+        let client = NodeApi::new(&spawn_paged_server(), None, None).expect("构造客户端");
 
         let songs = client
             .playlist_tracks_all("any", false)
@@ -1737,7 +1773,7 @@ mod tests {
             source: crate::source::SourceKind::Kugou,
         };
 
-        let candidates = ApiClient::fallback_candidates(&song, "128");
+        let candidates = fallback_candidates(&song, "128");
         // 主 hash 在前，其余两个在后；每个都用用户选的音质
         assert_eq!(candidates.len(), 3);
         assert_eq!(
@@ -1765,7 +1801,7 @@ mod tests {
             extra_hashes: Default::default(),
             source: crate::source::SourceKind::Kugou,
         };
-        let candidates = ApiClient::fallback_candidates(&song, "320");
+        let candidates = fallback_candidates(&song, "320");
         assert_eq!(
             candidates,
             vec![("ONLY_HASH".to_string(), "320".to_string())]
@@ -1774,13 +1810,13 @@ mod tests {
 
     /// `/privilege/lite` 那一档里的 `album_audio_id` 要能被解析出来。
     ///
-    /// 这个字段**目前只解析、不发送**——见 [`ApiClient::request_song_url_with_hash`]
+    /// 这个字段**目前只解析、不发送**——见 [`NodeApi::request_song_url_with_hash`]
     /// 里的说明：实测四种参数组合都能拿到直链，而带错 id 反而会让服务端回
     /// `status=3`。留着它是因为那是「用户买的究竟是哪个版本」的唯一凭据，
     /// 将来要在 `/song/url` 上补字段时，值就在这里，不用重新解析一遍。
     ///
     /// 注意别把它和搜索接口给的 `MixSongID` 混为一谈：实测同一个值在两处都出现过，
-    /// 但 [`ApiClient::status_reason`] 记着「带 privilege 那个会 status=3」的
+    /// 但 [`NodeApi::status_reason`] 记着「带 privilege 那个会 status=3」的
     /// 反面案例，所以两者在 `Song` 上是**分开存的**（`album_audio_id` 与 `audio_id`）。
     #[test]
     fn privilege_candidates_keep_the_server_side_album_audio_id() {
@@ -1815,7 +1851,7 @@ mod tests {
         };
         let _ = &mut song;
         assert_eq!(
-            ApiClient::fallback_candidates(&song, "128")[0],
+            fallback_candidates(&song, "128")[0],
             ("h_128".to_string(), "128".to_string())
         );
     }
@@ -2147,7 +2183,7 @@ mod tests {
     #[tokio::test]
     async fn song_stream_url_skips_mp4_candidates() {
         let base = spawn_mp4_server();
-        let client = ApiClient::new(&base, None, None).expect("构造客户端");
+        let client = NodeApi::new(&base, None, None).expect("构造客户端");
         let song = Song {
             hash: "AAAA".to_string(),
             name: "测试曲".to_string(),
@@ -2169,7 +2205,7 @@ mod tests {
     #[tokio::test]
     async fn song_stream_url_reports_a_silent_downgrade() {
         let base = spawn_downgrading_server();
-        let client = ApiClient::new(&base, None, None).expect("构造客户端");
+        let client = NodeApi::new(&base, None, None).expect("构造客户端");
         let song = Song {
             hash: "AAAA".to_string(),
             name: "测试曲".to_string(),

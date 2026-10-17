@@ -5,7 +5,7 @@
 //! 酷狗取歌词要两个请求：
 //!
 //! 1. `GET /search/lyric?hash=&keywords=` → 拿到 `(id, accesskey)`
-//! 2. `GET /lyric?id=&accesskey=&fmt=lrc&decode=true` → 拿到 LRC 正文
+//! 2. `GET /lyric?id=&accesskey=&fmt=krc&decode=true` → 拿到歌词正文
 //!
 //! 服务端在 `decode=true` 时会把结果放进 `decodeContent`；如果只给了 base64 的
 //! `content`，本地再解一次。
@@ -13,107 +13,411 @@
 //! # 关于 KRC
 //!
 //! 酷狗原生的逐字歌词格式是 KRC（`[起始毫秒,持续毫秒]字<偏移,时长,0>…`）。
-//! 本项目只要整行歌词，所以请求 `fmt=lrc`；但解析器仍然兼容 KRC 的时间标签，
-//! 万一服务端回落到 KRC 也不会整篇解析失败——只是退化成逐行。
+//! 本项目要逐字高亮，所以请求 `fmt=krc`，解析器解析 `<本行内偏移,持续,0>`
+//! 标记（见 `parse_krc_words`）；翻译与音译只存在于 KRC 的 `[language:]` 标签里，
+//! 请求 lrc 就拿不到。解析器同时兼容纯 LRC 的时间标签，服务端万一回落到 LRC
+//! 也不会整篇解析失败——只是退化成逐行。
 
 use base64::Engine;
 use serde_json::Value;
 
-use crate::api::client::ApiClient;
 use crate::api::data_of;
 use crate::api::model::{Lyric, LyricLine, LyricWord, Song, pick_string};
+use crate::api::node::NodeApi;
 use crate::error::{AppError, Result};
 
-impl ApiClient {
-    /// 取某首歌的歌词。
-    ///
-    /// # 为什么要试多个候选
-    ///
-    /// 同一个 hash 酷狗往往提供多个 KRC 变体：**有的只带罗马音，有的带真正的中文译文**。
-    /// 只取第一个的话，日语歌很容易拿到罗马音版——界面就显示成一串拼音，等于没有翻译。
-    ///
-    /// 所以这里遍历候选，优先采用「[language:] 里有 CJK 译文」的那个；
-    /// 都没有才退回第一个能解析出内容的。
-    pub async fn fetch_lyric(&self, song: &Song) -> Result<Lyric> {
-        let candidates = self.find_lyric_candidates(song).await?;
-        if candidates.is_empty() {
-            return Err(AppError::NotFound(format!("未找到《{}》的歌词", song.name)));
-        }
+/// 取歌词要用的两个上游请求。两个后端各自实现：`NodeApi` 打本机服务，
+/// `NativeApi` 直连 `lyrics.kugou.com`。**取歌词的算法本身只此一份**，
+/// 见 [`fetch_lyric_via`]。
+///
+/// 与 [`crate::api::catalog::StreamSource`] 同样的分层：只抽象到「发哪一个请求」，
+/// 不抽象参数拼装——native 要签名、要 `clearDefaultParams`，硬凑共同签名只会
+/// 两边都别扭。
+#[allow(async_fn_in_trait)] // 与 MusicApi 一致：只用泛型静态分发，不做 dyn
+pub(crate) trait LyricSource {
+    /// 第一步：按 hash 找歌词候选，返回 `/search/lyric` 的原始响应。
+    async fn search_lyric(&self, song: &Song) -> Result<Value>;
 
-        let mut fallback: Option<Lyric> = None;
+    /// 第二步：按候选的 `(id, accesskey)` 取歌词正文。
+    ///
+    /// 返回**原始响应体**（可能是 JSON，也可能是纯文本），由 [`fetch_lyric_via`]
+    /// 统一解释。native 在这一步就把 KRC 解好并写进 `decodeContent`，
+    /// 与 Node 服务端 `module/lyric.js` 的 `decode` 分支等价。
+    async fn lyric_body(&self, lyric_id: &str, access_key: &str) -> Result<String>;
+}
 
-        for (lyric_id, access_key) in candidates {
-            let query = [
-                ("id", lyric_id),
-                ("accesskey", access_key),
+impl LyricSource for NodeApi {
+    async fn search_lyric(&self, song: &Song) -> Result<Value> {
+        self.get_json(
+            "/search/lyric",
+            &[
+                ("hash", song.hash.clone()),
+                (
+                    "keywords",
+                    format!("{} - {}", song.singer_text(), song.name),
+                ),
+                ("duration", song.duration_ms.to_string()),
+                ("man", "yes".to_string()),
+            ],
+        )
+        .await
+    }
+
+    async fn lyric_body(&self, lyric_id: &str, access_key: &str) -> Result<String> {
+        self.get_text(
+            "/lyric",
+            &[
+                ("id", lyric_id.to_string()),
+                ("accesskey", access_key.to_string()),
                 // 必须是 krc：翻译与音译只在 KRC 的 [language:] 标签里，lrc 没有。
                 ("fmt", "krc".to_string()),
                 ("decode", "true".to_string()),
                 ("charset", "utf8".to_string()),
-            ];
+            ],
+        )
+        .await
+    }
+}
 
-            // 该接口在 `decode=true` 下返回 JSON；偶尔直接吐纯文本，两种都接住。
-            let body = match self.get_text("/lyric", &query).await {
-                Ok(body) => body,
-                Err(_) => continue, // 这个候选取不到，试下一个
-            };
-            let text = match serde_json::from_str::<Value>(&body) {
-                Ok(root) => {
-                    if crate::api::model::check_error_code("/lyric", &root).is_err() {
-                        continue;
-                    }
-                    extract_lyric_text(&root)
+/// 取某首歌歌词的共享实现。
+///
+/// # 为什么要试多个候选
+///
+/// 同一个 hash 酷狗往往提供多个 KRC 变体：**有的只带罗马音，有的带真正的中文译文**。
+/// 只取第一个的话，日语歌很容易拿到罗马音版——界面就显示成一串拼音，等于没有翻译。
+///
+/// 所以这里遍历候选，优先采用「[language:] 里有 CJK 译文」的那个；
+/// 都没有才退回第一个能解析出内容的。
+///
+/// # 取不到歌词不是错误路径
+///
+/// 上游 `decodeLyrics` 解不开 KRC 时返回空字符串（不抛异常），空文本解析出空歌词，
+/// 这个候选被跳过，最终走到「歌词为空」。native 的 `krc::decode` 返回 `Err`，
+/// 但调用点在写 `decodeContent` 时把 `Err` 折成空串（见
+/// [`crate::api::native::inject_decoded_lyric`]），所以两端的最终表现一致：
+/// 都是 `AppError::NotFound`，界面只记一条 WARN，不弹错误、不影响播放。
+pub(crate) async fn fetch_lyric_via<S: LyricSource>(source: &S, song: &Song) -> Result<Lyric> {
+    let root = source.search_lyric(song).await?;
+
+    let candidates = crate::api::extract_list(&root, &["candidates"], |value| {
+        let id = pick_string(value, &["id", "lyric_id"])?;
+        let access_key = pick_string(value, &["accesskey", "access_key"])?;
+        Some(LyricCandidate {
+            id,
+            access_key,
+            duration_ms: pick_duration(value),
+            singer: pick_string(value, &["singer", "singername", "author"]),
+            title: pick_string(value, &["song", "songname", "title"]),
+        })
+    });
+    // `man=yes` 才会返回多个版本。上限 6 个：再往后质量通常更差，
+    // 而每多一个候选就多一次请求。
+    let candidates: Vec<LyricCandidate> = candidates.into_iter().take(6).collect();
+
+    if candidates.is_empty() {
+        return Err(AppError::NotFound(format!("未找到《{}》的歌词", song.name)));
+    }
+
+    let mut fallback: Option<Lyric> = None;
+    let mut skipped_mismatched = 0usize;
+
+    for candidate in candidates {
+        // 候选自带 `duration`、`singer`、`song`。酷狗的歌词检索并不可靠：对冷门/翻唱/
+        // 纯音乐曲目常把**另一首歌**当成候选返回。实测两种翻车：
+        //   * 时长明显对不上（《记忆停留的地方》的多个版本拿到的是 320 秒的古典钢琴曲）；
+        //   * 时长只差零点几秒、但歌手与歌名完全是另一首歌（July 的纯音乐
+        //     《기억이 머물던 곳》拿到的是 MC晚安《错过》）。
+        // 时长不符、或歌手与歌名都对不上的候选一律跳过——宁可显示「暂无歌词」，
+        // 也不显示别的歌的词。
+        if !duration_matches(candidate.duration_ms, song.duration_ms)
+            || !candidate_identity_matches(
+                candidate.singer.as_deref(),
+                candidate.title.as_deref(),
+                song,
+            )
+        {
+            skipped_mismatched += 1;
+            continue;
+        }
+        let LyricCandidate {
+            id: lyric_id,
+            access_key,
+            ..
+        } = candidate;
+
+        // 该接口在 `decode=true` 下返回 JSON；偶尔直接吐纯文本，两种都接住。
+        let body = match source.lyric_body(&lyric_id, &access_key).await {
+            Ok(body) => body,
+            Err(_) => continue, // 这个候选取不到，试下一个
+        };
+        let text = match serde_json::from_str::<Value>(&body) {
+            Ok(root) => {
+                if crate::api::model::check_error_code("/lyric", &root).is_err() {
+                    continue;
                 }
-                Err(_) => body,
-            };
+                extract_lyric_text(&root)
+            }
+            Err(_) => body,
+        };
 
-            let mut lyric = parse_lrc(&text);
-            if lyric.is_empty() {
-                continue;
-            }
-            attach_translations(&mut lyric, &text);
-
-            // 命中「有 CJK 译文」的候选，直接用它
-            if translation_block_has_cjk(&text) {
-                return Ok(lyric);
-            }
-            // 否则留作兜底（只留第一个，避免覆盖成更差的）
-            if fallback.is_none() {
-                fallback = Some(lyric);
-            }
+        let mut lyric = parse_lrc(&text);
+        if lyric.is_empty() {
+            continue;
         }
 
-        fallback.ok_or_else(|| AppError::NotFound(format!("《{}》的歌词为空", song.name)))
+        // Second gate: the candidate metadata checked above can be wrong; the
+        // KRC body carries the authoritative audio hash. See `krc_hash_matches`.
+        if !krc_hash_matches(&text, song) {
+            skipped_mismatched += 1;
+            continue;
+        }
+
+        attach_translations(&mut lyric, &text);
+        // 剔掉「歌名 - 歌手」标题行与制作人员名单行——它们不是歌词，
+        // 但酷狗常把它们当作普通定时行塞进 KRC（《记忆停留》开头十几秒全是名单）。
+        drop_non_lyric_lines(&mut lyric, song);
+        if lyric.is_empty() {
+            continue;
+        }
+
+        // 命中「有 CJK 译文」的候选，直接用它
+        if translation_block_has_cjk(&text) {
+            return Ok(lyric);
+        }
+        // 否则留作兜底（只留第一个，避免覆盖成更差的）
+        if fallback.is_none() {
+            fallback = Some(lyric);
+        }
     }
 
-    /// 第一步：按 hash 找到歌词候选，拿到若干 `(id, accesskey)`。
-    ///
-    /// `man=yes` 才会返回多个版本。上限 6 个：再往后质量通常更差，
-    /// 而每多一个候选就多一次请求。
-    async fn find_lyric_candidates(&self, song: &Song) -> Result<Vec<(String, String)>> {
-        let root = self
-            .get_json(
-                "/search/lyric",
-                &[
-                    ("hash", song.hash.clone()),
-                    (
-                        "keywords",
-                        format!("{} - {}", song.singer_text(), song.name),
-                    ),
-                    ("duration", song.duration_ms.to_string()),
-                    ("man", "yes".to_string()),
-                ],
+    if fallback.is_none() && skipped_mismatched > 0 {
+        return Err(AppError::NotFound(format!(
+            "未找到《{}》匹配的歌词（已忽略 {} 个不匹配的候选）",
+            song.name, skipped_mismatched
+        )));
+    }
+    fallback.ok_or_else(|| AppError::NotFound(format!("《{}》的歌词为空", song.name)))
+}
+
+/// 一个 `/search/lyric` 候选。`duration_ms`/`singer`/`title` 用于校验它是否真的是本曲。
+struct LyricCandidate {
+    id: String,
+    access_key: String,
+    duration_ms: Option<u64>,
+    singer: Option<String>,
+    title: Option<String>,
+}
+
+/// 从候选 JSON 里读时长（可能是数字，也可能是字符串）。
+fn pick_duration(value: &Value) -> Option<u64> {
+    let raw = value.get("duration").or_else(|| value.get("duration_ms"))?;
+    raw.as_u64()
+        .or_else(|| raw.as_str().and_then(|text| text.trim().parse().ok()))
+}
+
+/// 候选时长与本曲时长是否可能是同一首歌。
+///
+/// 任一未知（0 或缺失）就不据此否决；已知时允许 5 秒或 10% 的偏差。
+fn duration_matches(candidate_ms: Option<u64>, song_ms: u64) -> bool {
+    match candidate_ms {
+        Some(candidate) if candidate > 0 && song_ms > 0 => {
+            let diff = candidate.abs_diff(song_ms);
+            diff <= 5_000 || diff.saturating_mul(100) <= song_ms.saturating_mul(10)
+        }
+        _ => true,
+    }
+}
+
+/// 候选的歌手 / 歌名是否与当前曲目对得上。
+///
+/// 只要**歌手或歌名任一**对得上就接受：同一首歌的歌词常由不同上传者提供，
+/// 标题或演唱者偶有简写；但两者**都对不上**时，几乎可以断定是另一首歌。
+/// 两个字段都缺失（上游没给）时不据此否决。
+fn candidate_identity_matches(singer: Option<&str>, title: Option<&str>, song: &Song) -> bool {
+    let singer = singer.map(str::trim).filter(|text| !text.is_empty());
+    let title = title.map(str::trim).filter(|text| !text.is_empty());
+    if singer.is_none() && title.is_none() {
+        return true;
+    }
+    if let Some(singer) = singer
+        && text_matches_any_singer(singer, song)
+    {
+        return true;
+    }
+    if let Some(title) = title
+        && text_matches(title, &song.name)
+    {
+        return true;
+    }
+    false
+}
+
+/// 归一化后互相包含即视为同一名称（忽略大小写、空白与常见分隔符）。
+fn text_matches(a: &str, b: &str) -> bool {
+    let a = normalize_name(a);
+    let b = normalize_name(b);
+    if a.chars().count() < 2 || b.chars().count() < 2 {
+        return false;
+    }
+    a.contains(&b) || b.contains(&a)
+}
+
+/// 候选歌手是否匹配本曲的任一演唱者（含用「、」拼接的整体串）。
+fn text_matches_any_singer(candidate: &str, song: &Song) -> bool {
+    if text_matches(candidate, &song.singer_text()) {
+        return true;
+    }
+    song.singers
+        .iter()
+        .any(|singer| text_matches(candidate, &singer.name))
+}
+
+/// KRC 正文头部自带的 `[hash:]` 是否与本曲（含 `extra_hashes`）一致。
+///
+/// 候选的 `singer`/`song`/`duration` 可以整体错标，KRC 正文里的 `[hash:]` 才是
+/// 这条歌词真正归属的音频，因此比元数据更权威。
+///
+/// 没有 `[hash:]` 标签时返回 true（不否决）：存在没有 hash 的正确歌词，强制要求
+/// 会把它们误杀成「暂无歌词」。只有**有 hash 且对不上**才拒绝。
+fn krc_hash_matches(krc_text: &str, song: &Song) -> bool {
+    let Some(candidate) = krc_tag_value(krc_text, "hash") else {
+        return true;
+    };
+    let candidate = candidate.trim().to_ascii_lowercase();
+    if candidate.is_empty() {
+        return true;
+    }
+    let song_hash = song.hash.trim().to_ascii_lowercase();
+    if !song_hash.is_empty() && candidate == song_hash {
+        return true;
+    }
+    song.extra_hashes
+        .values()
+        .any(|hash| hash.trim().to_ascii_lowercase() == candidate)
+}
+
+/// 取出 KRC **头部元信息区**形如 `[key:value]` 的标签值（去 BOM）。
+///
+/// 只扫到第一个定时行（`[1234,567]` 或 `[00:01.00]`，以数字开头）为止——
+/// 元信息标签的键是字母（`id`/`ar`/`ti`/`hash`…），定时行的方括号里以数字开头。
+/// 不设这个边界的话，歌词正文里万一出现 `[hash:...]` 字样会被误当元信息。
+fn krc_tag_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let prefix = format!("[{key}:");
+    for line in text.lines() {
+        let line = line.trim_start_matches('\u{feff}').trim_start();
+        let Some(rest) = line.strip_prefix('[') else {
+            continue;
+        };
+        // 以数字开头的是定时行，元信息区到此结束
+        if rest.starts_with(|ch: char| ch.is_ascii_digit()) {
+            break;
+        }
+        if let Some(value) = line.strip_prefix(prefix.as_str()) {
+            return value.split(']').next();
+        }
+    }
+    None
+}
+
+/// 名称归一化：小写、去掉空白与括号/连接符等标点，便于宽松比对。
+fn normalize_name(text: &str) -> String {
+    text.chars()
+        .filter(|ch| !ch.is_whitespace())
+        .filter(|ch| {
+            !matches!(
+                ch,
+                '(' | ')' | '[' | ']' | '（' | '）' | '【' | '】' | '-' | '—' | '_' | '·' | '・'
             )
-            .await?;
+        })
+        .flat_map(char::to_lowercase)
+        .collect()
+}
 
-        let candidates = crate::api::extract_list(&root, &["candidates"], |value| {
-            let id = pick_string(value, &["id", "lyric_id"])?;
-            let access_key = pick_string(value, &["accesskey", "access_key"])?;
-            Some((id, access_key))
-        });
+/// 剔掉非歌词行：`歌名 - 歌手` 标题行，以及 `词：`/`曲：`/`编曲：`… 这类名单行。
+fn drop_non_lyric_lines(lyric: &mut Lyric, song: &Song) {
+    lyric
+        .lines
+        .retain(|line| !is_non_lyric_line(&line.text, song));
+}
 
-        Ok(candidates.into_iter().take(6).collect())
+/// 这一行是不是「不是歌词」的元信息。
+fn is_non_lyric_line(text: &str, song: &Song) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
     }
+
+    // 标题行：`{歌名} - {歌手}` 或 `{歌手} - {歌名}`
+    let name = song.name.trim();
+    let singer = song.singer_text();
+    let singer = singer.trim();
+    if !name.is_empty() && !singer.is_empty() {
+        let name_first = format!("{name} - {singer}");
+        let singer_first = format!("{singer} - {name}");
+        if trimmed == name_first || trimmed == singer_first {
+            return true;
+        }
+    }
+
+    credit_prefix(trimmed).is_some()
+}
+
+/// 形如「词：」「作曲：」「制作发行：」的制作人员行前缀。
+///
+/// 判据是「关键词后紧跟冒号」：`曲终人散`、`词不达意` 这类正常歌词不会命中。
+fn credit_prefix(text: &str) -> Option<&'static str> {
+    const KEYS: &[&str] = &[
+        "制作发行",
+        "制作人",
+        "母带工程师",
+        "录音师",
+        "混音师",
+        "出品人",
+        "作词",
+        "作曲",
+        "编曲",
+        "混音",
+        "监制",
+        "和音",
+        "和声",
+        "策划",
+        "统筹",
+        "制作",
+        "发行",
+        "出品",
+        "录音",
+        "母带",
+        "吉他",
+        "贝斯",
+        "键盘",
+        "弦乐",
+        "配唱",
+        "人声",
+        "合唱",
+        "伴唱",
+        "演唱",
+        "原唱",
+        "封面",
+        "设计",
+        "文案",
+        "推广",
+        "营销",
+        "词",
+        "曲",
+        "鼓",
+        "OP",
+        "SP",
+    ];
+
+    for key in KEYS {
+        if let Some(rest) = text.strip_prefix(key) {
+            let rest = rest.trim_start();
+            if rest.starts_with(':') || rest.starts_with('：') {
+                return Some(key);
+            }
+        }
+    }
+    None
 }
 
 /// `[language:]` 里是否存在**真正的 CJK 译文**块（而不是只有罗马音）。
@@ -219,7 +523,10 @@ pub fn parse_lrc(text: &str) -> Lyric {
     lines.sort_by_key(|line| line.time_ms);
     lines.dedup_by(|a, b| a.time_ms == b.time_ms && a.text == b.text);
 
-    Lyric { lines }
+    Lyric {
+        text: text.to_string(),
+        lines,
+    }
 }
 
 /// 吃掉行首连续的 `[...]` 时间标签，返回 (时间戳列表, 剩余文本)。
@@ -750,6 +1057,9 @@ mod tests {
         assert_eq!(lyric.lines[0].time_ms, 1_000);
         assert_eq!(lyric.lines[1].time_ms, 5_500);
         assert_eq!(lyric.lines[1].text, "第二句");
+        // 原文要原样留着：WebSocket 的 `lyricsData` 发的是它，不是解析后的 `lines`。
+        // 解析会丢掉逐字标记与 `[ti:]` 这类标签，而那正是第三方客户端排版要用的。
+        assert_eq!(lyric.text, text);
     }
 
     #[test]
@@ -972,5 +1282,386 @@ mod tests {
             end_ms: 1000,
         };
         assert!(reversed.progress_at(1500).is_finite());
+    }
+
+    /// 解不开的候选要被**跳过并继续**，不能把整首歌的歌词判死。
+    ///
+    /// 上游 `decodeLyrics` 解不开时返回空字符串；native 的 `krc::decode` 返回 `Err`，
+    /// 但 `inject_decoded_lyric` 把它折成空串，于是这个候选解析出空歌词、`continue`，
+    /// 后面的候选照样有机会——这正是两端表现一致的地方。
+    ///
+    /// 这里用一个假的 `LyricSource` 直接锁住 `fetch_lyric_via` 的控制流：
+    /// 第一个候选正文解不出内容，第二个候选是好的，结果必须是第二个的歌词。
+    struct FakeLyricSource {
+        bodies: Vec<String>,
+    }
+
+    impl LyricSource for FakeLyricSource {
+        async fn search_lyric(&self, _song: &Song) -> Result<Value> {
+            Ok(json!({
+                "status": 1,
+                "candidates": [
+                    {"id": "bad", "accesskey": "k1"},
+                    {"id": "good", "accesskey": "k2"},
+                ],
+            }))
+        }
+
+        async fn lyric_body(&self, lyric_id: &str, _access_key: &str) -> Result<String> {
+            let index = if lyric_id == "bad" { 0 } else { 1 };
+            Ok(self.bodies[index].clone())
+        }
+    }
+
+    fn fake_song() -> Song {
+        Song {
+            name: "测试曲".to_string(),
+            hash: "deadbeef".to_string(),
+            duration_ms: 1000,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn undecodable_candidate_is_skipped_and_next_one_is_used() {
+        let source = FakeLyricSource {
+            bodies: vec![
+                // 第一个：JSON 合法但解不出歌词（等价于 KRC 解密失败折成空串）
+                json!({"status": 200, "contenttype": 0, "decodeContent": ""}).to_string(),
+                // 第二个：正常歌词
+                json!({"status": 200, "decodeContent": "[0,1000]好歌词\n"}).to_string(),
+            ],
+        };
+
+        let lyric = fetch_lyric_via(&source, &fake_song()).await.unwrap();
+        assert_eq!(lyric.lines.len(), 1);
+        assert_eq!(lyric.lines[0].text, "好歌词");
+    }
+
+    /// 所有候选都解不出内容时，最终是 `NotFound`（不是 panic、不是空歌词对象）——
+    /// 界面据此只记一条 WARN，播放不受影响。
+    #[tokio::test]
+    async fn all_undecodable_candidates_end_as_not_found() {
+        let source = FakeLyricSource {
+            bodies: vec![
+                json!({"status": 200, "decodeContent": ""}).to_string(),
+                json!({"status": 200, "decodeContent": ""}).to_string(),
+            ],
+        };
+
+        let error = fetch_lyric_via(&source, &fake_song()).await.unwrap_err();
+        assert!(error.to_string().contains("歌词为空"), "实际：{error}");
+    }
+
+    /// 候选自带的时长与本曲对不上时必须跳过——否则会把**另一首歌**的歌词
+    /// 当成这首歌的歌词（实测《记忆停留的地方》的冷门版本拿到的是古典钢琴曲）。
+    #[tokio::test]
+    async fn candidates_with_mismatched_duration_are_skipped() {
+        struct Source {
+            candidates: serde_json::Value,
+            bodies: Vec<String>,
+        }
+
+        impl LyricSource for Source {
+            async fn search_lyric(&self, _song: &Song) -> Result<Value> {
+                Ok(self.candidates.clone())
+            }
+
+            async fn lyric_body(&self, lyric_id: &str, _access_key: &str) -> Result<String> {
+                let index = if lyric_id == "wrong" { 0 } else { 1 };
+                Ok(self.bodies[index].clone())
+            }
+        }
+
+        let source = Source {
+            candidates: json!({
+                "status": 1,
+                "candidates": [
+                    // 另一首歌：320 秒，与本曲（60 秒）对不上
+                    {"id": "wrong", "accesskey": "k1", "duration": 320317},
+                    {"id": "right", "accesskey": "k2", "duration": 60000},
+                ],
+            }),
+            bodies: vec![
+                json!({"status": 200, "decodeContent": "[0,1000]别人的歌词\n"}).to_string(),
+                json!({"status": 200, "decodeContent": "[0,1000]本曲歌词\n"}).to_string(),
+            ],
+        };
+
+        let song = Song {
+            name: "记忆停留的地方".to_string(),
+            hash: "h".to_string(),
+            duration_ms: 60_000,
+            ..Default::default()
+        };
+
+        let lyric = fetch_lyric_via(&source, &song).await.unwrap();
+        assert_eq!(lyric.lines.len(), 1);
+        assert_eq!(lyric.lines[0].text, "本曲歌词");
+    }
+
+    /// 所有候选的时长都对不上时，结果是 `NotFound`（界面显示「暂无歌词」），
+    /// 而不是硬塞一首别的歌的歌词。
+    #[tokio::test]
+    async fn all_mismatched_candidates_end_as_not_found() {
+        struct Source;
+        impl LyricSource for Source {
+            async fn search_lyric(&self, _song: &Song) -> Result<Value> {
+                Ok(json!({
+                    "status": 1,
+                    "candidates": [
+                        {"id": "a", "accesskey": "k", "duration": 320317},
+                    ],
+                }))
+            }
+            async fn lyric_body(&self, _id: &str, _key: &str) -> Result<String> {
+                Ok(json!({"status": 200, "decodeContent": "[0,1000]纯音乐，请欣赏\n"}).to_string())
+            }
+        }
+
+        let song = Song {
+            name: "记忆停留的地方".to_string(),
+            duration_ms: 60_000,
+            ..Default::default()
+        };
+        let error = fetch_lyric_via(&Source, &song).await.unwrap_err();
+        assert!(error.to_string().contains("匹配的歌词"), "实际：{error}");
+    }
+
+    /// 中文 KRC 常把「歌名 - 歌手」标题行与制作人员名单当成定时行塞进来，
+    /// 这些行必须被剔除，不能当作歌词显示。
+    #[test]
+    fn credit_and_title_lines_are_dropped() {
+        let song = Song {
+            name: "记忆停留".to_string(),
+            singers: vec![crate::api::model::Singer {
+                id: 0,
+                name: "蓝心羽".to_string(),
+            }],
+            duration_ms: 174_000,
+            ..Default::default()
+        };
+        let krc = "[0,1000]记忆停留 - 蓝心羽\n\
+                   [1000,1000]词：陈大创\n\
+                   [2000,1000]曲：陈大创\n\
+                   [3000,1000]编曲：KEYI\n\
+                   [4000,1000]制作发行：极韵文化/BLUE STUDIO\n\
+                   [5000,1000]想要捕捉爱的瞬间\n\
+                   [6000,1000]曲终人散也要说再见\n";
+
+        let mut lyric = parse_lrc(krc);
+        drop_non_lyric_lines(&mut lyric, &song);
+
+        let texts: Vec<&str> = lyric.lines.iter().map(|line| line.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["想要捕捉爱的瞬间", "曲终人散也要说再见"],
+            "标题行与名单行该剔除；以「曲」开头但没有冒号的正常歌词要保留"
+        );
+    }
+
+    /// 时长校验：未知时长不否决；同一首歌允许小幅偏差；差得离谱才拒绝。
+    #[test]
+    fn duration_match_tolerates_small_drift() {
+        assert!(duration_matches(None, 60_000), "未知时长不否决");
+        assert!(duration_matches(Some(0), 60_000), "0 视为未知");
+        assert!(duration_matches(Some(60_628), 60_000), "628ms 偏差可接受");
+        assert!(duration_matches(Some(174_628), 174_000), "628ms 偏差可接受");
+        assert!(
+            !duration_matches(Some(320_317), 60_000),
+            "差 260 秒必须拒绝"
+        );
+        assert!(
+            !duration_matches(Some(320_317), 160_000),
+            "差 160 秒必须拒绝"
+        );
+    }
+
+    /// 候选时长对得上、但歌手与歌名都是另一首歌时必须跳过——实测 July 的纯音乐
+    /// 《기억이 머물던 곳》拿到的是 MC晚安《错过》，两者时长只差 0.6 秒。
+    #[tokio::test]
+    async fn candidates_with_mismatched_identity_are_skipped() {
+        struct Source {
+            candidates: serde_json::Value,
+            bodies: Vec<String>,
+        }
+
+        impl LyricSource for Source {
+            async fn search_lyric(&self, _song: &Song) -> Result<Value> {
+                Ok(self.candidates.clone())
+            }
+
+            async fn lyric_body(&self, lyric_id: &str, _access_key: &str) -> Result<String> {
+                let index = if lyric_id == "wrong" { 0 } else { 1 };
+                Ok(self.bodies[index].clone())
+            }
+        }
+
+        let source = Source {
+            candidates: json!({
+                "status": 1,
+                "candidates": [
+                    // 时长相近（203598 vs 203000），但歌手与歌名完全是另一首歌
+                    {"id": "wrong", "accesskey": "k1", "duration": 203598, "singer": "MC晚安", "song": "错过"},
+                    {"id": "right", "accesskey": "k2", "duration": 203000, "singer": "July", "song": "기억이 머물던 곳"},
+                ],
+            }),
+            bodies: vec![
+                json!({"status": 200, "decodeContent": "[0,1000]想想真是可惜呀\n"}).to_string(),
+                json!({"status": 200, "decodeContent": "[0,1000]本曲歌词\n"}).to_string(),
+            ],
+        };
+
+        let song = Song {
+            name: "기억이 머물던 곳".to_string(),
+            duration_ms: 203_000,
+            singers: vec![crate::api::model::Singer {
+                id: 0,
+                name: "July".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        let lyric = fetch_lyric_via(&source, &song).await.unwrap();
+        assert_eq!(lyric.lines.len(), 1);
+        assert_eq!(lyric.lines[0].text, "本曲歌词");
+    }
+
+    /// 名称比对要宽松：忽略大小写、空白与常见分隔符/括号；但不同的名字不能误判为相同。
+    #[test]
+    fn name_matching_is_lenient_but_not_wrong() {
+        assert!(text_matches("July", "july"));
+        assert!(text_matches("记忆停留", "记忆停留 (治愈版)"));
+        assert!(text_matches(
+            "Where memory had stopped",
+            "Wherememoryhadstopped"
+        ));
+        assert!(!text_matches("MC晚安", "July"));
+        assert!(!text_matches("错过", "기억이 머물던 곳"));
+        // 太短的名字不做包含判断，避免误判
+        assert!(!text_matches("a", "July"));
+    }
+
+    /// 歌手 / 歌名任一匹配即接受；两者都缺失时不否决；两者都对不上才拒绝。
+    #[test]
+    fn candidate_identity_matches_uses_singer_or_title() {
+        let song = Song {
+            name: "记忆停留".to_string(),
+            singers: vec![crate::api::model::Singer {
+                id: 0,
+                name: "蓝心羽".to_string(),
+            }],
+            ..Default::default()
+        };
+        assert!(
+            candidate_identity_matches(None, None, &song),
+            "缺字段不否决"
+        );
+        assert!(
+            candidate_identity_matches(Some("蓝心羽"), Some("别的"), &song),
+            "歌手对得上"
+        );
+        assert!(
+            candidate_identity_matches(Some("别人"), Some("记忆停留"), &song),
+            "歌名对得上"
+        );
+        assert!(
+            !candidate_identity_matches(Some("别人"), Some("别的歌"), &song),
+            "都对不上则拒绝"
+        );
+    }
+
+    /// KRC 内部 `[hash:]` 与本曲不符的候选必须跳过，即便候选元数据
+    /// （singer/song/duration）全对——元数据本身可以错标。
+    #[tokio::test]
+    async fn candidate_with_mismatched_krc_hash_is_skipped() {
+        struct Source {
+            candidates: serde_json::Value,
+            bodies: Vec<String>,
+        }
+
+        impl LyricSource for Source {
+            async fn search_lyric(&self, _song: &Song) -> Result<Value> {
+                Ok(self.candidates.clone())
+            }
+
+            async fn lyric_body(&self, lyric_id: &str, _access_key: &str) -> Result<String> {
+                let index = if lyric_id == "wrong" { 0 } else { 1 };
+                Ok(self.bodies[index].clone())
+            }
+        }
+
+        let source = Source {
+            candidates: json!({
+                "status": 1,
+                "candidates": [
+                    // 元数据全对（歌手/歌名/时长都与本曲一致），但正文是别的歌
+                    {"id": "wrong", "accesskey": "k1", "duration": 243000,
+                     "singer": "July", "song": "바람에 쓰는 편지"},
+                    {"id": "right", "accesskey": "k2", "duration": 243000,
+                     "singer": "July", "song": "바람에 쓰는 편지"},
+                ],
+            }),
+            bodies: vec![
+                json!({"status": 200, "decodeContent":
+                    "\u{feff}[ar:Mc小贱杰]\r\n[ti:说唱]\r\n[hash:90e67ade8426e017f71e6def7deb9b44]\r\n[0,1000]第一次喊说唱\n"
+                }).to_string(),
+                json!({"status": 200, "decodeContent":
+                    "\u{feff}[ar:July]\r\n[ti:바람에 쓰는 편지]\r\n[hash:6af00fbd4d444a82c005843eef9dc2d4]\r\n[0,1000]纯音乐，请欣赏\n"
+                }).to_string(),
+            ],
+        };
+
+        let song = Song {
+            name: "Letter That Writing in the Wind (写在风中的信)".to_string(),
+            hash: "6AF00FBD4D444A82C005843EEF9DC2D4".to_string(),
+            duration_ms: 243_722,
+            singers: vec![crate::api::model::Singer {
+                id: 18967,
+                name: "July".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        let lyric = fetch_lyric_via(&source, &song).await.unwrap();
+        assert_eq!(lyric.lines.len(), 1);
+        assert_eq!(
+            lyric.lines[0].text, "纯音乐，请欣赏",
+            "KRC 内部 hash 对不上的候选必须跳过"
+        );
+    }
+
+    /// 没有 `[hash:]` 标签的候选不能因此被拒——存在没有 hash 的正确歌词。
+    #[tokio::test]
+    async fn candidate_without_krc_hash_is_kept() {
+        struct Source;
+        impl LyricSource for Source {
+            async fn search_lyric(&self, _song: &Song) -> Result<Value> {
+                Ok(json!({
+                    "status": 1,
+                    "candidates": [{"id": "ok", "accesskey": "k"}],
+                }))
+            }
+            async fn lyric_body(&self, _id: &str, _key: &str) -> Result<String> {
+                Ok(json!({"status": 200, "decodeContent":
+                    "\u{feff}[ti:晴天]\r\n[ar:周杰伦]\r\n[0,1000]故事的小黄花\n"
+                })
+                .to_string())
+            }
+        }
+
+        let song = Song {
+            name: "晴天".to_string(),
+            hash: "B3A52A7A958BF0AED0EBFBA2E9A818B7".to_string(),
+            duration_ms: 269_000,
+            singers: vec![crate::api::model::Singer {
+                id: 6452,
+                name: "周杰伦".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        let lyric = fetch_lyric_via(&Source, &song).await.unwrap();
+        assert_eq!(lyric.lines[0].text, "故事的小黄花");
     }
 }

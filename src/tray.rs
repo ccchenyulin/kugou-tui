@@ -86,9 +86,12 @@ pub struct TrayInfo {
     pub status: PlaybackState,
     /// 是否静音。托盘菜单的「静音 / 取消静音」措辞跟着它走。
     pub muted: bool,
+    /// 当前曲目的标识（酷狗的 hash）。只用来判断「换歌了没有」——换歌才需要
+    /// 重建 `title` / `artists`，其余每拍只刷新 `status` / `muted`。
+    pub track_id: String,
 }
 
-/// 主循环持有它，每帧调 [`Self::update`] 刷一次。
+/// 主循环持有它，每帧调 [`Self::update_track`] 刷一次。
 #[derive(Clone)]
 pub struct TrayHandle {
     info: Arc<Mutex<TrayInfo>>,
@@ -97,9 +100,28 @@ pub struct TrayHandle {
 }
 
 impl TrayHandle {
-    pub fn update(&self, info: TrayInfo) {
-        if let Ok(mut guard) = self.info.lock() {
+    /// 刷新快照：`status` / `muted` 每拍都写，元数据只在换歌时重建。
+    ///
+    /// `build` 里是歌名 / 歌手名的克隆，只在 `track_id` 变化时才需要重算。
+    pub fn update_track(
+        &self,
+        track_id: &str,
+        status: PlaybackState,
+        muted: bool,
+        build: impl FnOnce() -> TrayInfo,
+    ) {
+        let Ok(mut guard) = self.info.lock() else {
+            return;
+        };
+        if guard.track_id != track_id {
+            let mut info = build();
+            info.status = status;
+            info.muted = muted;
+            info.track_id = track_id.to_string();
             *guard = info;
+        } else {
+            guard.status = status;
+            guard.muted = muted;
         }
     }
 
@@ -621,180 +643,220 @@ pub fn spawn(bus: EventBus) -> Option<TrayHandle> {
         };
 
         runtime.block_on(async move {
-            // 菜单和托盘项共用一条事件总线：点菜单项要能把动作投进主循环
-            let entries = menu_entries(crate::window::available());
-            let menu = Menu {
-                bus: bus.clone(),
-                entries: entries.clone(),
-                info: Arc::clone(&info_thread),
-                revision: Arc::clone(&revision_thread),
-            };
+            // 断了就重连（与 mpris.rs 同一套路）：session bus 重启或总线名被别的实例
+            // 抢走之后，旧连接上的信号会一直失败，而 `connected` 仍是 true，托盘就
+            // 永远停在最后一帧。只有重建连接才能真的恢复。
+            loop {
+                // 菜单和托盘项共用一条事件总线：点菜单项要能把动作投进主循环
+                let entries = menu_entries(crate::window::available());
+                let menu = Menu {
+                    bus: bus.clone(),
+                    entries: entries.clone(),
+                    info: Arc::clone(&info_thread),
+                    revision: Arc::clone(&revision_thread),
+                };
 
-            let item = Item {
-                info: Arc::clone(&info_thread),
-                bus,
-                pixmaps_bright: pixmaps.clone(),
-                pixmaps_dim: dim_pixmaps(&pixmaps),
-                tooltip_pixmap: tooltip_pixmap.clone(),
-            };
+                let item = Item {
+                    info: Arc::clone(&info_thread),
+                    bus: bus.clone(),
+                    pixmaps_bright: pixmaps.clone(),
+                    pixmaps_dim: dim_pixmaps(&pixmaps),
+                    tooltip_pixmap: tooltip_pixmap.clone(),
+                };
 
-            let result: zbus::Result<()> = async {
-                let connection = ConnectionBuilder::session()?
-                    .name(bus_name.as_str())?
-                    .serve_at(OBJECT_PATH, item)?
-                    .serve_at(MENU_PATH, menu)?
-                    .build()
-                    .await?;
-
-                // watcher 代理是惰性的：此刻面板没起也不会失败，真正的探测在下面的循环里。
-                let watcher =
-                    zbus::Proxy::new(&connection, WATCHER_DEST, WATCHER_PATH, WATCHER_IFACE)
+                let result: zbus::Result<()> = async {
+                    let connection = ConnectionBuilder::session()?
+                        .name(bus_name.as_str())?
+                        .serve_at(OBJECT_PATH, item)?
+                        .serve_at(MENU_PATH, menu)?
+                        .build()
                         .await?;
 
-                let item_iface = connection
-                    .object_server()
-                    .interface::<_, Item>(OBJECT_PATH)
-                    .await?;
-                let menu_iface = connection
-                    .object_server()
-                    .interface::<_, Menu>(MENU_PATH)
-                    .await?;
+                    // watcher 代理是惰性的：此刻面板没起也不会失败，真正的探测在下面的循环里。
+                    let watcher =
+                        zbus::Proxy::new(&connection, WATCHER_DEST, WATCHER_PATH, WATCHER_IFACE)
+                            .await?;
 
-                let mut last_status = String::new();
-                let mut last_tooltip = String::new();
-                let mut last_icon_dim = false;
-                // 动态菜单标签跟随的两个开关：（在播放, 已静音）
-                let mut last_menu_state = (false, false);
-                // 注册状态只记录**翻转**：面板没起的 5 秒一轮重试不刷日志
-                let mut was_connected = false;
-                // 自愈节拍：每 HEAL_EVERY 拍（0.5s × 10 = 5s）对一次账。第 1 拍立即注册，
-                // 正常启动时托盘不比原来慢。
-                const HEAL_EVERY: u64 = 10;
-                let mut ticks: u64 = 0;
+                    let item_iface = connection
+                        .object_server()
+                        .interface::<_, Item>(OBJECT_PATH)
+                        .await?;
+                    let menu_iface = connection
+                        .object_server()
+                        .interface::<_, Menu>(MENU_PATH)
+                        .await?;
 
-                loop {
-                    ticks += 1;
+                    let mut last_status = String::new();
+                    let mut last_tooltip = String::new();
+                    let mut last_icon_dim = false;
+                    // 动态菜单标签跟随的两个开关：（在播放, 已静音）
+                    let mut last_menu_state = (false, false);
+                    // 注册状态只记录**翻转**：面板没起的 5 秒一轮重试不刷日志
+                    let mut was_connected = false;
+                    // 连续发送失败计数。单次失败可能只是对端一时忙，连着几次还发不出去
+                    // 就不是偶然了——与 mpris.rs 同一判据，够 3 次就交回外层重建连接。
+                    let mut failures = 0u32;
+                    // 自愈节拍：每 HEAL_EVERY 拍（0.5s × 10 = 5s）对一次账。第 1 拍立即注册，
+                    // 正常启动时托盘不比原来慢。
+                    const HEAL_EVERY: u64 = 10;
+                    let mut ticks: u64 = 0;
 
-                    // ---- 注册与自愈 ----
-                    //
-                    // 三种情况都要（重）注册：启动时面板还没起；面板重启把 watcher
-                    // 连带换了一轮；watcher 无声地把我们丢了。判据是
-                    // `RegisteredStatusNotifierItems` 里还有没有自己的 bus name——
-                    // 已在列表里就不再调 `RegisterStatusNotifierItem`，重复注册是
-                    // 多余调用，还可能让 watcher 发重复信号。
-                    if ticks % HEAL_EVERY == 1 {
-                        let known = watcher
-                            .get_property::<Vec<String>>("RegisteredStatusNotifierItems")
-                            .await
-                            .map(|items| items.iter().any(|item| item == &bus_name))
-                            .unwrap_or(false);
-                        if !known {
-                            match watcher
-                                .call_method("RegisterStatusNotifierItem", &(bus_name.as_str(),))
+                    loop {
+                        ticks += 1;
+
+                        // ---- 注册与自愈 ----
+                        //
+                        // 三种情况都要（重）注册：启动时面板还没起；面板重启把 watcher
+                        // 连带换了一轮；watcher 无声地把我们丢了。判据是
+                        // `RegisteredStatusNotifierItems` 里还有没有自己的 bus name——
+                        // 已在列表里就不再调 `RegisterStatusNotifierItem`，重复注册是
+                        // 多余调用，还可能让 watcher 发重复信号。
+                        if ticks % HEAL_EVERY == 1 {
+                            let known = watcher
+                                .get_property::<Vec<String>>("RegisteredStatusNotifierItems")
                                 .await
-                            {
-                                Ok(_) => {
-                                    if !was_connected {
-                                        crate::logger::tlog!(
-                                            crate::logger::LEVEL_INFO,
-                                            "系统托盘已注册：{bus_name}"
-                                        );
+                                .map(|items| items.iter().any(|item| item == &bus_name))
+                                .unwrap_or(false);
+                            if !known {
+                                match watcher
+                                    .call_method(
+                                        "RegisterStatusNotifierItem",
+                                        &(bus_name.as_str(),),
+                                    )
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        if !was_connected {
+                                            crate::logger::tlog!(
+                                                crate::logger::LEVEL_INFO,
+                                                "系统托盘已注册：{bus_name}"
+                                            );
+                                        }
+                                        was_connected = true;
+                                        connected_thread.store(true, Ordering::Relaxed);
                                     }
-                                    was_connected = true;
-                                    connected_thread.store(true, Ordering::Relaxed);
-                                }
-                                Err(_) => {
-                                    // 常见原因：Quickshell / KDE 的托盘宿主还没起。
-                                    // 静默重试，只在翻转时记一条。
-                                    if was_connected {
-                                        crate::logger::tlog!(
-                                            crate::logger::LEVEL_WARN,
-                                            "托盘宿主已消失，转入后台重连"
-                                        );
+                                    Err(_) => {
+                                        // 常见原因：Quickshell / KDE 的托盘宿主还没起。
+                                        // 静默重试，只在翻转时记一条。
+                                        if was_connected {
+                                            crate::logger::tlog!(
+                                                crate::logger::LEVEL_WARN,
+                                                "托盘宿主已消失，转入后台重连"
+                                            );
+                                        }
+                                        was_connected = false;
+                                        connected_thread.store(false, Ordering::Relaxed);
                                     }
-                                    was_connected = false;
-                                    connected_thread.store(false, Ordering::Relaxed);
                                 }
                             }
                         }
-                    }
 
-                    let current = match info_thread.lock() {
-                        Ok(guard) => Some(guard.clone()),
-                        Err(poisoned) => Some(poisoned.into_inner().clone()),
-                    };
-                    let current = match current {
-                        Some(info) => info,
-                        None => {
-                            tokio::time::sleep(Duration::from_millis(500)).await;
-                            continue;
+                        let current = match info_thread.lock() {
+                            Ok(guard) => Some(guard.clone()),
+                            Err(poisoned) => Some(poisoned.into_inner().clone()),
+                        };
+                        let current = match current {
+                            Some(info) => info,
+                            None => {
+                                tokio::time::sleep(Duration::from_millis(500)).await;
+                                continue;
+                            }
+                        };
+
+                        let cur_status = status_label(&current.status).to_string();
+                        let cur_tooltip = format_tooltip(&current.title, &current.artists);
+                        let cur_icon_dim = icon_should_dim(&current.status);
+                        let cur_menu_state =
+                            (current.status == PlaybackState::Playing, current.muted);
+
+                        // 状态变了 → 发 `NewStatus`，宿主可能换 active/passive 颜色；
+                        // 图标档位变了 → `NewIcon`，暂停 / 停止时托盘换调暗的那套图；
+                        // tooltip 变了 → `NewToolTip`，鼠标悬停才会更新。
+                        // 频率 0.5s：托盘本身不需要更实时，省点锁开销。
+                        let mut failed = false;
+                        let mut sent = false;
+                        if cur_status != last_status {
+                            sent = true;
+                            last_status = cur_status.clone();
+                            let ctxt = item_iface.signal_emitter();
+                            // `#[zbus(signal)]` 宏把信号方法生成在 `ItemSignals` trait 上，
+                            // 默认不可见的关联函数。直接按 `Item::new_status(ctxt, ...)`
+                            // 静态调用最简洁。
+                            failed |= Item::new_status(ctxt, cur_status).await.is_err();
                         }
-                    };
+                        if cur_tooltip != last_tooltip {
+                            sent = true;
+                            last_tooltip = cur_tooltip;
+                            let ctxt = item_iface.signal_emitter();
+                            failed |= Item::new_tool_tip(ctxt).await.is_err();
+                        }
+                        if cur_icon_dim != last_icon_dim {
+                            sent = true;
+                            last_icon_dim = cur_icon_dim;
+                            let ctxt = item_iface.signal_emitter();
+                            failed |= Item::new_icon(ctxt).await.is_err();
+                        }
 
-                    let cur_status = status_label(&current.status).to_string();
-                    let cur_tooltip = format_tooltip(&current.title, &current.artists);
-                    let cur_icon_dim = icon_should_dim(&current.status);
-                    let cur_menu_state = (current.status == PlaybackState::Playing, current.muted);
+                        // 动态菜单标签：播放↔暂停、静音↔取消静音。只给这两个 id 发
+                        // `ItemsPropertiesUpdated`，再广播一次 `LayoutUpdated` 让宿主知道
+                        // revision 变了——两者缺一，有的宿主只认其中一个。
+                        if cur_menu_state != last_menu_state {
+                            sent = true;
+                            last_menu_state = cur_menu_state;
+                            let new_revision = revision_thread.fetch_add(1, Ordering::Relaxed) + 1;
+                            let updated: Vec<(i32, HashMap<String, OwnedValue>)> = entries
+                                .iter()
+                                .filter(|entry| DYNAMIC_LABEL_IDS.contains(&entry.0))
+                                .map(|entry| {
+                                    let mut props = HashMap::new();
+                                    props.insert(
+                                        "label".to_string(),
+                                        owned_str(&entry_label(entry, &current)),
+                                    );
+                                    (entry.0, props)
+                                })
+                                .collect();
+                            let ctxt = menu_iface.signal_emitter();
+                            failed |= Menu::items_properties_updated(ctxt, updated, Vec::new())
+                                .await
+                                .is_err();
+                            failed |= Menu::layout_updated(ctxt, new_revision, 0).await.is_err();
+                        }
 
-                    // 状态变了 → 发 `NewStatus`，宿主可能换 active/passive 颜色；
-                    // 图标档位变了 → `NewIcon`，暂停 / 停止时托盘换调暗的那套图；
-                    // tooltip 变了 → `NewToolTip`，鼠标悬停才会更新。
-                    // 频率 0.5s：托盘本身不需要更实时，省点锁开销。
-                    if cur_status != last_status {
-                        last_status = cur_status.clone();
-                        let ctxt = item_iface.signal_emitter();
-                        // `#[zbus(signal)]` 宏把信号方法生成在 `ItemSignals` trait 上，
-                        // 默认不可见的关联函数。直接按 `Item::new_status(ctxt, ...)`
-                        // 静态调用最简洁。
-                        let _ = Item::new_status(ctxt, cur_status).await;
-                    }
-                    if cur_tooltip != last_tooltip {
-                        last_tooltip = cur_tooltip;
-                        let ctxt = item_iface.signal_emitter();
-                        let _ = Item::new_tool_tip(ctxt).await;
-                    }
-                    if cur_icon_dim != last_icon_dim {
-                        last_icon_dim = cur_icon_dim;
-                        let ctxt = item_iface.signal_emitter();
-                        let _ = Item::new_icon(ctxt).await;
-                    }
+                        // 只有真的发过信号才更新计数：没信号可发的一拍既不算失败也不该清零，
+                        // 否则「偶尔变一次、次次失败」会被间隔里的空拍抹平，永远凑不够 3 次。
+                        if sent {
+                            if failed {
+                                failures += 1;
+                                if failures >= 3 {
+                                    return Err(zbus::Error::Failure(
+                                        "托盘信号连续发送失败".to_string(),
+                                    ));
+                                }
+                            } else {
+                                failures = 0;
+                            }
+                        }
 
-                    // 动态菜单标签：播放↔暂停、静音↔取消静音。只给这两个 id 发
-                    // `ItemsPropertiesUpdated`，再广播一次 `LayoutUpdated` 让宿主知道
-                    // revision 变了——两者缺一，有的宿主只认其中一个。
-                    if cur_menu_state != last_menu_state {
-                        last_menu_state = cur_menu_state;
-                        let new_revision = revision_thread.fetch_add(1, Ordering::Relaxed) + 1;
-                        let updated: Vec<(i32, HashMap<String, OwnedValue>)> = entries
-                            .iter()
-                            .filter(|entry| DYNAMIC_LABEL_IDS.contains(&entry.0))
-                            .map(|entry| {
-                                let mut props = HashMap::new();
-                                props.insert(
-                                    "label".to_string(),
-                                    owned_str(&entry_label(entry, &current)),
-                                );
-                                (entry.0, props)
-                            })
-                            .collect();
-                        let ctxt = menu_iface.signal_emitter();
-                        let _ = Menu::items_properties_updated(ctxt, updated, Vec::new()).await;
-                        let _ = Menu::layout_updated(ctxt, new_revision, 0).await;
+                        tokio::time::sleep(Duration::from_millis(500)).await;
                     }
 
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    #[allow(unreachable_code)]
+                    Ok(())
                 }
+                .await;
 
-                #[allow(unreachable_code)]
-                Ok(())
-            }
-            .await;
-
-            if let Err(error) = result {
-                crate::logger::tlog!(
-                    crate::logger::LEVEL_WARN,
-                    "系统托盘连接失败（不影响播放）：{error}"
-                );
+                match result {
+                    Ok(()) => break,
+                    Err(error) => {
+                        connected_thread.store(false, Ordering::Relaxed);
+                        crate::logger::tlog!(
+                            crate::logger::LEVEL_WARN,
+                            "系统托盘连接中断（不影响播放），5 秒后重连：{error}"
+                        );
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                }
             }
         });
     });
@@ -1390,5 +1452,149 @@ mod tests {
                 std::env::set_var("DISPLAY", value);
             }
         }
+    }
+
+    /// 同一首歌内每拍只该刷新状态/静音，不该反复重建歌名/歌手。
+    #[test]
+    fn update_track_skips_metadata_rebuild_for_the_same_track() {
+        let handle = TrayHandle {
+            info: Arc::new(Mutex::new(TrayInfo::default())),
+            connected: Arc::new(AtomicBool::new(true)),
+        };
+        let built = std::cell::Cell::new(0u32);
+        let build = || {
+            built.set(built.get() + 1);
+            TrayInfo {
+                title: "歌名".to_string(),
+                artists: vec!["歌手".to_string()],
+                ..TrayInfo::default()
+            }
+        };
+
+        handle.update_track("h1", PlaybackState::Playing, false, build);
+        assert_eq!(built.get(), 1, "换歌时必须重建一次元数据");
+
+        handle.update_track("h1", PlaybackState::Paused, true, build);
+        assert_eq!(built.get(), 1, "同一首歌内不该再重建元数据");
+
+        let info = handle.info.lock().expect("锁没中毒");
+        assert_eq!(info.title, "歌名", "元数据应保留");
+        assert!(info.muted, "静音每拍都要刷新");
+        assert_eq!(info.status, PlaybackState::Paused, "状态每拍都要刷新");
+    }
+
+    /// 换歌时必须整份替换元数据。
+    #[test]
+    fn update_track_rebuilds_metadata_when_the_track_changes() {
+        let handle = TrayHandle {
+            info: Arc::new(Mutex::new(TrayInfo::default())),
+            connected: Arc::new(AtomicBool::new(true)),
+        };
+        handle.update_track("h1", PlaybackState::Playing, false, || TrayInfo {
+            title: "旧".to_string(),
+            track_id: "h1".to_string(),
+            ..TrayInfo::default()
+        });
+        handle.update_track("h2", PlaybackState::Playing, false, || TrayInfo {
+            title: "新".to_string(),
+            track_id: "h2".to_string(),
+            ..TrayInfo::default()
+        });
+
+        let info = handle.info.lock().expect("锁没中毒");
+        assert_eq!(info.title, "新");
+        assert_eq!(info.track_id, "h2");
+    }
+
+    /// 私有总线下 mock 一个 `org.kde.StatusNotifierWatcher`，验证第 7 项的重连逻辑：
+    /// 宿主消失后 `is_connected()` 转 false 并记 WARN，宿主回来后重新注册。
+    ///
+    /// 默认忽略（需要私有会话总线）。运行：
+    /// `dbus-run-session -- cargo test --lib tray::tests::reconnects_after_the_watcher_disappears -- --ignored --nocapture`
+    #[ignore = "需要 dbus-run-session 私有会话总线"]
+    #[test]
+    fn reconnects_after_the_watcher_disappears() {
+        if !environment_supports_tray() {
+            return;
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("建 runtime");
+        runtime.block_on(async {
+            let watcher = serve_mock_watcher().await;
+            let (bus, _receiver) = EventBus::new();
+            let Some(handle) = spawn(bus) else {
+                return;
+            };
+            assert!(
+                wait_for_connected(&handle, true, Duration::from_secs(10)).await,
+                "托盘应先注册成功"
+            );
+
+            // 宿主消失：连接一断，总线名就没了，下一次自愈周期（5s）会注册失败。
+            drop(watcher);
+            assert!(
+                wait_for_connected(&handle, false, Duration::from_secs(15)).await,
+                "宿主消失后 is_connected 应变 false"
+            );
+
+            // 宿主回来：下一次自愈周期应重新注册。
+            let _watcher = serve_mock_watcher().await;
+            assert!(
+                wait_for_connected(&handle, true, Duration::from_secs(15)).await,
+                "宿主回来后应重新注册"
+            );
+        });
+    }
+
+    /// mock 的 `org.kde.StatusNotifierWatcher`：只实现托盘用到的属性与方法。
+    struct MockWatcher {
+        items: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[interface(name = "org.kde.StatusNotifierWatcher")]
+    impl MockWatcher {
+        #[zbus(property)]
+        fn registered_status_notifier_items(&self) -> Vec<String> {
+            self.items.lock().expect("锁没中毒").clone()
+        }
+
+        fn register_status_notifier_item(&self, service: &str) {
+            let mut items = self.items.lock().expect("锁没中毒");
+            if !items.iter().any(|item| item == service) {
+                items.push(service.to_string());
+            }
+        }
+    }
+
+    /// 在会话总线上占住 watcher 名并挂上 mock 对象；返回的连接一 drop 名就释放。
+    async fn serve_mock_watcher() -> zbus::Connection {
+        ConnectionBuilder::session()
+            .expect("连会话总线")
+            .name(WATCHER_DEST)
+            .expect("占住 watcher 名")
+            .serve_at(
+                WATCHER_PATH,
+                MockWatcher {
+                    items: std::sync::Mutex::new(Vec::new()),
+                },
+            )
+            .expect("挂 watcher 对象")
+            .build()
+            .await
+            .expect("建 watcher 连接")
+    }
+
+    /// 等 `is_connected()` 变成 `want`；超时返回 false。
+    async fn wait_for_connected(handle: &TrayHandle, want: bool, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if handle.is_connected() == want {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        false
     }
 }

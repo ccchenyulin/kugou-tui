@@ -1,6 +1,6 @@
 [package]
 name = "kugou-tui"
-version = "0.5.0"
+version = "0.6.3"
 edition = "2024"
 # MSRV 由**依赖**决定，不是本项目代码决定的。当前最高的是 `quantette`（要 1.90，
 # 经 ratatui-image → icy_sixel 引进来），其余：ratatui 0.30 要 1.88、rodio 0.22 要
@@ -14,8 +14,8 @@ edition = "2024"
 # 也别为了压低它去退依赖：ratatui-image 8.x 只认 ratatui 0.29，会和这里的 0.30
 # 编出两份 ratatui（不兼容，渲染不进同一个 Frame）。
 rust-version = "1.90"
-description = "轻量级酷狗音乐命令行 TUI 播放器（首次运行自动准备接口服务，需 Node.js）"
-license = "MIT"
+description = "Lightweight Kugou Music terminal TUI player (interface embedded, no Node.js; keeps a Node service fallback)"
+license = "AGPL-3.0-or-later"
 repository = "https://github.com/sijin-xb/kugou-tui"
 keywords = ["tui", "music", "kugou", "player", "cli"]
 categories = ["command-line-utilities", "multimedia"]
@@ -23,6 +23,16 @@ categories = ["command-line-utilities", "multimedia"]
 [[bin]]
 name = "kugou-tui"
 path = "src/main.rs"
+
+[features]
+# 默认带上 Node 接口服务的引导能力（探测 3000/3001、下载 KuGouMusicApi、
+# npm install、spawn `node app.js`）。**默认值与历史行为完全一致**。
+#
+# `--no-default-features` 能编出一个彻底不含这段代码的二进制：没有下载器、没有
+# `npm` 调用、没有 `Command::new("node")`。想验证「这个二进制永远不可能拉起
+# Node」时可以这么编（见 README 的「安装」一节）。
+default = ["node-bootstrap"]
+node-bootstrap = []
 
 # 随包内置的汽水 SDK（见 crates/libresoda/Cargo.toml 顶部的说明）。
 [workspace]
@@ -49,6 +59,8 @@ tokio = { version = "1", default-features = false, features = [
     "fs",
     "io-util",
     "sync",
+    # WebSocket 服务要自己绑 TcpListener（见 src/ws.rs）
+    "net",
 ] }
 
 # --- HTTP ---
@@ -75,7 +87,11 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 
 # --- 序列化 ---
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order：`Value::Object` 用 IndexMap 而不是 BTreeMap，保住 JSON 的键序。
+# 上游 `util/request.js:119` 对对象型 data 直接 `JSON.stringify`，键序即插入序；
+# 而 android 签名把这份字符串算进 MD5，键序一变签名就错。默认的 BTreeMap 会把
+# 键按字典序重排，签名与上游对不上（且不会报错，只是 403）。
+serde_json = { version = "1", features = ["preserve_order"] }
 toml = "1"
 
 # --- 本地日期 ---
@@ -109,10 +125,10 @@ qrcode = { version = "0.14.1", default-features = false }
 
 # --- 汽水音乐音源：音频流解密 ---
 # 汽水下发的音频是 MP4/CENC 加密流，密钥藏在 `play_auth` 里，要按样本逐段做
-# AES-128-CTR 才能解出可解码的音频（见 source/sodam/crypto.rs）。
-# 这两个 crate 只用在这个地方，都是纯 Rust 实现，不碰 C 库、不拖额外运行时。
+# AES-128-CTR 才能解出可解码的音频。**这份实现已经搬进 `crates/libresoda`**
+# （`crates/libresoda/src/soda/crypto.rs`），`ctr` 因此只在那个 crate 里声明。
+# 这里保留 `aes`：本项目的 KRC / 云歌单 AES-CBC 走 `src/api/native/crypto.rs`。
 aes = "0.8"
-ctr = "0.9"
 
 # --- 终端图片（封面）---
 # 关掉默认的 image-defaults：那会打开 image 的全部格式解码器并拖进 rayon，
@@ -131,6 +147,19 @@ ratatui-image = { version = "11.1.0", default-features = false, features = [
 # 5.0 更是另一套。用 `=` 精确锁，避免下次 `cargo update` 顺手升上去把
 # `resample.rs` 编译掉。
 rubato = "=0.16.2"
+
+# 内嵌 API（`--api native`）用：上游签名与设备指纹全部基于 MD5，
+# `calculateMid` 还要把 128 位摘要当大整数转十进制。lib 名是 `md5`。
+md-5 = "0.10"
+num-bigint = "0.4"
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = [
+    # 只用**服务端**握手（`accept_hdr_async_with_config`）。刻意不开任何 TLS
+    # feature：我们只监听本机明文 ws://，TLS 是客户端 `connect_async` 才需要的。
+    # 开了会把 rustls + ring 拖进**所有平台**，包括 Windows——而 Windows 那栏
+    # 正是为了让 rustls 那坨 C 代码不参与编译才改用 SChannel 的（见下面平台段）。
+    "handshake",
+] }
+futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 
 # ======================================================================
 # 平台相关依赖

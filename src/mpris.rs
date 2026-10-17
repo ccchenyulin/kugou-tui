@@ -80,10 +80,32 @@ pub struct MprisHandle {
 }
 
 impl MprisHandle {
-    /// 更新快照。每次 tick 调一次即可——桌面组件轮询频率远低于此。
-    pub fn update(&self, info: TrackInfo) {
-        if let Ok(mut guard) = self.info.lock() {
+    /// 刷新快照：位置 / 时长 / 状态每拍都写，元数据只在换歌时重建。
+    ///
+    /// `build` 里是歌名 / 歌手 / 专辑 / 封面的克隆，而它们只在 `track_id` 变化时
+    /// 才需要重算。主循环每拍（默认 200ms）都会调到这里，逐拍重建整份元数据纯属
+    /// 浪费——尤其是 `cover_url` 的字符串替换。桌面组件轮询频率远低于此。
+    pub fn update_track(
+        &self,
+        track_id: &str,
+        position_us: i64,
+        duration_us: i64,
+        status: PlaybackState,
+        build: impl FnOnce() -> TrackInfo,
+    ) {
+        let Ok(mut guard) = self.info.lock() else {
+            return;
+        };
+        if guard.track_id != track_id {
+            let mut info = build();
+            info.position_us = position_us;
+            info.duration_us = duration_us;
+            info.status = status;
             *guard = info;
+        } else {
+            guard.position_us = position_us;
+            guard.duration_us = duration_us;
+            guard.status = status;
         }
     }
 
@@ -492,5 +514,67 @@ async fn serve(
         }
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    /// 直接拼一个句柄，绕开需要 D-Bus 的 `spawn`。
+    fn handle() -> MprisHandle {
+        MprisHandle {
+            info: Arc::new(Mutex::new(TrackInfo::default())),
+            connected: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    /// 同一首歌内每拍只该刷新进度/状态，不该反复重建元数据（歌名/歌手/封面）。
+    #[test]
+    fn update_track_skips_metadata_rebuild_for_the_same_track() {
+        let handle = handle();
+        let built = std::cell::Cell::new(0u32);
+        let build = || {
+            built.set(built.get() + 1);
+            TrackInfo {
+                title: "歌名".to_string(),
+                artists: vec!["歌手".to_string()],
+                track_id: "h1".to_string(),
+                ..TrackInfo::default()
+            }
+        };
+
+        handle.update_track("h1", 1_000, 10_000, PlaybackState::Playing, build);
+        assert_eq!(built.get(), 1, "换歌时必须重建一次元数据");
+
+        handle.update_track("h1", 2_000, 10_000, PlaybackState::Paused, build);
+        assert_eq!(built.get(), 1, "同一首歌内不该再重建元数据");
+
+        let info = handle.info.lock().expect("锁没中毒");
+        assert_eq!(info.title, "歌名", "元数据应保留");
+        assert_eq!(info.position_us, 2_000, "进度每拍都要刷新");
+        assert_eq!(info.status, PlaybackState::Paused, "状态每拍都要刷新");
+    }
+
+    /// 换歌时必须整份替换元数据（歌名、时长都跟着换）。
+    #[test]
+    fn update_track_rebuilds_metadata_when_the_track_changes() {
+        let handle = handle();
+        handle.update_track("h1", 0, 1_000, PlaybackState::Playing, || TrackInfo {
+            title: "旧".to_string(),
+            track_id: "h1".to_string(),
+            ..TrackInfo::default()
+        });
+        handle.update_track("h2", 5_000, 20_000, PlaybackState::Playing, || TrackInfo {
+            title: "新".to_string(),
+            track_id: "h2".to_string(),
+            ..TrackInfo::default()
+        });
+
+        let info = handle.info.lock().expect("锁没中毒");
+        assert_eq!(info.title, "新");
+        assert_eq!(info.track_id, "h2");
+        assert_eq!(info.duration_us, 20_000);
     }
 }

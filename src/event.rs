@@ -140,6 +140,14 @@ pub enum Loaded {
         hash: String,
         reason: String,
     },
+    /// 这首歌**没有匹配到歌词**（接口明确回「找不到」）。
+    ///
+    /// 与 [`Self::LyricFailed`] 分开：找不到通常意味着纯音乐 / 无歌词，那是歌本身
+    /// 的正常状态，面板应当说「纯音乐，请欣赏」，而不是把它渲染成一次取词失败。
+    /// 真正的失败（网络 / 服务端）仍走 `LyricFailed`。
+    LyricUnavailable {
+        hash: String,
+    },
     /// 已经拿到播放直链。
     StreamReady {
         song: Box<Song>,
@@ -238,6 +246,16 @@ pub enum Loaded {
         song: Box<Song>,
         buffer: StreamingBuffer,
         start_at_ms: u64,
+    },
+    /// 取**播放直链**失败（`song_stream_url`）。
+    ///
+    /// 单独一个变体，而不是复用 [`Self::Failed`]：要不要「自动跳下一首」取决于
+    /// 这次失败是不是取链失败、以及是不是源级失败（连不上 / 未登录 / 服务没起）。
+    /// 混进 `Failed` 就只能靠比对 `context` 文案来认，太脆；而下载、写云端那些
+    /// `Failed` 也绝不该触发跳歌。
+    StreamFailed {
+        song: Box<Song>,
+        error: AppError,
     },
     /// 云端写操作（加歌/删歌）的提示信息。
     CloudNotice(String),

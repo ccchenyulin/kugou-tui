@@ -37,9 +37,10 @@ pub mod sodam;
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::client::ApiClient;
+use crate::api::ApiClient;
 use crate::api::cloud::UserInfo;
 use crate::api::model::{Artist, Lyric, Playlist, RankBoard, Song};
+use crate::api::traits::MusicApi;
 use crate::error::Result;
 
 /// 音源种类。
@@ -118,6 +119,20 @@ impl SourceKind {
             SourceKind::KugouConcept => "酷狗概念版",
             SourceKind::Netease => "网易云",
             SourceKind::Sodam => "汽水音乐",
+        }
+    }
+
+    /// 稳定的 ASCII 短名，用于缓存键、文件名这类**持久标识**。
+    ///
+    /// 刻意不复用 [`Self::label`]：那是给人看的中文，塞进文件名既难看、又不该
+    /// 因为界面改文案而变。取值与 serde 的 `snake_case` 名保持一致——改 serde
+    /// 名字时这里要一起改，否则同一份数据在磁盘上会有两种写法。
+    pub fn as_key(self) -> &'static str {
+        match self {
+            SourceKind::Kugou => "kugou",
+            SourceKind::KugouConcept => "kugou_concept",
+            SourceKind::Netease => "netease",
+            SourceKind::Sodam => "sodam",
         }
     }
 
@@ -892,9 +907,13 @@ mod tests {
         ] {
             assert!(!kind.is_remote(), "{kind:?} 是本机服务，不该标成 remote");
         }
-        // manages_service 为假时 bootstrap 才会跳过（见 bootstrap.rs）
+        // manages_service 为假时 bootstrap 才会跳过（见 bootstrap.rs）。
+        // 关掉 `node-bootstrap` 时引导能力整个不在，任何音源都为假。
         assert!(!crate::bootstrap::manages_service(SourceKind::Sodam));
-        assert!(crate::bootstrap::manages_service(SourceKind::Kugou));
+        assert_eq!(
+            crate::bootstrap::manages_service(SourceKind::Kugou),
+            cfg!(feature = "node-bootstrap")
+        );
     }
 
     /// 汽水的凭据与 dfid 不能和酷狗串台。
@@ -1022,5 +1041,15 @@ mod tests {
             SourceKind::Sodam.default_api_base(),
             "https://api.qishui.com"
         );
+    }
+
+    /// `as_key` 会写进缓存文件名，是持久标识：改动会孤立已有缓存，所以值钉死。
+    #[test]
+    fn source_keys_are_stable_and_distinct() {
+        let keys: Vec<&str> = SourceKind::ALL.iter().map(|kind| kind.as_key()).collect();
+        assert_eq!(keys, ["kugou", "kugou_concept", "netease", "sodam"]);
+
+        let unique: std::collections::BTreeSet<&str> = keys.iter().copied().collect();
+        assert_eq!(unique.len(), keys.len(), "各音源的 key 不能重复");
     }
 }

@@ -19,9 +19,16 @@ use clap::Parser;
     long_about = None,
 )]
 pub struct Cli {
-    /// KuGouMusicApi 服务地址。
+    /// 接口服务地址（`--api node` 时使用）。
     #[arg(short = 'a', long, env = "KUGOU_API_BASE", value_name = "URL")]
     pub api_base: Option<String>,
+
+    /// 用哪套后端实现酷狗接口。
+    ///
+    /// `native`（默认）用内嵌的纯 Rust 实现，不需要 Node.js；`node` 走本机
+    /// KuGouMusicApi 回退。只对酷狗两个音源生效，网易云与汽水照旧。
+    #[arg(long, env = "KUGOU_API_BACKEND", value_name = "node|native")]
+    pub api: Option<crate::api::ApiBackend>,
 
     /// 登录 cookie，形如 `token=xxx; userid=xxx; dfid=xxx`。
     #[arg(short = 'c', long, env = "KUGOU_COOKIE", value_name = "COOKIE")]
@@ -76,7 +83,7 @@ pub struct Cli {
     ///
     /// **VIP 整曲与无损才需要它**：没有它时汽水的 App 端点会返回
     /// 「HTTP 200 + 空 body」，表现为 VIP 歌只能拿到 30 秒试听。
-    /// 抓包方式见 `docs/USER_GUIDE.md` 的「汽水音乐音源」一节。
+    /// 抓包方式见 README 的「汽水音乐音源」一节。
     #[arg(long, env = "SODAM_X_HELIOS", value_name = "VALUE")]
     pub sodam_x_helios: Option<String>,
 
@@ -105,6 +112,18 @@ pub struct Cli {
     /// 启动时不注册系统托盘图标。配置文件里的 `tray` 也可关。
     #[arg(long)]
     pub no_tray: bool,
+
+    /// 启动时不开启 WebSocket 服务。配置文件里的 `ws` 也可关。
+    ///
+    /// 服务只监听 `127.0.0.1`，用于第三方客户端读取播放状态与歌词、遥控播放。
+    #[arg(long)]
+    pub no_ws: bool,
+
+    /// WebSocket 服务的监听端口（默认 6520）。
+    ///
+    /// 只影响监听端口，仍然只绑 `127.0.0.1`。
+    #[arg(long, value_name = "PORT")]
+    pub ws_port: Option<u16>,
 
     /// 不自动拉起本机接口服务。
     ///

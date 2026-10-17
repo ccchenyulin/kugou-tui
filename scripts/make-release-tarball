@@ -2,8 +2,8 @@
 #
 # make-release-tarball —— 打出 GitHub Release 用的二进制包。
 #
-# 为什么需要它：这个包是给**非 Arch 用户**用的——他们拿不到 AUR 包（包里直接带了
-# 接口服务），只能靠这个 tarball 把服务配起来。所以它必须同时包含**三个脚本**，
+# 为什么需要它：这个包是给**不用 `cargo install` 的用户**用的——包里直接带了
+# 接口服务，解压即用。所以它必须同时包含**三个脚本**，
 # 否则用户解压后跑不了 `kugou-tui-install-api`，整套流程就断了。
 #
 # 手工拼目录漏掉脚本是很自然的事（0.3.7 那版就漏了），所以固化成一个脚本。
@@ -69,12 +69,11 @@ fi
 name="kugou-tui-$version-$target"
 stage="dist/$name"
 rm -rf "$stage"
-install -d "$stage/scripts" "$stage/docs"
+install -d "$stage/scripts"
 
 install -m755 "$bin" "$stage/kugou-tui"
 install -m755 scripts/kugou-api scripts/kugou-api-install scripts/kugou-tui "$stage/scripts/"
-install -m644 LICENSE README.md CHANGELOG.md KEYBINDINGS.md "$stage/"
-install -m644 docs/*.md "$stage/docs/"
+install -m644 LICENSE README.md CHANGELOG.md "$stage/"
 
 tar -czf "dist/$name.tar.gz" -C dist "$name"
 rm -rf "$stage"

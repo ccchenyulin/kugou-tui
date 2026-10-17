@@ -2,6 +2,9 @@
 #
 # kugou-api —— KuGouMusicApi 服务的启停管理（start / stop / restart / status / logs）。
 #
+# 网易云实例（netease）由启动器 kugou-tui 自己拉起，这里不负责 start 它；但
+# stop / status / logs 认得它，所以启动器拉起的网易云也停得掉、看得到。
+#
 # 为什么需要两个实例：酷狗的两个平台是两套独立的鉴权体系，平台由服务端 `platform`
 # 环境变量决定（`lite` = 概念版），而一个 Node 进程只能加载一份配置。所以要同时
 # 用两个音源，就得起两个进程、各占一个端口。
@@ -13,7 +16,7 @@
 #   ./scripts/kugou-api stop      # 停止（按 PID 精确停止，不是按名字模糊杀）
 #   ./scripts/kugou-api restart   # 先停再起
 #   ./scripts/kugou-api status    # 查看运行状态、PID、日志路径
-#   ./scripts/kugou-api logs      # 跟随日志（默认 standard，可跟 lite）
+#   ./scripts/kugou-api logs      # 跟随日志（默认 standard，可跟 lite / netease）
 #   ./scripts/kugou-api help      # 打印这份说明
 #
 # 首次使用给执行权限：
@@ -26,12 +29,16 @@
 #   KUGOU_API_DIR        KuGouMusicApi 的目录        默认 /usr/share/kugou-tui/api/kugou
 #                                                     （软件包提供的只读副本，自带依赖），
 #                                                     没有则退回 ~/KuGouMusicApi
+#   KUGOU_API_SYSTEM_ROOT  软件包放置服务的位置        默认 /usr/share/kugou-tui/api
+#                                                     （用于非 /usr 前缀打包）
+#   KUGOU_API_CONFIG    配置文件路径                  默认 <配置根>/kugou-tui/api.env
 #   KUGOU_API_LOG_DIR    日志与 PID 文件目录          默认 <缓存根>/kugou-tui
 #                                                     Linux: ~/.cache/kugou-tui
 #                                                     macOS: ~/Library/Caches/kugou-tui
 #   KUGOU_API_HOST       监听地址                    默认 127.0.0.1
 #   KUGOU_STANDARD_PORT  标准版端口                  默认 3000
 #   KUGOU_LITE_PORT      概念版端口                  默认 3001
+#   NETEASE_PORT         网易云实例端口（stop/status 找不到 PID 文件时的兜底）默认 3002
 #   KUGOU_API_BIN        客户端二进制路径             默认 <仓库>/target/release/kugou-tui，
 #                                                     不存在则用 PATH 上的 kugou-tui
 #   KUGOU_API_SKIP_BUILD 设为 1 时跳过编译预检        默认空（会检查并在缺失时编译）
@@ -57,7 +64,7 @@ set -euo pipefail
 #   setsid        util-linux，macOS 没有
 #   declare -A    需要 bash 4；macOS 自带的 /bin/bash 是 3.2
 #
-# 仓库里的三个 bash 脚本各自独立分发（AUR 装进 /usr/bin、发行包放进 scripts/、
+# 仓库里的三个 bash 脚本各自独立分发（发行包放进 scripts/、
 # 也有人单独软链到 ~/.local/bin），所以**不做成共享库**：任何一份都得能单独跑起来。
 # 代价是这段在每个脚本里重复一遍，改的时候三处一起改。
 # ==================================================================
@@ -116,6 +123,7 @@ CFG_KUGOU_API_LOG_DIR=""
 CFG_KUGOU_API_HOST=""
 CFG_KUGOU_STANDARD_PORT=""
 CFG_KUGOU_LITE_PORT=""
+CFG_NETEASE_PORT=""
 CFG_KUGOU_API_BIN=""
 CFG_KUGOU_API_SKIP_BUILD=""
 
@@ -135,12 +143,16 @@ load_config() {
     value="${value%\"}"
     value="${value#\'}"
     value="${value%\'}"
+    # CFG_* 只被 `pick` 以间接展开 `${!cfg_name}` 读取，shellcheck 静态分析看不到，
+    # 会对下面每个赋值误报 SC2034，这里显式豁免（整段 case 一起）。
+    # shellcheck disable=SC2034
     case "$key" in
       KUGOU_API_DIR) CFG_KUGOU_API_DIR="$value" ;;
       KUGOU_API_LOG_DIR) CFG_KUGOU_API_LOG_DIR="$value" ;;
       KUGOU_API_HOST) CFG_KUGOU_API_HOST="$value" ;;
       KUGOU_STANDARD_PORT) CFG_KUGOU_STANDARD_PORT="$value" ;;
       KUGOU_LITE_PORT) CFG_KUGOU_LITE_PORT="$value" ;;
+      NETEASE_PORT) CFG_NETEASE_PORT="$value" ;;
       KUGOU_API_BIN) CFG_KUGOU_API_BIN="$value" ;;
       KUGOU_API_SKIP_BUILD) CFG_KUGOU_API_SKIP_BUILD="$value" ;;
       *)
@@ -214,11 +226,18 @@ LOG_DIR="$(pick KUGOU_API_LOG_DIR "$(cache_root)/kugou-tui")"
 HOST="$(pick KUGOU_API_HOST 127.0.0.1)"
 STANDARD_PORT="$(pick KUGOU_STANDARD_PORT 3000)"
 LITE_PORT="$(pick KUGOU_LITE_PORT 3001)"
+NETEASE_PORT="$(pick NETEASE_PORT 3002)"
 BIN="$(pick KUGOU_API_BIN "$(default_client_bin)")"
 SKIP_BUILD="$(pick KUGOU_API_SKIP_BUILD "")"
 
-# 两个实例：名字 / 端口 / platform（标准版不传 platform，服务端默认就是手机版）
+# 两个酷狗实例：名字 / 端口 / platform（标准版不传 platform，服务端默认就是手机版）
 INSTANCES="standard:$STANDARD_PORT: lite:$LITE_PORT:--platform=lite"
+
+# 网易云不是酷狗实例，由启动器 `kugou-tui` 自己拉起（目录、平台都和酷狗不是一套），
+# 所以 kugou-api 不负责 start 它。但 stop / status / logs 必须认得它：它和酷狗写
+# 同一套 PID 文件，认不得就只能放任它占着端口（以前更糟——它沿用 standard 实例名，
+# `stop` 会照着 api-standard.pid 误杀到酷狗标准版）。
+EXTERNAL_INSTANCES="netease:$NETEASE_PORT"
 
 # ==================================================================
 # 小工具
@@ -261,13 +280,26 @@ pid_of() {
   local pid _port
   [ -s "$1" ] || return 0
   read -r pid _port <"$1" 2>/dev/null || true
+  # PowerShell 5.1 的 Set-Content 写 PID 文件会带 UTF-8 BOM。BOM 只出现在文件开头，
+  # 于是黏在第一个字段上，`kill -0 $pid` 拿到一个非法 PID，status/stop 全部失灵。
+  pid="${pid#$'\xef\xbb\xbf'}"
   printf '%s' "${pid:-}"
 }
 port_of() {
   local _pid port
   [ -s "$1" ] || return 0
   read -r _pid port <"$1" 2>/dev/null || true
+  # 端口是第二个字段，BOM 黏不到它；同样清一遍只是让两处口径一致。
+  port="${port#$'\xef\xbb\xbf'}"
   printf '%s' "${port:-}"
+}
+
+# 外部实例（网易云）的端口不写死：它跟着当前音源的 api_base 走，启动器已经写进了
+# PID 文件。读不到（还没起过、或文件已删）才退回配置里的默认端口。
+external_port() {
+  local name="$1" fallback="$2" port
+  port="$(port_of "$(pid_file "$name")")"
+  printf '%s' "${port:-$fallback}"
 }
 
 die() {
@@ -543,6 +575,12 @@ case "${1:-start}" in
       rest="${entry#*:}"
       stop_one "$name" "${rest%%:*}"
     done
+    # 网易云由启动器拉起，但它和酷狗写同一套 PID 文件，stop 就该把它也停掉，
+    # 而不是留着它继续占端口。
+    for entry in $EXTERNAL_INSTANCES; do
+      name="${entry%%:*}"
+      stop_one "$name" "$(external_port "$name" "${entry#*:}")"
+    done
     ;;
 
   restart)
@@ -552,6 +590,8 @@ case "${1:-start}" in
       rest="${entry#*:}"
       stop_one "$name" "${rest%%:*}"
     done
+    # 网易云不在重启范围内：restart 的语义是重启 KuGouMusicApi，而 kugou-api 不负责
+    # 拉起网易云（那是启动器的事）。停掉它反而会留下一个没人再起的服务。
     # 端口释放需要一点时间，不等的话下一轮会把「还没退干净」误判成端口占用
     sleep 1
     exec "$0" start
@@ -564,6 +604,10 @@ case "${1:-start}" in
       rest="${entry#*:}"
       status_one "$name" "${rest%%:*}"
     done
+    for entry in $EXTERNAL_INSTANCES; do
+      name="${entry%%:*}"
+      status_one "$name" "$(external_port "$name" "${entry#*:}")"
+    done
     ;;
 
   logs)
@@ -572,8 +616,8 @@ case "${1:-start}" in
     # 而在此之前用户得自己去翻 status 打印的那条路径。
     instance="${2:-standard}"
     case "$instance" in
-      standard | lite) ;;
-      *) die "未知实例：$instance（可用：standard / lite）" ;;
+      standard | lite | netease) ;;
+      *) die "未知实例：$instance（可用：standard / lite / netease）" ;;
     esac
     log="$(log_file "$instance")"
     [ -f "$log" ] || die "日志还不存在：$log（这个实例还没起过？先 kugou-api start）"

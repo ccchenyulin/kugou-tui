@@ -84,6 +84,7 @@ use anyhow::Context;
 use crossbeam_channel::{Receiver, RecvTimeoutError};
 
 use crate::api::ApiClient;
+use crate::api::traits::MusicApi;
 use crate::app::state::Tab;
 use crate::audio::engine::PlaybackState;
 use crate::audio::{AudioCache, AudioHandle, Downloader};
@@ -161,6 +162,20 @@ pub struct App {
     /// 托盘句柄。`config.tray == false` 或环境探测失败时为 `None`。
     #[cfg(unix)]
     tray: Option<crate::tray::TrayHandle>,
+
+    /// WebSocket 服务句柄。`config.ws == false` 或端口绑定失败时为 `None`。
+    ws: Option<crate::ws::WsHandle>,
+
+    /// 本轮「源不可用」自动跳歌已经跳过的次数。
+    ///
+    /// 用户手动切歌 / 暂停 / 起播新歌时清零；连续跳歌达到上限就停下，避免整条
+    /// 队列都连不上时无限重试。
+    auto_skip_count: usize,
+
+    /// 本轮自动跳歌里已经确认不可用的音源。
+    ///
+    /// 同一个源失败一次就够了：后面同源的歌直接跳过，不再逐个发必然失败的请求。
+    failed_sources: Vec<crate::source::SourceKind>,
 }
 
 /// 动画帧间隔（约 30fps）。终端里再往上（60fps）看不出差别，但重绘成本是线性的，
@@ -207,7 +222,9 @@ impl App {
 
         let (bus, receiver) = EventBus::new();
 
-        let api = ApiClient::new(
+        let api = ApiClient::for_backend(
+            config.api_backend,
+            config.active_source_kind(),
             &config.api_base,
             config.cookie_header(),
             config.proxy.as_deref(),
@@ -235,6 +252,14 @@ impl App {
             None
         };
 
+        // WebSocket 服务。同样共享 bus：入站的 `control` 命令经它派发成播放动作。
+        // 绑定失败（端口被占）只记一条 WARN，不影响播放。
+        let ws_handle = if config.ws {
+            crate::ws::spawn(bus.clone(), config.ws_port)
+        } else {
+            None
+        };
+
         let state = AppState::new(config);
 
         let mut app = Self {
@@ -253,10 +278,13 @@ impl App {
             active_stream: None,
             stream_retried: None,
             pending_stream_retry: None,
+            auto_skip_count: 0,
+            failed_sources: Vec::new(),
             #[cfg(unix)]
             mpris,
             #[cfg(unix)]
             tray: tray_handle,
+            ws: ws_handle,
         };
 
         app.state.picker = Some(detect_image_picker());
@@ -527,6 +555,68 @@ impl App {
                 Config::path().display()
             ),
             Err(error) => tlog!(crate::logger::LEVEL_ERROR, "保存配置失败：{error}"),
+        }
+    }
+}
+
+/// 仅供测试：造一个不碰网络、不碰音频设备、不读写用户目录的 [`App`]。
+///
+/// 生产构造路径 [`App::new`] 会建多线程运行时、连音频设备、读会话文件、发一串
+/// 启动请求，测试里既慢又有副作用。这里把依赖换成离线替身：
+///
+/// * 网络运行时用 `new_current_thread` 且**不** `block_on`——`spawn` 出去的任务
+///   永远不跑，所以不会真的发请求；
+/// * `ApiClient` 指向 `127.0.0.1:9`（discard 端口），即便有任务真跑了也是立刻
+///   连接被拒，打不到真实服务；
+/// * 音频句柄用 [`AudioHandle::detached`]，不接音频线程；
+/// * 不调 `ensure_cache_dir` / `restore_session` / 任何 `fetch_*`。
+#[cfg(test)]
+impl App {
+    pub(crate) fn for_test() -> Self {
+        let config = Config {
+            tray: false,
+            ws: false,
+            ..Config::default()
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("测试运行时应当能建起来");
+        let (bus, receiver) = EventBus::new();
+        let api = ApiClient::for_backend(
+            crate::api::ApiBackend::Node,
+            crate::source::SourceKind::Kugou,
+            "http://127.0.0.1:9",
+            None,
+            None,
+        )
+        .expect("离线 node 客户端应当能建起来");
+        let cache = AudioCache::new(config.cache_dir.clone(), config.cache_limit_mib);
+        let downloader = Downloader::new(None).expect("离线下载器应当能建起来");
+
+        Self {
+            state: AppState::new(config),
+            bus,
+            receiver,
+            api,
+            audio: AudioHandle::detached(),
+            cache,
+            downloader,
+            runtime,
+            last_frame_at: Instant::now(),
+            last_session_save: Instant::now(),
+            last_mem_trace: Instant::now(),
+            pending_device_resume: None,
+            active_stream: None,
+            stream_retried: None,
+            pending_stream_retry: None,
+            auto_skip_count: 0,
+            failed_sources: Vec::new(),
+            #[cfg(unix)]
+            mpris: None,
+            #[cfg(unix)]
+            tray: None,
+            ws: None,
         }
     }
 }

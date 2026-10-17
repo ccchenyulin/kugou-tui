@@ -6,14 +6,14 @@
 //! 把本地队列写进去。写操作需要登录 cookie，并且需要数字 `listid`
 //! （不是公开歌单的 `global_collection_id`）。
 //!
-//! 因此 [`ApiClient::user_playlists`](crate::api::ApiClient::user_playlists) 返回的
+//! 因此 [`NodeApi::user_playlists`](crate::api::node::NodeApi::user_playlists) 返回的
 //! 歌单里只有 [`Playlist::is_writable`] 为真的才能作为同步目标。
 
 use serde_json::Value;
 
-use crate::api::client::ApiClient;
 use crate::api::data_of;
 use crate::api::model::{Song, pick_i64, pick_string};
+use crate::api::node::NodeApi;
 use crate::error::{AppError, Result};
 
 /// 会员形态。
@@ -102,8 +102,11 @@ impl VipInfo {
     /// 只取日期部分：服务端给的是 `YYYY-MM-DD HH:MM:SS`，界面上一行放不下。
     fn end_date(&self) -> String {
         match self.end_time.split(' ').next() {
-            Some(date) if date.len() >= 10 => date[5..10].to_string(),
-            _ => String::new(),
+            // 用 `get` 而不是 `date[5..10]`：这是服务端可控的字符串，按**字节**
+            // 切片时一旦里面有多字节字符（理论上不该有，但服务端是外部输入），
+            // 切点落在字符中间会直接 panic。`get` 遇到非字符边界返回 `None`。
+            Some(date) => date.get(5..10).unwrap_or("").to_string(),
+            None => String::new(),
         }
     }
 
@@ -171,7 +174,7 @@ pub struct QrCheck {
     pub cookie: Option<String>,
 }
 
-impl ApiClient {
+impl NodeApi {
     /// 二维码登录第 1 步：取 key。
     pub async fn login_qr_key(&self) -> Result<String> {
         let root = self.get_json_uncached("/login/qr/key", &[]).await?;
@@ -352,7 +355,7 @@ impl ApiClient {
     ///
     /// 另外这些错误码**没有**附带描述（没有 `error_msg`），所以这里把实测遇到的
     /// 几个翻译成人话，别让用户对着一串数字猜。
-    fn check_write_result(path: &str, root: &Value) -> Result<()> {
+    pub(crate) fn check_write_result(path: &str, root: &Value) -> Result<()> {
         let Some(code) = root.get("error_code").and_then(Value::as_i64) else {
             return Ok(());
         };
@@ -386,7 +389,12 @@ impl ApiClient {
         // 网易云走的是另一套接口（`/playlist/track/add` 的 `pid` + `ids`），
         // 与酷狗的「歌名|hash|专辑id」完全不通，必须按音源分派。
         if let crate::source::SourceKind::Netease = source {
-            return crate::source::netease::add_tracks_to_playlist(self, list_id, songs).await;
+            return crate::source::netease::add_tracks_to_playlist(
+                &crate::api::ApiClient::Node(self.clone()),
+                list_id,
+                songs,
+            )
+            .await;
         }
 
         // 服务端按逗号分隔多首、按竖线分隔字段，单次提交太多会被截断
@@ -432,7 +440,12 @@ impl ApiClient {
         }
 
         if let crate::source::SourceKind::Netease = source {
-            return crate::source::netease::remove_tracks_from_playlist(self, list_id, songs).await;
+            return crate::source::netease::remove_tracks_from_playlist(
+                &crate::api::ApiClient::Node(self.clone()),
+                list_id,
+                songs,
+            )
+            .await;
         }
 
         let file_ids: Vec<i64> = songs.iter().filter_map(|song| song.file_id).collect();
@@ -465,7 +478,11 @@ impl ApiClient {
         list_id: i64,
     ) -> Result<()> {
         if let crate::source::SourceKind::Netease = source {
-            return crate::source::netease::delete_playlist(self, list_id).await;
+            return crate::source::netease::delete_playlist(
+                &crate::api::ApiClient::Node(self.clone()),
+                list_id,
+            )
+            .await;
         }
         self.get_json_uncached_mutating("/playlist/del", &[("listid", list_id.to_string())])
             .await?;
@@ -482,7 +499,11 @@ impl ApiClient {
         name: &str,
     ) -> Result<Option<i64>> {
         if let crate::source::SourceKind::Netease = source {
-            return crate::source::netease::create_playlist(self, name).await;
+            return crate::source::netease::create_playlist(
+                &crate::api::ApiClient::Node(self.clone()),
+                name,
+            )
+            .await;
         }
         let root = self
             .get_json_uncached_mutating(
@@ -490,15 +511,28 @@ impl ApiClient {
                 &[("name", name.to_string()), ("type", "0".to_string())],
             )
             .await?;
-        Ok(pick_i64(data_of(&root), &["listid", "list_id", "id"]))
+        Ok(created_listid(&root))
     }
+}
+
+/// 从 `/playlist/add` 的响应里取新建歌单的 listid。
+///
+/// 服务端把结果埋在 `data.info` 下（`data` 顶层**没有** `listid`），只扫顶层会恒
+/// 返回 `None`：调用方只能显示「已新建」却拿不到 id，后续加歌也就没有目标。
+/// 真实响应形如 `{"data":{"info":{"listid":5,…},"list_count":5},"status":1,"error_code":0}`。
+pub(crate) fn created_listid(root: &Value) -> Option<i64> {
+    let data = data_of(root);
+    pick_i64(data, &["listid", "list_id", "id"]).or_else(|| {
+        data.get("info")
+            .and_then(|info| pick_i64(info, &["listid", "list_id", "id"]))
+    })
 }
 
 /// 拼 `/playlist/tracks/add` 的 `data` 参数：`歌名|hash|专辑id|album_audio_id`。
 ///
 /// 歌名里混入 `|` 或 `,` 会破坏分隔结构（用户搜到的歌名完全可能带逗号），
 /// 所以先做替换。
-fn encode_track_entry(song: &Song) -> String {
+pub(crate) fn encode_track_entry(song: &Song) -> String {
     let safe_name = song.name.replace(['|', ','], " ");
     format!(
         "{}|{}|{}|{}",
@@ -552,11 +586,39 @@ mod tests {
         assert_eq!(none.short_label(), "非会员");
     }
 
+    /// 到期日按字节切片遇到多字节字符时不能 panic。
+    ///
+    /// `end_time` 是服务端可控的字符串，早先用 `date[5..10]` 按**字节**切；只要
+    /// 里面出现一个多字节字符（中文、全角数字），切点就可能落在字符中间，而
+    /// release 是 `panic = "abort"`，进程会直接死在解析会员信息上。改成 `get`
+    /// 后遇到非字符边界返回 `None`。三种输入各钉一次。
+    #[test]
+    fn end_date_is_sliced_on_char_boundaries() {
+        let normal = VipInfo {
+            end_time: "2026-09-28 12:00:00".to_string(),
+            ..VipInfo::default()
+        };
+        assert_eq!(normal.end_date(), "09-28");
+
+        let short = VipInfo {
+            end_time: "2026-09".to_string(),
+            ..VipInfo::default()
+        };
+        assert_eq!(short.end_date(), "");
+
+        // 「年」占 3 字节，字节 5 落在它中间：旧写法在这里 panic。
+        let multibyte = VipInfo {
+            end_time: "2026年09月28日".to_string(),
+            ..VipInfo::default()
+        };
+        assert_eq!(multibyte.end_date(), "");
+    }
+
     /// HTTP 200 但业务失败时必须报错——否则界面会谎报「已收藏」。
     #[test]
     fn write_result_rejects_non_zero_error_code() {
         let root = json!({"status": 0, "error_code": 30205});
-        let error = ApiClient::check_write_result("/playlist/tracks/add", &root)
+        let error = NodeApi::check_write_result("/playlist/tracks/add", &root)
             .expect_err("30205 必须被当成失败");
         assert!(
             error.user_hint().contains("不是你自己的"),
@@ -569,14 +631,102 @@ mod tests {
     #[test]
     fn write_result_accepts_zero_error_code() {
         let root = json!({"status": 1, "error_code": 0, "data": {}});
-        ApiClient::check_write_result("/playlist/tracks/add", &root).expect("0 表示成功");
+        NodeApi::check_write_result("/playlist/tracks/add", &root).expect("0 表示成功");
     }
 
     /// 没有 `error_code` 字段的响应（部分接口只给 `data`）不该被拦下。
     #[test]
     fn write_result_tolerates_missing_error_code() {
         let root = json!({"data": {"status": 1}});
-        ApiClient::check_write_result("/playlist/tracks/del", &root).expect("缺字段视为成功");
+        NodeApi::check_write_result("/playlist/tracks/del", &root).expect("缺字段视为成功");
+    }
+
+    #[test]
+    fn created_listid_reads_the_nested_info_object() {
+        // 真实响应形状：listid 在 data.info 里，data 顶层没有。
+        let root = json!({
+            "data": {"info": {"listid": 5, "name": "x"}, "list_count": 5},
+            "status": 1,
+            "error_code": 0
+        });
+        assert_eq!(created_listid(&root), Some(5));
+    }
+
+    #[test]
+    fn created_listid_still_accepts_a_flat_data_object() {
+        let root = json!({"data": {"listid": 7}, "status": 1});
+        assert_eq!(created_listid(&root), Some(7));
+    }
+
+    #[test]
+    fn created_listid_is_none_when_the_server_omits_it() {
+        let root = json!({"data": {"info": {"name": "x"}}, "status": 1, "error_code": 0});
+        assert_eq!(created_listid(&root), None);
+    }
+
+    /// `/playlist/add` 的真实响应把 `listid` 埋在 `data.info` 里，Node 版也必须能取到。
+    ///
+    /// 起一个真的 HTTP 服务端而不是 mock 掉解析：这条路径要验的正是「响应穿过
+    /// `HttpClient` 之后还认得出 listid」，手写 TcpListener 和 `catalog.rs` 那组同路子。
+    #[tokio::test]
+    async fn node_create_playlist_reads_listid_from_the_nested_info() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("绑定本地端口");
+        let addr = listener.local_addr().expect("取本地地址");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut reader = BufReader::new(stream.try_clone().expect("克隆流"));
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() {
+                    continue;
+                }
+                // 把请求头与 body 读完，否则 reqwest 会认为连接异常
+                let mut length = 0usize;
+                loop {
+                    let mut header = String::new();
+                    match reader.read_line(&mut header) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) if header.trim().is_empty() => break,
+                        Ok(_) => {
+                            if let Some(value) =
+                                header.to_ascii_lowercase().strip_prefix("content-length:")
+                            {
+                                length = value.trim().parse().unwrap_or(0);
+                            }
+                        }
+                    }
+                }
+                if length > 0 {
+                    let mut body = vec![0u8; length];
+                    let _ = std::io::Read::read_exact(&mut reader, &mut body);
+                }
+
+                // 真实形状：listid 只在 data.info 里
+                let payload = json!({
+                    "data": {"info": {"listid": 42, "name": "x"}, "list_count": 5},
+                    "status": 1,
+                    "error_code": 0
+                })
+                .to_string();
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                );
+                let _ = stream.flush();
+            }
+        });
+
+        let client = NodeApi::new(&format!("http://{addr}"), None, None).expect("构造客户端");
+        let list_id = client
+            .create_playlist(crate::source::SourceKind::Kugou, "x")
+            .await
+            .expect("新建歌单应当成功");
+        assert_eq!(list_id, Some(42));
     }
 
     #[test]

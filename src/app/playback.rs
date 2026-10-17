@@ -1,6 +1,5 @@
 //! 播放控制：起播、切歌、进度、音量、静音、歌词偏移。
 //!
-//! 从 `update.rs` 里切出来的第三块（见 `docs/MAINTENANCE.md` §1.8）。这里的代码
 //! **只改「正在播什么、播到哪、多大声」**；需要网络时只负责把任务 `spawn` 出去，
 //! 结果一律走 `Loaded` 事件回来由 `update.rs` 处理。
 //!
@@ -46,6 +45,7 @@ impl App {
 
     /// 用一批歌曲替换播放队列并起播第 `index` 首。
     pub fn play_from(&mut self, songs: Vec<Song>, index: usize) {
+        self.reset_auto_skip();
         let Some(song) = self.state.queue.replace_with(songs, index).cloned() else {
             self.state.warn("列表为空，无法播放");
             return;
@@ -68,6 +68,7 @@ impl App {
     }
 
     pub(super) fn play_from_queue(&mut self) {
+        self.reset_auto_skip();
         let Some(index) = self.state.queue_cursor.selected() else {
             self.state.warn("播放队列为空");
             return;
@@ -80,6 +81,7 @@ impl App {
     }
 
     pub(super) fn toggle_playback(&mut self) {
+        self.reset_auto_skip();
         match self.state.playback {
             // 正在缓冲时忽略，避免连按导致状态错乱
             PlaybackState::Loading => {}
@@ -123,6 +125,7 @@ impl App {
     }
 
     pub(super) fn next_track(&mut self, triggered_by_user: bool) {
+        self.reset_auto_skip();
         let Some(index) = self.state.queue.advance(triggered_by_user) else {
             // 顺序播放到底：停止而不是循环
             self.audio.stop();
@@ -138,6 +141,7 @@ impl App {
     }
 
     pub(super) fn previous_track(&mut self) {
+        self.reset_auto_skip();
         // 播放超过 3 秒时先回到本曲开头，这是主流播放器的通用行为
         if self.state.position_ms > RESTART_THRESHOLD_MS {
             self.audio.seek_to(0);
@@ -243,6 +247,7 @@ impl App {
     /// 光调 `audio.stop()` 会漏掉流式下载：音频线程停了，后台任务还在把整首
     /// 往缓冲和 `.part` 文件里灌，谁也不回收它。
     pub(super) fn stop_playback(&mut self) {
+        self.reset_auto_skip();
         if let Some(stream) = self.active_stream.take() {
             stream.cancel();
         }
@@ -251,6 +256,20 @@ impl App {
         // 从曲目开头起播，而不是跳到一个几分钟前断掉的位置。
         self.pending_stream_retry = None;
         self.audio.stop();
+    }
+
+    /// 取链/装载还没成功就失败时，把「缓冲中」收回来。
+    ///
+    /// `start_playback` 先 `mark_loading()` 把状态设成 `Loading`，但引擎在
+    /// 「没装载任何东西」时不会去改它（`sync()` 见 `!loaded` 直接返回）。取链
+    /// 失败时如果不管，状态就永远停在 `Loading`——而 `toggle_playback` 恰恰
+    /// 忽略 `Loading`，用户按 Space 毫无反应，看起来就是卡死。显式停一下让引擎
+    /// 把状态落回 `Stopped`。
+    pub(super) fn abort_loading(&mut self) {
+        self.audio.stop();
+        self.state.playback = PlaybackState::Stopped;
+        self.state.busy = None;
+        self.state.download_progress = None;
     }
 
     /// 起播一首歌：先查缓存，未命中则解析直链 → 下载 → 播放。
@@ -324,8 +343,7 @@ impl App {
         let api = match self.client_for(source) {
             Ok(client) => client,
             Err(error) => {
-                self.state
-                    .error(format!("无法连接「{}」：{error}", source.label()));
+                self.handle_stream_failed(song, error);
                 return;
             }
         };
@@ -341,7 +359,10 @@ impl App {
                     is_trial: stream.is_trial,
                     reason: stream.reason,
                 }),
-                Err(error) => bus.fail(format!("获取《{}》的播放地址失败", song.name), error),
+                Err(error) => bus.emit(Loaded::StreamFailed {
+                    song: Box::new(song),
+                    error,
+                }),
             }
         });
     }

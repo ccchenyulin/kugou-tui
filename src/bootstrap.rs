@@ -173,9 +173,23 @@ pub fn detach() {
 /// * `api_base` 指向的不是本机（远程服务不归我们管）；
 /// * 该端口上已经有服务在响应（复用，不重复起）；
 /// * 音源不是酷狗的两套平台（网易云是另一套服务，本模块不管）；
-/// * 配置里关掉了自动拉起。
+/// * 配置里关掉了自动拉起；
+/// * 后端选了 `native`（**接口在进程内，没有服务可起**）。
 pub fn prepare(config: &Config) -> Result<&'static str> {
     let kind = config.active_source_kind();
+
+    // native 后端下酷狗接口是进程内函数调用，不存在「本机接口服务」这件事。
+    // 这一步必须排在最前面：否则下面会去探测 3000/3001 端口，发现没有服务就
+    // 尝试下载安装并拉起 Node——正是 `--api native` 要避免的。
+    if config.api_backend.effective_for(kind) == crate::api::ApiBackend::Native {
+        tlog!(
+            LEVEL_INFO,
+            "[bootstrap] 后端为 native，{} 的接口在进程内实现，跳过本地服务引导",
+            kind.label()
+        );
+        return Ok("后端为 native，接口在进程内，无需本机服务");
+    }
+
     let Some((name, platform)) = instance_of(kind) else {
         // 两种「不托管」的原因不同，话也要分开说：汽水是**本来就没有**本机服务
         // （它直连公网），说成「不托管」会让人以为要去别处准备一个。
@@ -226,7 +240,16 @@ pub fn prepare(config: &Config) -> Result<&'static str> {
 /// 一次 `npm install` 要几十秒，界面会僵住——而依赖目录是各平台共用的，只要启动时
 /// 装过一次，切过去只需要 spawn 一个进程（一到两秒）。真的没装过时，返回的错误会
 /// 告诉用户去跑一次 `--api-start`。
-pub fn ensure_running(kind: SourceKind, api_base: &str, api_dir: Option<&Path>) -> Result<()> {
+pub fn ensure_running(
+    backend: crate::api::ApiBackend,
+    kind: SourceKind,
+    api_base: &str,
+    api_dir: Option<&Path>,
+) -> Result<()> {
+    // native 后端切过去不需要服务（理由同 [`prepare`]）。
+    if backend.effective_for(kind) == crate::api::ApiBackend::Native {
+        return Ok(());
+    }
     let Some((name, platform)) = instance_of(kind) else {
         return Ok(());
     };
@@ -459,7 +482,7 @@ fn candidate_dirs(explicit: Option<&Path>) -> Vec<PathBuf> {
     if let Some(dir) = explicit {
         dirs.push(dir.to_path_buf());
     }
-    // 发行包（AUR / deb）把服务连同生产依赖装在这里
+    // 发行包（deb / tarball）把服务连同生产依赖装在这里
     dirs.push(PathBuf::from("/usr/share/kugou-tui/api/kugou"));
     // 本程序自己安装的位置
     dirs.push(install_dir());
@@ -712,7 +735,14 @@ fn spawn(
 /// 读 PID 文件的第一个字段。
 fn read_pid_file(path: &Path) -> Option<u32> {
     let content = fs::read_to_string(path).ok()?;
-    content.split_whitespace().next()?.parse().ok()
+    // PowerShell 5.1 的 Set-Content 可能写出带 UTF-8 BOM 的文件。BOM 不是空白字符，
+    // split_whitespace 去不掉，会让首字段变成 "\u{feff}1234" 而 parse 失败，所以先剥掉。
+    content
+        .trim_start_matches('\u{feff}')
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
 }
 
 /// 结束指定 PID 的进程。
@@ -785,8 +815,7 @@ fn run_npm(dir: &Path) -> Result<()> {
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if Instant::now() > deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_npm_child(&mut child);
                     return Err(AppError::Service(format!(
                         "npm install 超过 {} 分钟仍未结束（多半是网络不通）。手动重试：cd \"{}\" && npm install --omit=dev",
                         INSTALL_TIMEOUT.as_secs() / 60,
@@ -821,6 +850,28 @@ fn npm_command() -> Command {
     {
         Command::new("npm")
     }
+}
+
+/// 结束 npm 子进程并回收它。
+///
+/// Windows 上子进程是 `cmd /C npm` 的 cmd.exe，`Child::kill` 只杀得掉 cmd.exe，
+/// 真正的 node.exe（npm-cli.js）会留在后台继续装——所以走 `taskkill /T /F` 把
+/// 整棵进程树一起收（与 [`kill_pid`] 同一做法）。超时后必须真的收干净，否则用户
+/// 以为已经中断，后台却还在改 node_modules。
+fn kill_npm_child(child: &mut std::process::Child) {
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
 }
 
 /// 安装锁：防止两个 kugou-tui 同时往同一个目录里 `npm install`。
@@ -876,5 +927,74 @@ struct LockGuard {
 impl Drop for LockGuard {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::ApiBackend;
+    use crate::config::Config;
+
+    /// native 后端下 `prepare` 必须**在探测端口之前**就返回。
+    ///
+    /// 这条是阶段 1 验收的核心之一：如果顺序反了，3000/3001 上没服务时它会去
+    /// 下载安装并拉起 Node——正是 `--api native` 要杜绝的事。测试用的是
+    /// `Config::default()`（api_base 指向 127.0.0.1:3000），本机此刻没有服务，
+    /// 所以「先探测」的实现在这里会走到下载分支而失败/超时，能真正区分两种实现。
+    #[test]
+    fn native_backend_skips_service_bootstrap() {
+        let config = Config {
+            api_backend: ApiBackend::Native,
+            // 就算顺序写错，也不让它真去下载
+            api_auto_start: false,
+            ..Config::default()
+        };
+
+        let outcome = prepare(&config).expect("native 下 prepare 不该失败");
+        assert!(outcome.contains("native"), "实际：{outcome}");
+    }
+
+    /// `ensure_running` 在 native 下同样什么都不做（切音源时会走这里）。
+    #[test]
+    fn native_backend_skips_ensure_running() {
+        let result = ensure_running(
+            ApiBackend::Native,
+            SourceKind::KugouConcept,
+            "http://127.0.0.1:3001",
+            None,
+        );
+        assert!(result.is_ok(), "native 下不该尝试拉起服务：{result:?}");
+    }
+
+    /// 非酷狗音源在 native 配置下仍按 node 处理：它们没有 native 实现，
+    /// 但也不该被本模块拉起服务（网易云/汽水本来就不由本程序托管）。
+    #[test]
+    fn non_kugou_sources_are_not_managed_even_with_native() {
+        for kind in [SourceKind::Netease, SourceKind::Sodam] {
+            assert!(!manages_service(kind), "{} 不该被托管", kind.label());
+            assert!(
+                ensure_running(ApiBackend::Native, kind, "http://127.0.0.1:3002", None).is_ok()
+            );
+        }
+    }
+
+    /// PID 文件可能由 PowerShell 的 Set-Content 写出，5.1 下会带 UTF-8 BOM；
+    /// 带不带 BOM 都必须能读出 PID，否则 `--api-stop` 会找不到自己拉起的服务。
+    #[test]
+    fn pid_file_parses_with_and_without_a_bom() {
+        let path = std::env::temp_dir().join(format!("kugou-tui-pid-{}", std::process::id()));
+
+        std::fs::write(&path, "4321 3002").expect("写临时 PID 文件");
+        assert_eq!(read_pid_file(&path), Some(4321), "普通 PID 文件应能解析");
+
+        std::fs::write(&path, "\u{feff}4321 3002").expect("写带 BOM 的临时 PID 文件");
+        assert_eq!(
+            read_pid_file(&path),
+            Some(4321),
+            "带 BOM 的 PID 文件也要能解析"
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 }

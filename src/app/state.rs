@@ -108,23 +108,6 @@ impl Tab {
         }
     }
 
-    /// 侧边栏图标。Nerd Font 与 ASCII 的取舍见 [`crate::ui::icons`]。
-    pub fn icon(self) -> &'static str {
-        use crate::ui::icons;
-        match self {
-            Self::Home => icons::home(),
-            Self::Search => icons::search(),
-            Self::Playlists => icons::playlists(),
-            Self::Artists => icons::artist(),
-            Self::Ranks => icons::rank(),
-            Self::Cloud => icons::cloud(),
-            Self::Queue => icons::queue(),
-            Self::Visualizer => icons::visualizer(),
-            Self::Sources => icons::sources(),
-            Self::Settings => icons::settings(),
-        }
-    }
-
     /// 侧边栏分组标题。10 个标签平铺会让侧边栏像一堵文字墙，分组后才扫得动。
     ///
     /// 分组**不改变** `ALL` 的顺序——顺序决定数字键 1-9/0 的落点，动了会让
@@ -156,11 +139,6 @@ impl Tab {
         } else {
             (b'1' + index as u8) as char
         })
-    }
-
-    /// 侧边栏与状态栏共用的「第 N 个标签」文本。
-    pub fn position_text(self) -> String {
-        format!("{}/{}", self.index() + 1, Self::ALL.len())
     }
 
     /// 数字键 → 标签页。`0` 表示第 10 个（可视化），其余按 1 基索引。
@@ -826,7 +804,7 @@ impl std::fmt::Debug for Avatar {
 ///
 /// # 为什么要滚动
 ///
-/// `CHEATSHEET` 有 38 条，34 行的终端只放得下 26 条。早先这里只有一个 `bool`，
+/// `CHEATSHEET` 有 40 条，34 行的终端只放得下 26 条。早先这里只有一个 `bool`，
 /// 面板是模态的、按键全被吞掉，于是最后 12 条（Space / n·p / ←·→ / +·- / m / r /
 /// l / [·] / W——**整块播放控制**）在常见尺寸下永远看不到，也没有任何提示说还有内容。
 ///
@@ -937,6 +915,12 @@ pub struct LyricPane {
     pub hash: Option<String>,
     pub lyric: Lyric,
     pub load: LoadState,
+    /// 这首歌**确定没有歌词**（接口明确回「找不到」，典型是纯音乐）。
+    ///
+    /// 与「取失败」严格区分：`load` 成功但没有内容、且这个标记为真时，面板说
+    /// 「纯音乐，请欣赏」；没有这个标记则说「暂无歌词」（接口通了但内容为空）。
+    /// 取失败（网络 / 服务端错误）走 `load.error()`，与这里无关。
+    pub instrumental: bool,
     /// 已渲染过的当前行下标，用于只在换行时重新计算居中偏移。
     pub active_line: Option<usize>,
 
@@ -1895,6 +1879,7 @@ mod tests {
 
     fn lyric_with(times: &[u64]) -> Lyric {
         Lyric {
+            text: String::new(),
             lines: times
                 .iter()
                 .map(|time_ms| LyricLine {

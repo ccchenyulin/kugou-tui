@@ -53,51 +53,6 @@ fn icon(nerd: &'static str, ascii: &'static str) -> &'static str {
 }
 
 // ==================================================================
-// 侧边栏 / 标签页图标
-// ==================================================================
-
-pub fn search() -> &'static str {
-    icon("\u{f002}", ">")
-}
-
-pub fn playlists() -> &'static str {
-    icon("\u{f001}", "*")
-}
-
-pub fn artist() -> &'static str {
-    icon("\u{f2bd}", "@")
-}
-
-pub fn rank() -> &'static str {
-    icon("\u{f080}", "#")
-}
-
-pub fn cloud() -> &'static str {
-    icon("\u{f0c2}", "~")
-}
-
-pub fn home() -> &'static str {
-    icon("\u{f015}", "H")
-}
-
-pub fn queue() -> &'static str {
-    icon("\u{f03a}", "=")
-}
-
-pub fn visualizer() -> &'static str {
-    // 面积图（area-chart）比波形（U+F6FE）更像频谱柱状，码点也更常见
-    icon("\u{f1fe}", "^")
-}
-
-pub fn sources() -> &'static str {
-    icon("\u{f0ec}", "<>")
-}
-
-pub fn settings() -> &'static str {
-    icon("\u{f013}", "!")
-}
-
-// ==================================================================
 // 播放条图标
 // ==================================================================
 
@@ -130,16 +85,6 @@ mod tests {
     /// 两个分支都必须返回非空——ASCII 回退要是空字符串，界面就塌一块。
     #[test]
     fn icons_are_never_empty() {
-        assert!(!search().is_empty());
-        assert!(!playlists().is_empty());
-        assert!(!artist().is_empty());
-        assert!(!rank().is_empty());
-        assert!(!cloud().is_empty());
-        assert!(!home().is_empty());
-        assert!(!queue().is_empty());
-        assert!(!visualizer().is_empty());
-        assert!(!sources().is_empty());
-        assert!(!settings().is_empty());
         assert!(!now_playing(true).is_empty());
         assert!(!now_playing(false).is_empty());
         assert!(!loading().is_empty());
