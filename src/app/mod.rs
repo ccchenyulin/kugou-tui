@@ -119,6 +119,9 @@ pub struct App {
     /// 的定期保存兜底——只在退出时存的话，非正常退出就丢进度了。
     last_session_save: Instant,
 
+    /// 上一次内存采样。只在 `KUGOU_TUI_MEM_TRACE=1` 时有意义（见 `App::tick`）。
+    last_mem_trace: Instant,
+
     /// 切换输出设备后要续播的曲目与位置。
     ///
     /// 换设备是在音频线程里重建设备，正在播的那首会停。这里记下「刚才在放什么、
@@ -137,6 +140,17 @@ pub struct App {
     /// 边下边播断流时我们会从断点重来一次；这个记号保证同一首只自动兜一次，
     /// 免得网络真的断了还反复重试。按曲目存放：换了歌就重新允许。
     stream_retried: Option<String>,
+
+    /// 等用户手动重试的断点：`(曲目, 位置)`。
+    ///
+    /// 自动兜过一次仍然断流时，自动续播不再介入（再兜只会刷屏），但**断点必须留着**：
+    /// 之前这里只打一句「按 Space 重试」就返回，而 Space 走的是 `toggle_playback` 的
+    /// 普通起播路径——位置取 `state.resume`（会话恢复用的，此时是 `None`），于是从 0
+    /// 开始。提示说的是「重试」，实际做的是「从头再来一次」。
+    ///
+    /// 不复用 `state.resume`：那是「上次退出时听到哪」的会话进度，语义不同，混在一起
+    /// 会把一次断流位置写成会话进度存进配置。
+    pending_stream_retry: Option<(crate::api::model::Song, u64)>,
 
     /// MPRIS 句柄。没有 D-Bus 时为 `None`（不影响播放，只是桌面集成不可用）。
     ///
@@ -234,9 +248,11 @@ impl App {
             runtime,
             last_frame_at: Instant::now(),
             last_session_save: Instant::now(),
+            last_mem_trace: Instant::now(),
             pending_device_resume: None,
             active_stream: None,
             stream_retried: None,
+            pending_stream_retry: None,
             #[cfg(unix)]
             mpris,
             #[cfg(unix)]

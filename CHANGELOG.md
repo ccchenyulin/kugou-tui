@@ -4,6 +4,411 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.5.0] - 2026-10-03
+
+### 新增
+
+- **汽水音乐（Soda Music）音源**，数据面由
+  [libresoda](https://github.com/sodahub-org/libresoda) 提供——汽水官方客户端
+  [SodaM](https://github.com/sodahub-org/sodam) 用的同一套库。登录、搜索、取流、
+  解密、歌词全部委托给它，行为与官方客户端一致，上游修好的问题也跟着修好。
+  新增 git 依赖 `libresoda`（未发布到 crates.io，按 `rev` 锁定）。
+
+  与前三个音源有两处根本不同：
+
+  - **直连公网**（`api.qishui.com`），本机不跑接口服务。`bootstrap` 不为它准备
+    服务，首次使用不需要 `--api-start`，也不需要 Node.js；
+  - **下发的音频是加密的**（MP4/CENC）。取链要把「整首下载 → 解密 → 落盘」做完
+    才能交给播放器，所以汽水的歌**不能边下边播**，首播要多等一个完整下载。
+    这是加密方案决定的，不是实现取巧。
+
+- **VIP 整曲与无损开箱即用**。汽水的取流分两层：Web 端点只回 30/60 秒试听，
+  App 端点要应用级签名才回整曲，且**缺签名时返回「HTTP 200 + 空 body」**——
+  现象很像「会员没生效」，其实差的是签名。默认启用上游 SodaM 内置的公共签名
+  服务，所以不必抓包、不必自己部署；也可用 `[sources.sodam_app].signer_url`
+  换自建的，或填 `none` 显式关掉（只留试听与免费曲目）。
+
+- **扫码登录**（按 `L` 选汽水）。走 libresoda 内置的 **CDP 签名页**，直控本机
+  Chromium，**不需要 Node**——这也是必须借道浏览器的原因：护照接口要
+  `a_bogus`，且确认后的登录态只存在于那个浏览器会话的 cookie jar 里。
+  登录成功后拿到的是**会话 cookie**，写进 `[sources.sodam].cookie`。
+
+  设备指纹**可以留空**（走签名服务时签名侧有自己的设备身份），
+  手填 cookie 也仍然可用。
+
+- **降级如实说明**：取流按「先完整、后音质」择优——要无损但只拿得到 128k
+  整曲时选整曲，并在状态栏说明「实际音质 standard」；只有试听时明确提示
+  是否因为会员。不会出现界面标着 flac、耳朵听 128k 却查不出原因的情况。
+
+- **CLI**：`--sodam-cookie` / `--sodam-device-id` / `--sodam-iid` /
+  `--sodam-signer-url` / `--sodam-signer-token` / `--sodam-x-helios` /
+  `--sodam-x-medusa`，各带 `SODAM_*` / `QISHUI_SIGNER_*` 环境变量。
+  逐项覆盖而非整块替换（只想临时补一项不会把已配的抹掉），空串与纯空白按
+  「没传」处理。
+
+- **下载器支持 `file://`**：汽水解密后的产物走本地复制进音频缓存，于是缓存
+  查找、容量回收、下一首预取全都照常生效，不必为汽水单开一套缓存逻辑。
+
+### 变更
+
+- `SourceKind` 新增 `Sodam`；`SourceSet` 新增 `sodam` 与 `sodam_app` 两个字段。
+  老配置里没有这些段时走 `Default`，`normalize()` 补上公网地址并**置为启用**。
+- 音源管理页对直连公网的音源标注「公网直连」，避免用户以为本机该有个服务在跑。
+- 启动脚本（bash 与 PowerShell 两份）新增 `sodam` 分支并引入 `NEEDS_SERVICE`：
+  选中汽水时整套探活/拉起/等就绪全部跳过。此前它落进兜底分支，会去拉
+  KuGouMusicApi 并提示「未运行，正在启动…（端口 3000）」。
+- **云端歌单、歌单详情、用户资料、会员状态全部接上**。此前它们对汽水一律返回
+  「不支持」，表现出来就是「登录上了但所有功能都没生效」。真因是分派层没接，
+  不是汽水没有这些接口。现在都走 libresoda 的公开实现（get_user_playlists /
+  get_playlist_songs / fetch_pc_me / is_vip_account），Capability 的
+  catalog / cloud / vip 一并改为真。
+
+  **三项确实没有对应接口，保持明确报错**（核过 libresoda 代码，不是漏接）：
+  歌单广场（get_recommended_playlists 与 get_playlist_categories 在上游就是
+  Unsupported，只有歌单搜索可用）、歌手列表（只有按 id 查，没有热门歌手列表）、
+  排行榜（无等价端点）。报错文案里写清了原因与替代做法。
+
+### 修复
+
+- **保存配置不再覆盖汽水的登录凭据**。`Config::save()` 第一件事是调
+  \`sync_active_source()\`，而它会用顶层 \`cookie\`（酷狗的地盘，汽水时恒为
+  \`None\`）覆盖该音源档案里的 cookie——于是「登录成功 → 立刻保存 → 被覆盖」，
+  表现出来就是**登录上了、一重启却说没登录**，配置文件里也找不到 cookie 这个键。
+  汽水现在不参与镜像；酷狗/网易云的老路径保持原样，两侧都有测试钉住。
+
+- **登录后立刻查会员/资料不再失败**。\`apply_server_cookie\` 此前写的是
+  \`self.client_for(Sodam)\` 再 \`set_cookie\`，但音源已激活时 \`client_for\`
+  返回的是 \`self.api.clone()\`——改副本对 \`self.api\` 毫无影响，于是紧接着的
+  请求仍用没有 cookie 的客户端，服务端回 \`1000016 登录状态已失效\`。
+
+- **二维码改成纯黑白**。样式原本用 ANSI 调色板的 0/15 号（\`Color::Black\` /
+  \`Color::White\`），而**终端可以重映射它们**（kitty 就允许改 ANSI 0-15），
+  于是「黑模块」可能被画成灰色，二维码很淡、手机扫不上——看着像终端或字体的
+  问题，其实是能修的。改成写死的 RGB 纯黑纯白。二维码只有两个颜色，
+  而这两个必须是纯黑纯白，不跟随主题是有意的。
+
+- **二维码压小**。模块数只由「内容长度 + 纠错级别」决定，内容（服务端下发的
+  扫码地址）改不了，所以降纠错级别是唯一杠杆：M（~15%）→ L（~7%），
+  屏幕显示是理想条件，L 足够；静默区同时从 2 个模块收到 1 个。
+  实测汽水（193 字符地址）从约 59×30 降到 51×26。汽水的地址是酷狗的 5 倍长，
+  所以它本来就比酷狗大——不是渲染问题。
+
+- **二维码按终端尺寸自适应**。汽水的扫码地址比酷狗长得多，编出来的二维码
+  版本更高，而弹窗尺寸是由二维码算出来的——于是它撑满了整个终端。
+  二维码不能缩放（行数由内容长度决定，再密就只能扭曲比例、扫不出来），
+  所以改成判断装不装得下：装不下就不画，换成一句写明「需要约 N 列 × M 行」的
+  提示，并给出两条出路（放大终端重试，或直接手填 cookie）。
+  画一个被裁掉的二维码比不画更糟——那个码扫不出来，用户只会反复试。
+
+- `ApiClient` 新增 `cookie()` 取值方法。音源模块需要用它拿登录态重建自己的
+  客户端——「有哪些身份凭据」是通用信息，不该被 HTTP 层藏起来。
+
+## [0.4.8] - 2026-10-02
+
+### 文档
+
+本轮**只动文档**，代码与 0.4.7 完全一致。之所以要单独发一版，是因为 crates.io 页面渲染的是
+**包里那份 README**——文档改了不发版，页面就不会变。
+
+- **全部文档按「这份是给谁看的」重写了一遍**，合计 1844 → 1473 行：
+
+  - README 192 → 162：删掉塞进来的实现论证（Windows 为何不用 CMake / NASM、边下边播的
+    4 MiB 窗口、内存测量方法），安装一节改成 cargo 优先；
+  - INSTALL 590 → 425：删掉与程序内建功能重复的 fish workflow（探活 / 拉起 / 退出收摊现在
+    程序自己做，只差一个 `git pull`），压缩 Windows 与 macOS 段的解释性段落；
+  - CONFIGURATION 318 → 256：配置项里展开的「为什么」压成一句，论证留给 DESIGN.md；
+  - USER_GUIDE 335 → 230：合并界面布局、桌面集成两节的重复描述；
+  - FAQ：补上 0.4.7 引入的四个真实问题——找不到 node、首次启动为什么要等半分钟、服务起不来
+    / 端口被占、内存只涨不落怎么查；
+  - CONTRIBUTING：代码结构树补齐（`bootstrap.rs` / `mpris.rs` / `tray.rs` / `window.rs` /
+    `source/` 等），发版一节补上 crates.io 这一步（`scripts/release` 不含它）；
+  - `DESIGN.md` 与 `MAINTENANCE.md` **刻意不动**：它们是「为什么」的归档，详细本身就是价值。
+
+- 文档里的事实做了一轮机器核验：43 条内部链接与锚点、14 处 `kugou-tui --xxx` 用法（对齐
+  `cli.rs` 的 17 个长参数）、全部 `KUGOU_*` 环境变量与配置项名，均与代码一致。
+
+## [0.4.7] - 2026-10-02
+
+### 新增
+
+- **接口服务的自动引导**（新增 `src/bootstrap.rs`）。第一次启动会自己把 KuGouMusicApi
+  准备好并拉起，用户全程只敲 `kugou-tui`——这也是本版本发布到 crates.io 的前提。
+
+  为什么需要它：`cargo install` 只放一个二进制到 `~/.cargo/bin`，既不带那个 Node.js
+  服务，也没有 post-install 钩子可用。此前「装完了却不能用」：用户还得自己 clone
+  仓库、装依赖、按平台起两个实例。
+
+  - **探活优先**：端口上已经有服务就**直接复用，退出时不碰它**——它可能是用户自己
+    起的，也可能是另一个 kugou-tui 实例起的；
+  - 缺服务时才动手，按「配置的 `api_dir` → `/usr/share/kugou-tui/api/kugou`（发行包）
+    → `~/.local/share/kugou-tui/api/kugou` → `~/KuGouMusicApi`」找，都没有才下载钉住
+    的提交（`a5a9801`）并 `npm install --omit=dev`；
+  - 只为**当前音源**拉起一个实例；切到另一个平台时补起（只 spawn，不再走安装——界面
+    已经画在屏幕上，被 npm 冻住几十秒不可接受）；
+  - **退出版图**：自己拉起的实例随退出停止，不留常驻 node。`--api-start` 是显式要求
+    常驻的例外，用 `--api-stop` 停；
+  - 安装带文件锁，两个实例同时首次启动不会往同一个 `node_modules` 里写。
+
+  **前提没变：机器上要有 Node.js（>= 12）**。没有 node 时程序会直接说清楚并退出——
+  Rust 这一侧变不出 Node 运行时。
+
+- 配置项 `api_auto_start`（默认 `true`）与 `api_dir`；命令行 `--no-api-start` /
+  `--api-start` / `--api-stop`；环境变量 `KUGOU_API_AUTO_START` / `KUGOU_API_DIR`。
+- crate 发布到 [crates.io](https://crates.io/crates/kugou-tui)，`cargo install kugou-tui`
+  可用。
+
+### 修复
+
+- **「按 Space 或 Enter 重试」此前是一句空头支票**（`app/update.rs` 的
+  `StreamInterrupted` 分支）。边下边播第二次断流后只打一句提示就返回，没有任何按键
+  接得住它：
+
+  - `Space` 走 `toggle_playback()` 的普通起播路径，位置取 `state.resume`（会话恢复用
+    的，此时为 `None`），于是**从头播**，不是从断点续；
+  - `Enter` 走 `activate()`，按 `(Tab, Focus)` 分派成「播放选中歌曲 / 打开歌单」，与
+    断掉的那首无关；
+  - 而且 `start_playback` 只在 hash **不同**时才清 `stream_retried`，手动重播同一首
+    之后额度不恢复，再断流连自动兜底都没有。
+
+  现在断流后把断点存进 `pending_stream_retry`，按 `Space` 从那里续播并归还自动兜底
+  额度；提示改为「按 Space 从断点重试」——`Enter` 的语义是「进入下一层 / 播放选中项」，
+  保持可预测，不再写进提示。换歌与主动停止都会作废这个断点。
+
+- **流式播放「自然播完」时没有取消下载任务**（`app/update.rs` 的 `TrackFinished`）。
+  那里只写了 `active_stream = None`——放下的只是我们手里那一份 `Arc`，后台下载任务
+  自己还持有一份，会继续把整首往内存窗口和 `.part` 文件里灌。切歌与主动停止两条路
+  都调了 `cancel()`，唯独最常见的一条漏了。同时把「归还空闲页」的 `malloc_trim`
+  挪到这里：它原先只在下一首 `load` 时执行，那时新的分配已经发生，刚还回去的页又
+  被占回来了。
+
+- **「听久了内存只涨不落」的根因：mmap 阈值定得太高**（`src/main.rs`）。原先钉在
+  1 MiB，而酷狗封面解码出来是 300–900 KB 的位图，**正好落在它下面**，于是走 brk
+  arena——free 只把页还给 arena，RSS 停在峰值，要等下一次 `malloc_trim` 才可能收回，
+  这就是「没有泄漏但收不回」的来源。改成 256 KiB 后这些块直接走 mmap，`free` 即
+  `munmap`，无条件还内核，不再依赖 trim 的时机。低于阈值的分配行为不变。
+
+  依据是 `audio::engine::tests::mmap_threshold_effect_probe` 的对照数据（分配尺寸
+  随轮次变化，两段都不 trim）：1 MiB 下 20 轮 +192 → +332 KiB 单调上升后停住，
+  256 KiB 下恒定 +0。**固定尺寸测不出这个**——那总能复用同一批 chunk。
+
+- **MPRIS 推送不稳**（`src/mpris.rs`、`src/app/desktop.rs`）。三个独立原因，都不是
+  「信号没发出去」那么简单：
+
+  1. **`mpris:trackid` 是一个固定路径**（`/org/kugou_tui/Track/1`）。MPRIS 规范把
+     它定义为「曲目的唯一身份」，客户端（DMS / Quickshell / 各类状态栏）靠它判断
+     「换歌了没有」。固定不变的结果是：元数据明明变了，按规范实现的客户端仍认为还是
+     同一首，标题和封面停在上一首。现在按曲目 hash 派生（脏字符过滤后不足则回落到
+     占位路径）。
+  2. **信号发送失败被 `let _` 吞掉、连接断了也不重连**。session bus 重启
+     （`systemctl --user restart dbus`、注销再登录）或总线名被别的实例抢走之后，旧连接
+     上的信号会一直发不出去，而 `connected` 仍是 true——主线程照旧往里写快照，桌面
+     组件却永远停在最后一帧，日志里一句都看不到。现在连续三次发不出去即判定连接已坏，
+     置 `connected = false` 并在 5 秒后重连。托盘侧早有「每 5 秒对账自愈」，MPRIS 侧
+     一直没有，这次补上。
+  3. **位置走了 `PropertiesChanged`**。规范里 `Position` 是不通过它通知的属性：它一直
+     在动，客户端按自己的时钟推算，只有跳变（seek）才需要被告知——那走 `Seeked`。
+     早先发的是 `position_changed`，属于非标准用法；严格些的客户端收到不该出现的属性
+     变化反而会重置本地推算，进度条就跳。现在跳变发 `Seeked`，并把它从
+     `PropertiesChanged` 的判据里摘掉。
+
+### 诊断
+
+- `KUGOU_TUI_MEM_TRACE=1` 每 5 秒把 RSS 连同「可能累积的东西」的计数写进日志
+  （`logger::rss_kib` + `App::tick`）：流式下载登记表、播放队列长度、命中区容量、
+  当前曲目。光有 RSS 只能看出涨了，这些计数才能把范围收到某一条路径上。
+  与 `KUGOU_TUI_DEBUG` 分开：后者会连按键日志一起打开，反而把趋势淹掉。
+- 三个 `#[ignore]` 探针，各自打印每轮 RSS：
+  `ui::views::player::tests::cover_swap_rss_probe`（反复换封面）、
+  `audio::engine::tests::file_swap_rss_probe`（反复装载本地文件）、
+  `audio::engine::tests::mixed_alloc_rss_probe` 与
+  `mmap_threshold_effect_probe`（尺寸混杂的分配 vs. 阈值对照）。
+  跑法：`cargo test --release <名字> -- --ignored --nocapture`。
+
+  实测：换封面 40 轮、装载 30 轮、混合分配 40 轮，RSS 都在头两轮内落定后**恒定**
+  ——换歌路径没有对象泄漏，剩下的就是「页还没还」。
+
+## [0.4.6] - 2026-09-29
+
+### 新增
+
+- **托盘从「注册一次就完」补成完整集成**（`src/tray.rs`，+660 行）。此前托盘的
+  菜单、滚轮、状态反馈都没有，且注册失败一次就永久放弃：
+
+  - **滚轮控制**：图标上垂直滚动调音量、水平滚动快进 / 快退。只看 delta 的
+    **符号**不按格数缩放——宿主给的绝对值不统一（有的 ±1、有的 ±120），
+    按格数放会时大时小。端到端测试补了三条派发断言（上滚 / 下滚 / 右滚），
+    零位移断言不派发。
+  - **菜单加「退出」**：走正常退出流程（先保存配置与播放进度），与按 `q` 等价。
+    此前最小化（niri）之后只能回终端按 `q`。
+  - **播放 / 暂停、静音两项跟着状态切换措辞**：播放中显示「暂停」，其余显示
+    「播放」；静音时显示「取消静音」。标签变化时菜单 revision +1 并广播
+    `LayoutUpdated` + `ItemsPropertiesUpdated`（只含这两个 id）——两个信号都发
+    是因为有的宿主只认其中一个。菜单补了分隔线把播放控制与其余项隔开。
+  - **图标跟随播放状态**：暂停 / 停止时换**调暗**的同一张图（只压 alpha 到
+    45%，颜色不变），并广播 `NewIcon`。加载态算「即将出声」，跟播放一样用亮图
+    ——缓冲的两秒图标灰掉看起来反而像卡住。两套图启动时一次预渲染。
+  - **注册自愈**：托盘线程从「注册失败即放弃」改为每 5 秒对一次
+    `RegisteredStatusNotifierItems` 账，名单里没有自己就（重新）注册。修掉的
+    场景：状态栏比播放器后启动、面板重启把 watcher 换了一轮——此前托盘要重启
+    播放器才会出现，现在最多 5 秒自动补上。日志只在连接状态**翻转**时记一条，
+    面板一直不在时不会每 5 秒刷一行 WARN。
+  - **图标改版**：单音符（符头 + 符干）改为连尾双音符（♫），源
+    `assets/tray.svg` 重画，内嵌 PNG 从 64px 提到 256px；预渲染尺寸从 22 / 64
+    两档扩到 16 / 22 / 24 / 32 / 48 / 64 六档——少给尺寸会让某些宿主拿最接近
+    的一档硬放大。
+
+- **首页 / 可视化页的 ↑/↓ 切歌**（`app/update.rs` 的 `MoveUp` / `MoveDown` 分派）。
+  这两页没有可导航的列表，方向键原本是空的；它们又正是「看着歌词 / 频谱听歌」的
+  页面，切歌是最高频操作，所以划给播放控制。**有列表的页面（搜索 / 歌单 / 歌手 /
+  榜单 / 云端 / 队列 / 设置）不改**——抢走列表导航等于抢走核心交互。
+  `CHEATSHEET` 补一条说明，漏项能被既有的键位表测试查出来。
+
+- **`audio/resample.rs`：hi-res 母版的抗混叠重采样**。rodio 的
+  `SampleRateConverter` 是**无滤波的线性插值**（模块自述 "simple linear
+  interpolation"）：44.1k → 48k 这类上采样没问题，但 88.2 / 96 / 176.4 kHz 的
+  母版在 48 kHz 设备上是**降采样**——超过 24 kHz 的内容会原样镜像折叠回可听
+  频带，高频还多一层约 1 dB 滚降。现在用 rubato 的 sinc 重采样器
+  (`sinc_len=256`、`f_cutoff=0.95`、BlackmanHarris2 窗) 替掉线性插值，并把
+  `sample_rate()` 声明成设备率，rodio 侧的转换随之成为恒等变换。上采样不包装
+  （无混叠问题，不值得付 sinc 的 CPU）。**已知边界**：结尾会多出至多一块
+  （约 30 ms）的静音尾——`FixedIn` 的输入块定长，最后一块不足的部分以零填充。
+  听不见，也不影响进度条（时长声明来自内层源）。
+
+### 修复
+
+- **进度条只能往前拖，回拖 / 快退 / 歌词回跳全部失效**（`audio/engine.rs::reload_at`
+  与 `audio/streaming.rs::reader_from_start`）。病根在解码器：symphonia 的 FLAC
+  解码器对**没有 SEEKTABLE** 的文件不能向后跳，demuxer 直接返回 `ForwardOnly`。
+  酷狗给的无损档实测正是这种（`ffprobe` 读不到 seektable，原始包扫描也找不到
+  `SEEKTABLE` 块），于是「往后拖」全灭。修复是绕开它：用同一份数据源**重建
+  解码器**，新解码器从文件头出发，跳到任意位置都是前向跳，必然成功（代价一次
+  几十毫秒重建）。流式缓冲那一路额外要求「归零读指针的克隆」——原缓冲的读指针
+  停在老解码器的位置上，直接克隆会让新解码器从半截开始，「跳回前面」又退回
+  向后 seek。
+
+- **hi-res 母版听着比别的客户端「毛」**——上一条重采样修的就是它。《起风了》
+  是 88.2 kHz 母版，`highpass=24k` 后仍有约 −50 dB 的真实内容，而它与
+  moekoemusic 拿到的文件**音频 MD5 完全相同**——两边听感不同的病根在降采样
+  那一步，不在文件选择。抗混叠有测试钉住：30 kHz 音降采样后必须被压到 −26 dB
+  以下，带内 1 kHz 保幅，seek 后滤波器状态必须重建。
+
+- **点歌词总是跳到隔壁句**（`ui/views/player.rs` 的命中区登记）。`hit_zones`
+  的 row 是**屏幕行号**，`index_at` 先做 `row - rect.top()`；正文明细区上沿取错
+  时，整块命中区会整体偏一行或几行。修复把命中区锚定在**这一帧真正渲染的
+  布局**上：行数取「可视行」与「内容剩余行」的小者，上沿取内容区顶 + 实际
+  内边距（`offset < first_display` 时内容整体下移的行数）。
+  **实测**（pty 直驱 harness，绕开 tmux 对鼠标上报的改写）：暂停后同一屏幕行
+  连点 3 次，`time_ms` 三次全同；`row - top + first == display` 对 21 行全部
+  自洽；相邻屏幕行的 `display` 步长恒为 1；从上往下 `ms` 单调不减。
+
+- **`flac` 档给 mp4 容器时的静默串味**（`api/catalog.rs`）。mp4 是另一条转码
+  链路的产物，母版和 flac / mp3 不同，播它就是「听着和别的客户端不一样」。
+  参照 moekoemusic 的 `extName == 'mp4'` 判定，遇到 mp4 候选落到下一档。
+
+- **内存破百 MB 不回落**（`src/main.rs` + `audio/engine.rs`）。glibc 默认用
+  **动态** mmap 阈值：一次大分配（封面解码、下载缓冲）会把阈值抬到它的大小，
+  之后同样大的块改从 arena 里切——`free` 只把页还进 arena，RSS 从此抬到历史
+  峰值不回落。现在把阈值钉死在 1 MiB，大块一律 mmap（`munmap` 即还 OS），
+  并在换歌这个天然边界调一次 `malloc_trim`。仅 Unix（Windows 的 MSVC 堆本来
+  就积极归还）。
+
+- **托盘相关文档与实现不符**：`tray.rs` 模块注释与 `USER_GUIDE` 还写着
+  「不实现菜单」「watcher 只在进程启动 / 退出时同步」，与已实现 DBusMenu 与
+  5 秒自愈的代码不符，已改成分键位说明（左键 / 滚轮 / 右键 / 中键 / 图标状态）。
+
+### 测试
+
+本版新增 6 条守护测试，都钉在**移除修复就会立刻失败**的那一层：
+
+| 测试 | 钉住的层 |
+|---|---|
+| `late_song_clicks_do_not_shift_by_the_offset_gap` | 末屏 `offset` 撞上 `max_offset` 后的点击错位 |
+| `hit_zone_top_anchors_to_the_first_content_row` | 命中区上沿 = 内容首行 |
+| `rebuilt_decoder_can_seek_backward_from_the_start` | 重建解码器能前向跳到较早位置并继续出样本 |
+| `backward_seek_lands_near_the_target_not_at_the_start` | 归零读指针后能跳到目标而非回到开头 |
+| `ultrasonic_tone_is_suppressed_not_aliased` | 30 kHz 被抗混叠压到 −26 dB 以下 |
+| `in_band_tone_passes_with_its_amplitude` | 带内 1 kHz 保幅（±1.5 dB） |
+
+总计 366 → 370 条（另有 1 条 ignored）。
+
+## [0.4.5] - 2026-09-29
+
+### 修复
+
+- **多声道无损文件只播了前两个声道，听到的不是这首歌**（新增 `audio/downmix.rs`，
+  接线在 `audio/engine.rs::build_decoder`）。触发场景：播《东京不太热 (DJ Z新豪版)》
+  （`hash=1953202D07B954E785CA5249E1A64B3C`）时，`flac` 档给的是一个 **4.0 声道**的
+  FLAC，而那个文件里**歌在后两个声道**：
+
+  | 声道 | dBFS | 与同曲 128 kbps mp3 的相关性 |
+  |---|---|---|
+  | ch0 FL | −21.0 | +0.35 |
+  | ch1 FR | −20.6 | +0.39 |
+  | ch2 BL | −11.7 | **+0.90** |
+  | ch3 BR | −12.8 | **+0.89** |
+
+  四路全混与 mp3 的相关性是 +0.999——也就是说前两个声道根本不是这首歌。而 rodio 0.22
+  的 `ChannelCountConverter` 降声道时是「保留每帧前 N 个样本、其余直接丢弃」
+  （`conversions/channels.rs`），于是我们实际只播了 FL/FR，用户听到的是另一段音频，
+  表现成「音频版本和其他客户端（moekoemusic）不一致」。
+
+  现在 `build_decoder` 的两个出口统一过 `downmix::to_stereo`：偶数索引声道 → L、
+  奇数索引声道 → R 取平均，`channels()` 恒为 2（这样 rodio 侧那次转换就成了空操作）。
+  单声道/立体声是恒等变换，不影响绝大多数歌。**实测**（走 `build_decoder` 的真实解码
+  路径、素材是酷狗给的原始文件）：下混结果与正确立体声混音的相关系数从 +0.35 升到
+  **+0.998 / +0.997**。两条守护测试：`decoded_multichannel_files_are_downmixed_to_stereo`
+  用自造的 4 声道 WAV 走一遍 `build_decoder` 并断言 `channels() <= 2`；
+  `the_mixer_hears_the_song_only_because_we_downmixed_first` 用 `rodio::mixer::mixer`
+  搭一个不依赖声卡的 mixer，**对照**证明「源直接进 mixer 会只剩前两个声道」、
+  「先下混再进则听到的是正确混音」——它钉的正是 bug 发生的那一层。两条都是
+  把那层拆掉就立刻失败。
+
+  **取平均而不是求和**：求和更贴近这个文件的立体声母版（mp3 的 L ≈ `FL+BL`），
+  但只要两个声道相关就会削顶；平均天然安全（`|out| <= max|in|`）。代价是这一对
+  声道互不相关（+0.03）而母版是它们的和，所以下混后整体比参照低约 **6 dB**。
+  音量用户可调，削顶是实打实的失真——取轻的那一头。详见 `downmix` 模块顶部。
+
+  顺带修掉同根因的另一处：`LevelMeter` 只采第 0 声道做电平/频谱，4 声道输入时
+  **频谱可视化画的也是错的音频**；下混层放在它前面之后自动跟着对。
+
+- **`/song/url` 的静默降级没人管**（`api/catalog.rs::downgrade_note`）。实测请求
+  `quality=flac` 对没有无损档的歌会回 `status=1` + `extName=mp3` + `bitRate=128000`
+  （3,749,296 B），而 `extract_stream_url` 只检查 `status`——界面会一直标着 flac、
+  实际放 128 kbps，且永远查不出来。现在按「容器 + 码率」粗排一次档位，实际比要的低时
+  给出人话（`音质已降级：请求 flac，服务端实际给了 128 kbps mp3`），经
+  `StreamUrl::reason` 透到界面。`super` 与蝰蛇系列不参与比较（接口层没有可对照的
+  容器/码率），mp3 不报码率时也不下结论——宁可不说，也不能误报；`mp4` / `m4a`（AAC）
+  按「有损」参与比较，所以「设了无损却拿到 AAC」也会报出来（这一条的依据是参照实现
+  moekoemusic 专门挡 `extName == 'mp4'`，不是我们自己实测到的）。
+  回归测试 `song_stream_url_reports_a_silent_downgrade` 用手写服务端端到端跑一遍。
+
+- **降级提示此前会被整个吞掉**（`app/update.rs`）。`StreamUrl::reason` 只在 `is_trial`
+  分支被读，于是「蝰蛇音质没权限、已降到标准档」这条提示从来没显示过。现在非试听分支
+  也会把它作为普通提示报出来。
+
+- **候选音质可能跨版本串味**（`api/catalog.rs::parse_quality_candidates`）。取链时会把手上的
+  多个 hash 逗号拼接一起发给 `/privilege/lite`，响应因此是**多个 item**；老写法把全部 item
+  的 variant 混进一张表、谁先出现谁赢，而服务端并不保证 item 顺序——某个 hash 一旦指向同曲的
+  **另一个版本**（不同版 / 翻唱 / 铃声），就可能挑到别的版本的文件。现在分两遍：先只认与主 item
+  （按 `hash` 认出）同一个 `album_audio_id` 的条目，拿不到才放开到全部——第二遍必须留着，
+  那是「搜索给的 hash 已下架、歌在 `audio_info` 的另一个 hash 下」那条修复路径。
+  回归测试三条：`candidates_never_borrow_a_quality_from_another_version`、
+  `candidates_identify_the_primary_item_by_hash_not_by_position`、
+  `candidates_fall_back_to_other_hashes_when_the_primary_has_nothing`。
+
+### 变更
+
+- **打包脚本在普通 CI 里也跑一遍**（`ci.yml` 的 Linux 与 macOS 两栏）。发行包此前只在
+  `release.yml` 里产出，而那是 tag 推出去之后——**tag 不可撤销**，打包脚本要是漏了文件，
+  只能发一个坏包或者认了。这个项目真踩过：0.3.7 那版漏了三个脚本，非 Arch 用户解压后
+  配不起接口服务。现在任意一次 push 都会打一次发行包并传成 artifact，问题在推 tag 之前
+  就暴露；macOS 那一栏顺带覆盖 `make-release-tarball` 里为 BSD 工具（`readlink`、
+  `shasum`）写的分支——那几段只有在那边才会被执行到。
+
+- `api/model.rs` 里「`audio_id` 拆成两个字段分别存，取链接时挨个试」那段注释与实现不符
+  （只有一个字段，且 `/song/url` 刻意不发送任何 album 系 id）。改成如实描述，
+  免得下一个人照着注释去找一段不存在的重试逻辑。
+
 ## [0.4.4] - 2026-09-28
 
 ### 变更

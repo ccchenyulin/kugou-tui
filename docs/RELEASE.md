@@ -77,6 +77,18 @@ macOS 的二进制要 Apple SDK。
 > 机器上跑不了。要补的话得在同一个 runner 上 `--target x86_64-apple-darwin` 交叉编一份
 > ——那是另一个包名（`x86_64-apple-darwin`），加一个 job 即可，目前没做。
 
+### 打包脚本在普通 CI 里也跑一遍
+
+`release.yml` 是 tag 推出去之后才跑的，而 **tag 不可撤销**——打包脚本要是漏了文件，
+那时只能发一个坏包或者认了。这个项目真踩过：0.3.7 那版发行包里漏了三个脚本，
+非 Arch 用户解压后配不起接口服务。
+
+所以 `ci.yml` 里 Linux 与 macOS 两栏**也各跑一次 `make-release-tarball`** 并把
+`dist/*.tar.gz` 传成 artifact：任何一次 push 都能提前发现打包脚本的问题，
+顺带让「任意一次 push 都有可下载的发行版」。macOS 那一栏尤其不能省——
+脚本里为 BSD 工具（`readlink`、`shasum`）写的分支只有在那边才会被执行到。
+Windows 那一栏本来就在跑 `build-windows.ps1`，三平台因此对称。
+
 时序上有个坑：本地 `scripts/release` 的顺序是「推 tag → 建 Release」，而 tag 一推 CI 就
 起来了——**上传前必须等 Release 出现**。这件事连同幂等（`--clobber`）都收在
 `scripts/upload-release-asset` 里，三个平台共用同一个脚本（Windows runner 上的
@@ -103,6 +115,26 @@ git tag -a v0.5.0 -m "…" && git push origin v0.5.0
 
 > **只推 tag 的代价**：AUR 的 `PKGBUILD` / `.SRCINFO` 不会更新，`CHANGELOG.md` 也不会
 > 被校验。要同时发 AUR 就得跑 `scripts/release`，或者事后手动更新 `~/aur/kugou-tui`。
+
+### 当前状态：AUR 尚未上架，发版一律加 `--no-aur`
+
+AUR 上**还没有 `kugou-tui` 这个包**（`aur.archlinux.org/packages/kugou-tui` 返回 404），
+本地 `~/aur/kugou-tui` 也只是一份没有 `.git` 的草稿目录。因此：
+
+- 发版命令固定为 `./scripts/release --no-aur`；
+- 不加 `--no-aur` 会在前置检查里直接中止（脚本会检查 `$aur_dir/.git` 是否存在），
+  这是有意的——否则流程会先推 main、打 tag（**不可撤销**），再在第 9 步的
+  `git add` 上撞"不是 Git 仓库"，代价白付。
+
+要在 AUR 上架需要先做这几件外部动作（都不在这个仓库里）：
+
+1. 在 AUR 注册账号，把 `~/.ssh/aur.pub` 贴到 My Account → SSH Public Key；
+2. `git clone ssh://aur@aur.archlinux.org/kugou-tui.git`（首次由 AUR 建仓）；
+3. 把本地 `~/aur/kugou-tui` 的 `PKGBUILD` / `.SRCINFO` / `LICENSE` /
+   `kugou-api-package-lock.json` 放进那个仓库并推上去。
+
+做完之后把本文档的这一节删掉，并把 `docs/INSTALL.md` 的「路径二：AUR（计划中，
+尚未上架）」改成正常说明。
 
 **给已经发过的版本补资产**：`workflow_dispatch` 手动指定 tag 即可，例如 0.4.2 发布时
 这个工作流还不存在：

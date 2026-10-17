@@ -17,26 +17,77 @@ use crate::ui::theme::Theme;
 /// # 为什么用半块字符
 ///
 /// 终端字符的高度约为宽度的两倍。若一个模块占一个字符，二维码会被纵向拉成两倍；
-/// 登录用的二维码通常是 33×33 模块以上，那样会占满整个屏幕。
+/// 把一个二维码渲染成**能塞进给定区域**的字符行；塞不下返回 `None`。
 ///
-/// 这里用 `▀` `▄` `█` 把**上下两个模块压进同一个字符**：前景色画上半格、背景色画
-/// 下半格。这样每个模块占「1 列宽 × 半行高」，近似正方形，整体体积也只有原来的
-/// 四分之一。
+/// # 为什么需要边界
 ///
-/// 返回 `None` 表示内容过长无法编码（登录场景不会发生）。
-/// 把二维码画成终端字符行。
+/// 二维码的行数是**内容长度决定的，不能压缩**：半块字符一个字符承载上下两个
+/// 模块，所以 H 个模块恒定占 `ceil(H/2)` 行、W 列——再密就只能扭曲比例、扫不出来。
+/// 汽水的扫码地址（`bff-pc.qishui.com/ucenter_web/app/sdk-next?...`）比酷狗的
+/// 长得多，编出来的版本自然更高，在行数不多的终端上会直接撑满屏幕。
 ///
-/// \`aspect\` 是终端「字符高:宽」比：标准终端是 2:1，用半块字符（一个字符
-/// 承载上下两行模块）正好正方形；低于 1.5 时（宽字符字体）改用一字符一行的
-/// 全块字符，避免被横向拉长。
-pub fn qr_lines(content: &str, aspect: f32) -> Option<Vec<String>> {
+/// 所以这里不缩放（缩放等于毁掉可扫性），而是**判断装不装得下**：
+/// 装不下就返回 `None`，让界面改成给一句能照做的提示——比画一个被裁掉、
+/// 扫不出来的二维码有用。
+pub fn qr_lines_fitted(
+    content: &str,
+    aspect: f32,
+    max_width: usize,
+    max_rows: usize,
+) -> Option<Vec<String>> {
+    let modules = qr_modules(content)?;
+    let width = modules.first().map(Vec::len).unwrap_or(0);
+    let height = modules.len();
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    // 宽字符字体（aspect < 1.5）用一字符一行；否则半块字符（一字符两行模块）。
+    let (rows, lines) = if aspect < 1.5 {
+        (height, render_full_blocks(&modules))
+    } else {
+        (height.div_ceil(2), render_half_blocks(&modules))
+    };
+
+    if width > max_width || rows > max_rows {
+        return None;
+    }
+    Some(lines)
+}
+
+/// 渲染二维码**所需**的行列数（用来在装不下时告诉用户差多少）。
+pub fn qr_needed_size(content: &str, aspect: f32) -> Option<(usize, usize)> {
+    let modules = qr_modules(content)?;
+    let width = modules.first().map(Vec::len).unwrap_or(0);
+    let height = modules.len();
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let rows = if aspect < 1.5 {
+        height
+    } else {
+        height.div_ceil(2)
+    };
+    Some((width, rows))
+}
+
+/// 编码成「带静默区的模块矩阵」。
+fn qr_modules(content: &str) -> Option<Vec<Vec<bool>>> {
     /// 静默区（二维码外围留白）的模块数。
     ///
-    /// 规范要求 4 个模块，但终端里每多一圈就多占半行。这里取 2——配合固定的
-    /// 「白底」配色，留白本身就是静默区，2 个模块足以被识别。
-    const QUIET: usize = 2;
+    /// 规范要求 4 个模块，但终端里每多一圈就多占一列和半行。这里取 1——
+    /// 配合固定的纯白底，留白本身就是静默区。取 2 时实测多占 2 列 1 行，
+    /// 而扫码距离与成功率没有可感差别。
+    const QUIET: usize = 1;
 
-    let code = qrcode::QrCode::new(content.as_bytes()).ok()?;
+    // 纠错级别刻意用 **L**（约 7%）而不是默认的 M（约 15%）。
+    //
+    // 这是尺寸的唯一杠杆：二维码的模块数由「内容长度 + 纠错级别」决定，
+    // 内容（服务端下发的扫码地址）我们改不了，所以想变小只能降纠错。
+    // 屏幕上的二维码是理想条件——像素精确、无污损、无眩光，L 足够；
+    // 而汽水的扫码地址明显比酷狗长，不降的话在窄终端上根本放不下。
+    let code =
+        qrcode::QrCode::with_error_correction_level(content.as_bytes(), qrcode::EcLevel::L).ok()?;
     let image = code.render::<char>().quiet_zone(false).build();
 
     let core: Vec<Vec<bool>> = image
@@ -48,7 +99,6 @@ pub fn qr_lines(content: &str, aspect: f32) -> Option<Vec<String>> {
         return None;
     }
 
-    // 四周补一圈留白
     let width = core_width + QUIET * 2;
     let mut modules: Vec<Vec<bool>> = Vec::with_capacity(core.len() + QUIET * 2);
     for _ in 0..QUIET {
@@ -62,7 +112,16 @@ pub fn qr_lines(content: &str, aspect: f32) -> Option<Vec<String>> {
     for _ in 0..QUIET {
         modules.push(vec![false; width]);
     }
+    Some(modules)
+}
 
+/// 把二维码画成终端字符行（**不设上限**，供已知画得下的场景使用）。
+///
+/// \`aspect\` 是终端「字符高:宽」比：标准终端是 2:1，用半块字符（一个字符
+/// 承载上下两行模块）正好正方形；低于 1.5 时（宽字符字体）改用一字符一行的
+/// 全块字符，避免被横向拉长。
+pub fn qr_lines(content: &str, aspect: f32) -> Option<Vec<String>> {
+    let modules = qr_modules(content)?;
     if aspect < 1.5 {
         return Some(render_full_blocks(&modules));
     }
@@ -423,5 +482,102 @@ mod tests {
         assert_eq!(popup.y, 5);
         assert_eq!(popup.width, 20);
         assert_eq!(popup.height, 10);
+    }
+
+    // ---- 二维码按可用区域自适应 ----
+
+    /// 汽水的扫码地址明显比酷狗长，编出来的二维码也更大——这正是
+    /// 「二维码太大撑满屏幕」的来源。这里用它当样本。
+    const SODA_SCAN_URL: &str = "https://bff-pc.qishui.com/ucenter_web/app/sdk-next?aid=386088&token=0123456789abcdef0123456789abcdef&uc_sdk=scan-auth";
+
+    #[test]
+    fn fitted_qr_renders_when_there_is_enough_room() {
+        let (width, rows) = qr_needed_size(SODA_SCAN_URL, 2.0).expect("能编码");
+        // 给足空间就该画得出来，行数要与「所需尺寸」一致
+        let lines = qr_lines_fitted(SODA_SCAN_URL, 2.0, width, rows).expect("空间够时应渲染");
+        assert_eq!(lines.len(), rows, "渲染行数应与所需行数一致");
+        assert!(lines.iter().all(|line| line.chars().count() == width));
+    }
+
+    /// 空间不够时**返回 None**，而不是画一个被裁掉的码——裁掉的码扫不出来，
+    /// 比一句「放不下」的提示更糟。
+    #[test]
+    fn fitted_qr_refuses_when_the_area_is_too_small() {
+        let (width, rows) = qr_needed_size(SODA_SCAN_URL, 2.0).unwrap();
+        // 少一行就不画
+        assert!(qr_lines_fitted(SODA_SCAN_URL, 2.0, width, rows - 1).is_none());
+        // 少一列也不画
+        assert!(qr_lines_fitted(SODA_SCAN_URL, 2.0, width - 1, rows).is_none());
+    }
+
+    /// 所需尺寸要与实际渲染对得上——否则提示里的「需要多少行」会误导用户。
+    #[test]
+    fn needed_size_matches_what_gets_rendered() {
+        for aspect in [1.0_f32, 2.0] {
+            let (width, rows) = qr_needed_size("https://example.com/short", aspect).unwrap();
+            let lines = qr_lines_fitted("https://example.com/short", aspect, width, rows).unwrap();
+            assert_eq!(lines.len(), rows, "aspect={aspect}");
+            assert_eq!(lines[0].chars().count(), width, "aspect={aspect}");
+        }
+    }
+
+    /// 宽字符字体（aspect < 1.5）用全块、一行一个模块，所以行数更多。
+    #[test]
+    fn narrow_aspect_uses_full_blocks_and_more_rows() {
+        let (_, wide_rows) = qr_needed_size("https://example.com/x", 2.0).unwrap();
+        let (_, narrow_rows) = qr_needed_size("https://example.com/x", 1.0).unwrap();
+        assert!(
+            narrow_rows > wide_rows,
+            "宽字符字体一行只放一个模块，行数应更多：{narrow_rows} vs {wide_rows}"
+        );
+    }
+
+    /// 编不出来的内容不能 panic。
+    #[test]
+    fn unencodable_content_is_none() {
+        // 极长内容超过二维码容量上限
+        let huge = "x".repeat(10_000);
+        assert!(qr_needed_size(&huge, 2.0).is_none());
+        assert!(qr_lines_fitted(&huge, 2.0, 200, 100).is_none());
+    }
+
+    // ---- 尺寸回归 ----
+
+    /// 二维码的模块数只由「内容长度 + 纠错级别」决定，所以尺寸是**内容决定的**，
+    /// 不是画法能优化的。这条把实测值钉住，防止哪天纠错级别或静默区被无意改大。
+    ///
+    /// 汽水的扫码地址接近 200 字符（酷狗只有 40 上下），这也是「汽水二维码
+    /// 特别大」的根因：它本来就该更大，不是渲染出了问题。
+    #[test]
+    fn qr_size_is_driven_by_content_length() {
+        let kugou = "https://m.kugou.com/qr?key=abc123def456";
+        let soda = "https://bff-pc.qishui.com/ucenter_web/app/sdk-next?aid=386088&device_id=2204957404565290&token=0123456789abcdef0123456789abcdef&next=https%3A%2F%2Fapi.qishui.com&uc_sdk=scan-auth&is_new_login=1";
+
+        let (kugou_w, kugou_rows) = qr_needed_size(kugou, 2.0).unwrap();
+        let (soda_w, soda_rows) = qr_needed_size(soda, 2.0).unwrap();
+
+        // 短地址落在 31x16 左右；长地址落在 51x26 左右
+        assert!((30..=33).contains(&kugou_w), "酷狗宽度异常：{kugou_w}");
+        assert!(
+            (15..=17).contains(&kugou_rows),
+            "酷狗高度异常：{kugou_rows}"
+        );
+        assert!((50..=53).contains(&soda_w), "汽水宽度异常：{soda_w}");
+        assert!((25..=28).contains(&soda_rows), "汽水高度异常：{soda_rows}");
+
+        // 内容越长尺寸越大：这是二维码的固有性质，不是 bug
+        assert!(soda_w > kugou_w && soda_rows > kugou_rows);
+    }
+
+    /// 纠错级别用 L 而不是默认的 M——这是尺寸的**唯一**杠杆（内容改不了）。
+    /// 换回 M 会让长地址明显变大，这条挡住那次回归。
+    #[test]
+    fn low_error_correction_keeps_the_qr_small() {
+        let soda = "https://bff-pc.qishui.com/ucenter_web/app/sdk-next?aid=386088&device_id=2204957404565290&token=0123456789abcdef0123456789abcdef&next=https%3A%2F%2Fapi.qishui.com&uc_sdk=scan-auth&is_new_login=1";
+        let (width, _) = qr_needed_size(soda, 2.0).unwrap();
+        assert!(
+            width <= 53,
+            "长地址的宽度应被 L 级别压在 53 以内，实际 {width}（是否被改回 M 了？）"
+        );
     }
 }

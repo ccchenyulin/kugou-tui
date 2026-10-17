@@ -28,7 +28,7 @@
 
 use std::time::Instant;
 
-use crate::api::cloud::QrStatus;
+use crate::api::cloud::{QrStatus, VipInfo, VipKind};
 use crate::app::App;
 use crate::app::state::{ConfirmAction, LoginPicker, LoginState};
 use crate::app::update::describe_song;
@@ -80,7 +80,10 @@ impl App {
         let candidates: Vec<SourceKind> = SourceKind::ALL
             .iter()
             .copied()
-            .filter(|kind| kind.capability().login)
+            // 汽水的 `login` 为真（它确实有登录态），但**只支持手填 cookie**，
+            // 走不通下面这套扫码流程。放进选择器的话，用户会选到它然后卡在
+            // 「二维码出不来」——所以这里额外排掉它，在配置里手填即可。
+            .filter(|kind| kind.capability().login && kind.supports_qr_login())
             .collect();
 
         match candidates.len() {
@@ -328,8 +331,32 @@ impl App {
     /// 与 [`Self::apply_login`] 的差别只是凭据从哪来：那边自己拼 `token=; userid=`，
     /// 这边直接用服务端给的一整串。
     pub(super) fn apply_server_cookie(&mut self, cookie: String) {
-        self.state.config.cookie = Some(cookie);
-        self.api.set_cookie(self.state.config.cookie_header());
+        // 汽水的凭据存在**自己档案**里，不走顶层 `cookie`：它直连公网，没有
+        // 「服务端替它管 cookie」这回事，而且顶层那个是酷狗的地盘——写错地方
+        // 会让酷狗带着汽水的 sessionid 发请求，而汽水永远读不到自己的登录态。
+        let kind = self.state.config.active_source_kind();
+        if kind == SourceKind::Sodam {
+            self.state
+                .config
+                .sources
+                .profile_mut(SourceKind::Sodam)
+                .cookie = Some(cookie);
+            // ⚠️ 必须改 `self.api` 本身，不能写 `self.client_for(Sodam)`。
+            // 音源已激活时 `client_for` 返回的是 `self.api.clone()`，改那个副本
+            // 对 `self.api` 毫无影响——于是「登录成功后立刻查会员/资料」用的仍是
+            // 没有 cookie 的客户端，服务端回 `1000016 登录状态已失效`。
+            // （`client_for` 只在**跨音源**取链时才有意义，那时它确实会新建。）
+            self.api.set_cookie(
+                self.state
+                    .config
+                    .sources
+                    .profile(SourceKind::Sodam)
+                    .cookie_header(SourceKind::Sodam),
+            );
+        } else {
+            self.state.config.cookie = Some(cookie);
+            self.api.set_cookie(self.state.config.cookie_header());
+        }
 
         let config_path = Config::path();
         match self.state.config.save() {
@@ -340,7 +367,7 @@ impl App {
                     true,
                     format!(
                         "「{}」登录成功，凭据已写入 {}",
-                        self.state.config.active_source_kind().label(),
+                        kind.label(),
                         config_path.display()
                     ),
                 );
@@ -488,6 +515,19 @@ impl App {
                 .warn(format!("音源已切换，但保存配置失败：{error}"));
         }
 
+        // 目标音源的服务可能还没起（默认只为当前音源拉起一个）。
+        //
+        // 这里只 spawn、不下载安装：界面已经画在屏幕上了，一次 `npm install` 要几十
+        // 秒，冻住界面不可接受。而依赖目录是各平台共用的，装过一次就够，正常情况只是
+        // 起一个进程、一到两秒。真没装过时下面会给一句「先跑 --api-start」的提示。
+        if let Err(error) = crate::bootstrap::ensure_running(
+            kind,
+            &self.state.config.api_base,
+            self.state.config.api_dir.as_deref(),
+        ) {
+            self.state.warn(format!("{error}"));
+        }
+
         match crate::api::ApiClient::new(
             &self.state.config.api_base,
             self.state.config.cookie_header(),
@@ -603,6 +643,35 @@ impl App {
 
         let api = self.api.clone();
         let bus = self.bus.clone();
+        let kind = self.state.config.active_source_kind();
+
+        // 汽水的会员信息在 `/luna/pc/me`，与酷狗的 `/user/vip/detail` 不是一套
+        // 端点，走 libresoda 自己的实现。它直接给 `is_vip`，比「探测能不能拿整曲」
+        // 可靠——后者会被签名可用性干扰，把非会员误判成「拿不到整曲」。
+        if kind == SourceKind::Sodam {
+            self.runtime.spawn(async move {
+                match crate::source::sodam::is_vip_account(&api).await {
+                    Ok(is_vip) => bus.emit(Loaded::VipStatus(Box::new(VipInfo {
+                        kind: if is_vip {
+                            VipKind::Other("汽水".to_string())
+                        } else {
+                            VipKind::None
+                        },
+                        product: if is_vip {
+                            "汽水音乐会员".to_string()
+                        } else {
+                            String::new()
+                        },
+                        // 汽水这个端点不给到期时间（上游也没暴露），留空即可——
+                        // 界面在没有到期时间时会只显示产品名。
+                        end_time: String::new(),
+                    }))),
+                    // 取不到会员信息不影响听歌，静默降级即可
+                    Err(error) => tlog!(crate::logger::LEVEL_WARN, "获取汽水会员信息失败：{error}"),
+                }
+            });
+            return;
+        }
 
         self.runtime.spawn(async move {
             match api.user_vip_detail().await {

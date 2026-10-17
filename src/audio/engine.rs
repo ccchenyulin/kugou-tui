@@ -126,8 +126,32 @@ pub enum AudioEvent {
     Failed(String),
 }
 
+/// 把「已经 free、但还没还给 OS」的空闲页交还给内核（glibc）。
+///
+/// # 为什么需要
+///
+/// glibc 的堆在 free 之后默认把页留着复用（换速度），RSS 于是停在历史峰值——
+/// 长听下来就是「听歌听久了内存只涨不落」。`malloc_trim` 会把堆顶连续的整页还给
+/// 内核，代价是遍历一次堆，所以只在**离散的边界**调用（换歌、一首歌播完），
+/// 不挂定时器。
+///
+/// # 它治不了什么
+///
+/// 只能归还**堆顶连续**的空闲页。碎片化的空洞交不回去，RSS 也就不一定落回起点；
+/// 真的持有对象时更是一页都不会还。判断「泄漏还是碎片」要看活跃分配，不能只看
+/// RSS——见 `logger::rss_kib` 那个追踪开关。
+///
+/// 门控精确到 glibc：`malloc_trim` 是 glibc 专有符号，Darwin 的 libc 里没有，
+/// 用 `cfg(unix)` 会让 macOS 构建直接失败。Windows 的 MSVC 堆本来就积极归还。
+pub fn trim_heap() {
+    #[cfg(target_env = "gnu")]
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 /// 播放来源：缓存文件，或边下边播的流式缓冲。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AudioSource {
     /// 缓存里已经下完的文件。可以随便 seek。
     File(PathBuf),
@@ -411,6 +435,9 @@ struct Output {
     _stream: rodio::MixerDeviceSink,
     /// 设备名。上报给界面显示——「播着却没声音」时，用户看一眼就知道声音去了哪。
     name: String,
+    /// 设备的混合采样率。hi-res 母版的抗混叠重采样以它为目标（见
+    /// [`crate::audio::resample`]）。
+    rate: u32,
 }
 
 impl Output {
@@ -480,11 +507,13 @@ impl Output {
         stream.log_on_drop(false);
 
         let name = default_label();
+        let rate = stream.config().sample_rate().get();
         let player = rodio::Player::connect_new(stream.mixer());
         Ok(Self {
             player,
             _stream: stream,
             name,
+            rate,
         })
     }
 
@@ -498,11 +527,13 @@ impl Output {
         // 那行字会直接糊在 TUI 界面上，必须关掉。
         stream.log_on_drop(false);
 
+        let rate = stream.config().sample_rate().get();
         let player = rodio::Player::connect_new(stream.mixer());
         Ok(Self {
             player,
             _stream: stream,
             name,
+            rate,
         })
     }
 }
@@ -677,6 +708,7 @@ fn run(
                 levels,
                 bus,
                 stream: None,
+                source: None,
                 last_position_ms: 0,
                 loaded: false,
                 finished_reported: true,
@@ -725,6 +757,9 @@ struct Runtime {
     /// 播放器"变空"时要用它判断到底是**放完了**还是**数据断了**：
     /// 前者该切歌，后者该留住位置续播（见 [`Runtime::sync`]）。
     stream: Option<crate::audio::streaming::StreamingBuffer>,
+    /// 本曲的原始数据源（未消费的克隆）。seek 回退重建解码器时用它（见
+    /// [`Runtime::seek_to`]）；`None` 表示当前没装载任何东西。
+    source: Option<AudioSource>,
     /// 上一次**还在正常播放**时读到的位置（毫秒）。
     ///
     /// 曲目结束的那一帧不能读 `Player::get_pos()`：源都没了，rodio 报的是 0。
@@ -823,6 +858,9 @@ impl Runtime {
             AudioSource::Stream(buffer) => Some(buffer.clone()),
             AudioSource::File(_) => None,
         };
+        // 留一份未消费的克隆：seek 回退（symphonia 不能向后跳）要靠它重建解码器，
+        // 见 `seek_to` / `reload_at`。
+        self.source = Some(source.clone());
         self.last_position_ms = start_at_ms;
 
         // 解码器先建好：它跟设备无关，且失败时不用去动设备借用
@@ -835,11 +873,19 @@ impl Runtime {
             return;
         };
 
+        // hi-res 母版的抗混叠重采样（见 `resample.rs` 的说明）：降采样必须
+        // 带滤波，否则 >24 kHz 的内容会镜像折叠进可听频带——这就是「同一份
+        // 文件，听着和其它客户端不一样」的病根。等率 / 上采样在这里原样透传。
+        let decoder = crate::audio::resample::to_device_rate(decoder, output.rate);
+
         output.player.stop();
         output.player.clear();
         self.loaded = false;
         // 装载期间先屏蔽「结束」上报，避免旧的 empty 状态误触发切歌
         self.finished_reported = true;
+
+        // 上一首的音源已随 clear() 释放。换歌是天然的内存边界，这里 trim 一次全堆。
+        trim_heap();
 
         // 解码器报出的时长最准；拿不到就用列表里的时长兜底，保证进度条可用
         let duration_ms = decoder
@@ -907,6 +953,7 @@ impl Runtime {
         // 清掉残留的柱子，否则会定格在最后一帧，看着像卡住了
         self.levels.clear();
         self.stream = None;
+        self.source = None;
         self.last_position_ms = 0;
         self.loaded = false;
         self.finished_reported = true;
@@ -937,8 +984,68 @@ impl Runtime {
                 // 跳转后重新允许上报结束
                 self.finished_reported = false;
             }
-            Err(error) => tlog!(crate::logger::LEVEL_WARN, "跳转到 {target}ms 失败：{error}"),
+            Err(error) => {
+                // symphonia 的 FLAC 解码器在没有 SEEKTABLE 的文件上**不能向后跳**
+                // （demuxer 返回 ForwardOnly）——点进度条往回拖、`←` 快退、歌词
+                // 回跳，全都栽在这里，表现就是「进度条只能往前拖」。绕开它：用
+                // 同一份数据源重建解码器。新解码器从文件头出发，跳到 target 是
+                // **前向**跳，必然成功；代价是一次几十毫秒的重建。重建也失败才
+                // 真的报错。
+                if self.reload_at(target) {
+                    tlog!(
+                        crate::logger::LEVEL_DEBUG,
+                        "跳到 {target}ms 走了重建路径（symphonia 不支持向后 seek）：{error}"
+                    );
+                } else {
+                    tlog!(crate::logger::LEVEL_WARN, "跳转到 {target}ms 失败：{error}");
+                }
+            }
         }
+    }
+
+    /// 用同一份数据源重建解码器并落到 `target_ms`。seek 回退专用。
+    ///
+    /// 前提是 `target_ms` 处的数据一定拿得到：能「往后跳」说明那段早就播过——
+    /// 本地文件本来就完整，流式缓冲的那段也早已下载落盘。
+    fn reload_at(&mut self, target_ms: u64) -> bool {
+        let Some(source) = self.source.clone() else {
+            return false;
+        };
+        let source = match source {
+            // 流式缓冲要**归零读指针**的克隆：原缓冲的 pos 停在老解码器的读取
+            // 位置上，直接克隆会让新解码器从半截开始，「跳回前面」就又成了
+            // 向后 seek。
+            AudioSource::Stream(buffer) => AudioSource::Stream(buffer.reader_from_start()),
+            file => file,
+        };
+        let Ok(decoder) = build_decoder(source) else {
+            return false;
+        };
+        let Some(output) = self.output.as_mut() else {
+            return false;
+        };
+        // 与 `load` 同一管线：先抗混叠重采样，再在新源上前向 seek
+        let mut decoder = crate::audio::resample::to_device_rate(decoder, output.rate);
+        // 前向 seek 到目标；失败（比如数据不够）就放弃重建，走原错误路径
+        if decoder.try_seek(Duration::from_millis(target_ms)).is_err() {
+            return false;
+        }
+        // 暂停中触发的 seek（暂停时点进度条）要保持暂停
+        let was_paused = output.player.is_paused();
+        output.player.stop();
+        output.player.clear();
+        output
+            .player
+            .append(LevelMeter::new(decoder, self.levels.clone()));
+        if !was_paused {
+            output.player.play();
+        }
+
+        self.last_position_ms = target_ms;
+        self.shared.position_ms.store(target_ms, Ordering::Relaxed);
+        // 跳转后重新允许上报结束
+        self.finished_reported = false;
+        true
     }
 
     /// 把播放器的真实状态同步到共享快照，并检测曲目结束。
@@ -1059,13 +1166,22 @@ fn classify_drain(stream: Option<&crate::audio::streaming::StreamingBuffer>) -> 
 /// 时是 EOF 还是阻塞等下载」。但 `Decoder<File>` 和 `Decoder<StreamDownload<..>>`
 /// 是两个不同类型，没法放进同一个变量——统一装箱成 `Box<dyn Source>`（rodio 为
 /// `Box<dyn Source>` 实现了 Source，可以照样 append 给播放器）。
+///
+/// # 两个出口都必须过 [`downmix::to_stereo`]
+///
+/// 这不是可选的美化：酷狗存在**前两个声道不是这首歌**的多声道无损文件（实测
+/// 《东京不太热 (DJ Z新豪版)》的 `flac` 档是 4.0，歌在后两个声道里），而 rodio 在
+/// 把源归一化到立体声输出时是「只留每帧前 N 个样本、其余丢弃」。少了这一层，
+/// 用户听到的就是另一段音频——见 [`crate::audio::downmix`] 顶部的实测数据。
+///
+/// 单声道与立体声在这里是恒等变换（`downmix` 内部直接透传），所以不影响绝大多数歌。
 fn build_decoder(source: AudioSource) -> Result<Box<dyn Source<Item = f32> + Send>, String> {
     match source {
         AudioSource::File(path) => {
             let file = std::fs::File::open(&path)
                 .map_err(|error| format!("打开音频文件 {} 失败：{error}", path.display()))?;
             rodio::Decoder::try_from(file)
-                .map(|decoder| Box::new(decoder) as Box<dyn Source<Item = f32> + Send>)
+                .map(crate::audio::downmix::to_stereo)
                 .map_err(|error| {
                     format!(
                         "解码 {} 失败：{error}。该文件可能不是有效音频，或格式不受支持。",
@@ -1089,6 +1205,11 @@ fn build_decoder(source: AudioSource) -> Result<Box<dyn Source<Item = f32> + Sen
             // 而解码器是那一刻之后才建的，所以这里通常已经拿到了。
             // 拿不到就不设——退回「不能往回 seek」也好过瞎设一个错的
             // （rodio 警告：`byte_len` 不对会导致时长算错和 seek 出错）。
+            //
+            // 上游另有一条 `reload_at` 重建解码器的回退路径（见 `seek_to`），
+            // 专门兜住 symphonia 不支持向后 seek 的情况：本 fork 这条修复让
+            // 通常的 `try_seek` 直接就成功，重建那条路只在拿不到
+            // `Content-Length` 时才会被触发。
             let mut builder = rodio::Decoder::builder();
             if let Some(len) = buffer.total() {
                 builder = builder.with_byte_len(len);
@@ -1096,6 +1217,7 @@ fn build_decoder(source: AudioSource) -> Result<Box<dyn Source<Item = f32> + Sen
             builder
                 .with_data(buffer)
                 .build()
+                .map(crate::audio::downmix::to_stereo)
                 .map(|decoder| Box::new(decoder) as Box<dyn Source<Item = f32> + Send>)
                 .map_err(|error| {
                     format!("解码流失败：{error}。数据可能不是有效音频，或格式不受支持。")
@@ -1228,5 +1350,374 @@ mod tests {
         ] {
             assert!(!is_server_routed(driver), "{driver} 直连硬件，必须被过滤");
         }
+    }
+
+    /// 手写一个 4 声道 16 bit PCM 的 WAV。
+    ///
+    /// 测试要的是一份**真的能被解码器读进来**的多声道文件，而仓库里没有 FLAC 编码器，
+    /// 手写 WAV 头是唯一不引新依赖的办法（和 `audio/download.rs` 里手写假服务端同一个思路）。
+    fn write_four_channel_wav(path: &std::path::Path, frames: &[[i16; 4]]) {
+        let (channels, rate, bits): (u16, u32, u16) = (4, 8000, 16);
+        let block_align = channels * bits / 8;
+        let data_len = (frames.len() * block_align as usize) as u32;
+
+        let mut bytes = Vec::with_capacity(44 + data_len as usize);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        bytes.extend_from_slice(&channels.to_le_bytes());
+        bytes.extend_from_slice(&rate.to_le_bytes());
+        bytes.extend_from_slice(&(rate * block_align as u32).to_le_bytes());
+        bytes.extend_from_slice(&block_align.to_le_bytes());
+        bytes.extend_from_slice(&bits.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        for frame in frames {
+            for sample in frame {
+                bytes.extend_from_slice(&sample.to_le_bytes());
+            }
+        }
+        std::fs::write(path, bytes).expect("写入测试 wav");
+    }
+
+    /// **守护测试**：`build_decoder` 交出去的源必须是 ≤2 声道。
+    ///
+    /// 少了 `downmix::to_stereo` 这一层，这里会拿到 4 声道，而 rodio 的
+    /// `ChannelCountConverter` 会把后两个声道直接丢掉——实测
+    /// 《东京不太热 (DJ Z新豪版)》的 `flac` 档正好是「歌在后两个声道」的 4.0 文件，
+    /// 丢掉的后果是用户听到的**不是这首歌**。谁把下混层拆掉，这条立刻失败。
+    ///
+    /// 数值也要对：4 声道 `[8192, -8192, 24576, -24576]` 下混后
+    /// L = (8192+24576)/2 = 16384 → 0.5，R = (−8192−24576)/2 = −16384 → −0.5。
+    #[test]
+    fn decoded_multichannel_files_are_downmixed_to_stereo() {
+        let path = std::env::temp_dir().join(format!(
+            "kugou-tui-downmix-guard-{}.wav",
+            std::process::id()
+        ));
+        let frames = [[8192i16, -8192, 24576, -24576]; 64];
+        write_four_channel_wav(&path, &frames);
+
+        let decoder = build_decoder(AudioSource::File(path.clone())).expect("解码 4 声道 wav");
+        assert_eq!(
+            decoder.channels().get(),
+            2,
+            "多声道文件必须先下混成立体声，否则 rodio 会丢掉后两个声道"
+        );
+
+        let out: Vec<f32> = decoder.take(2).collect();
+        assert_eq!(out.len(), 2, "应当能读出立体声帧");
+        assert!((out[0] - 0.5).abs() < 0.01, "L 声道算错了：{}", out[0]);
+        assert!((out[1] + 0.5).abs() < 0.01, "R 声道算错了：{}", out[1]);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// **守护测试**：向后 seek 的回退路径（`reload_at` 的核心前提）。
+    ///
+    /// 病根：symphonia 的 FLAC 解码器在**没有 SEEKTABLE** 的文件上不能向后跳
+    /// （demuxer 返回 `ForwardOnly`）——酷狗给的 flac 档实测正是这种（`ffprobe`
+    /// 读不到 seektable，原始包扫描也找不到 `SEEKTABLE` 块）。于是点进度条往
+    /// 回拖、`←` 快退、歌词回跳全部失效，表现成「进度条只能往前拖」。
+    ///
+    /// 修复靠 `reload_at`：用同一份数据源重建解码器，新解码器从文件头出发，
+    /// 跳到任意位置都是**前向**跳，必然成功。这条测试钉住那个前提——
+    /// 重建出的解码器确实能从 0 走到较早的位置，且解出来的样本不是空的。
+    #[test]
+    fn rebuilt_decoder_can_seek_backward_from_the_start() {
+        let path = std::env::temp_dir().join(format!(
+            "kugou-tui-backward-seek-{}.wav",
+            std::process::id()
+        ));
+        // 3 秒 @ 8 kHz，够长到「跳到 0.5 秒」有实际距离
+        const RATE: u32 = 8_000;
+        const SECONDS: usize = 3;
+        let frames: Vec<[i16; 4]> = (0..RATE as usize * SECONDS)
+            .map(|i| {
+                let value = ((i as f32 * 0.02).sin() * 8000.0) as i16;
+                [value, value, value, value]
+            })
+            .collect();
+        write_four_channel_wav(&path, &frames);
+
+        // 模拟 reload_at：拿到源 → 重建解码器 → 前向 seek 到 500ms
+        let decoder = build_decoder(AudioSource::File(path.clone())).expect("首次解码");
+        let sample_rate = decoder.sample_rate().get();
+        assert!(sample_rate > 0, "解码器应报出采样率");
+
+        let mut rebuilt = build_decoder(AudioSource::File(path.clone())).expect("重建解码器");
+        rebuilt
+            .try_seek(Duration::from_millis(500))
+            .expect("重建后的解码器从文件头出发，向前跳到 500ms 必须成功");
+
+        // 跳过去之后还要真的出得了样本——空解码器即使 seek 返回 Ok 也没用
+        let out: Vec<f32> = rebuilt.take(64).collect();
+        assert!(
+            out.iter().any(|s| s.abs() > 0.001),
+            "向后 seek 后必须能继续解出非静音样本，实际 {out:?}"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 向后 seek 后**播放位置**必须落在目标附近，不能停在原地或回到开头。
+    ///
+    /// 上一条测的是「解码器跳得过去」，这条测的是「跳完之后位置对得上」——
+    /// 两者缺一个都会复现用户的症状：一个是根本跳不动，一个是跳了但位置错。
+    /// 用 `StreamingBuffer` 造一段可解的数据，走「归零读指针 → 重建 → 前向
+    /// seek」这条真实回退路径。
+    #[test]
+    fn backward_seek_lands_near_the_target_not_at_the_start() {
+        let path = std::env::temp_dir().join(format!(
+            "kugou-tui-backward-target-{}.wav",
+            std::process::id()
+        ));
+        const RATE: u32 = 8_000;
+        let frames: Vec<[i16; 4]> = (0..RATE as usize * 2)
+            .map(|i| {
+                let value = ((i as f32 * 0.02).sin() * 8000.0) as i16;
+                [value, value, value, value]
+            })
+            .collect();
+        write_four_channel_wav(&path, &frames);
+        let bytes = std::fs::read(&path).expect("读回 wav");
+
+        // 1.2 秒处 —— 比 0 大得多，能区分「跳到目标」和「回到开头」
+        let target_ms = 1_200u64;
+        let stream = StreamingBuffer::new(Some(bytes.len() as u64));
+        stream.push(&bytes);
+        stream.finish(None);
+        let source = crate::audio::engine::AudioSource::Stream(stream.reader_from_start());
+        let mut decoder = build_decoder(source).expect("从流构建解码器");
+        decoder
+            .try_seek(Duration::from_millis(target_ms))
+            .expect("归零后的解码器应能前向跳到目标");
+
+        // 拿解码器自己报的位置对照：读完一帧后统计时长与目标的一致性。
+        // rodio 的 Source 不直接报位置，改用「样本数 → 时长」换算：
+        // 跳转后连续读 RATE/10 个样本（单声道折算），耗时应当接近 0.1 秒
+        // 的**剩余**部分，而不是整段 2 秒。
+        let total_duration = decoder.total_duration().expect("wav 应报时长");
+        assert!(
+            total_duration.as_millis() >= target_ms as u128,
+            "素材要长过目标位置，否则这条测试没有意义"
+        );
+
+        let mut consumed = 0usize;
+        let channels = decoder.channels().get() as usize;
+        // 读 0.05 秒的样本就够判断「不是从 0 重新开始」
+        let want = (RATE as usize / 20) * channels;
+        for _ in 0..want {
+            if decoder.next().is_some() {
+                consumed += 1;
+            } else {
+                break;
+            }
+        }
+        assert_eq!(consumed, want, "向后 seek 后应能持续读到样本");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 诊断用探针：模拟「一首歌」那种**尺寸混杂**的分配模式，看 RSS 会不会涨、
+    /// `trim_heap()` 能不能收回来。
+    ///
+    /// 与上面两个探针的区别很关键：那两个每轮分配的都是**同尺寸**的块，会走
+    /// tcache/fastbin 完美复用，所以必然稳定——它们只能证明「没有对象被长期持有」，
+    /// 证明不了「堆不会碎」。真实播放一轮里混着封面位图（~700 KB）、裁剪副本
+    /// （~460 KB）、歌词行（几十字节到几百字节不等的 String）、URL 与 JSON 缓冲，
+    /// 尺寸参差正是碎片的成因。
+    ///
+    /// 判读：
+    ///
+    /// * RSS 逐轮上升、且每轮都 trim 也收不回 → **碎片**（非泄漏），修复方向是
+    ///   分配策略（降 mmap 阈值 / 换分配器），不是去代码里找「谁没释放」；
+    /// * RSS 稳定 → 碎片假说也不成立，问题在别处。
+    ///
+    /// ```bash
+    /// cargo test --release mixed_alloc_rss_probe -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "诊断用，靠 --ignored 手动跑"]
+    fn mixed_alloc_rss_probe() {
+        use std::hint::black_box;
+
+        fn rss_kib() -> u64 {
+            let text = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
+            let pages: u64 = text
+                .split_whitespace()
+                .nth(1)
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            pages * 4
+        }
+
+        println!("轮次  RSS(KiB)");
+        for round in 0..40u32 {
+            // 封面原图（480×480 RGB ≈ 691 KB，正好落在 1 MiB 的 mmap 阈值之下）
+            let mut cover = vec![round as u8; 691 * 1024];
+            // 裁剪/缩放后的副本
+            let mut cropped = vec![round as u8; 460 * 1024];
+            // 歌词：长度参差的 String，模拟真实文本
+            let mut lyrics: Vec<String> = (0..300)
+                .map(|index| "词".repeat(8 + (index % 40) as usize))
+                .collect();
+            // 解析出来的 JSON 文本块
+            let mut json = vec![round as u8; 128 * 1024];
+
+            black_box(&mut cover);
+            black_box(&mut cropped);
+            black_box(&mut lyrics);
+            black_box(&mut json);
+            drop((cover, cropped, lyrics, json));
+
+            // 换歌时本来就会 trim 一次
+            trim_heap();
+            println!("{round:>4} {}", rss_kib());
+        }
+    }
+
+    /// 诊断用探针：**同一段分配模式**，分别在 `M_MMAP_THRESHOLD` = 1 MiB 与 256 KiB
+    /// 下跑，**两段都不 trim**，看 RSS 自己落不落。
+    ///
+    /// 回答的是「RSS 只涨不落是泄漏还是页没还」：
+    ///
+    /// * 两段都不回落 → 纯分配器行为，`trim_heap` 是唯一的归还通道，那就得提高
+    ///   它的调用频率；
+    /// * 降到 256 KiB 后 RSS 自己就稳了 → 大块走 mmap（free 即 `munmap` 还给内核），
+    ///   不依赖 trim，改阈值即可治本。
+    ///
+    /// ```bash
+    /// cargo test --release mmap_threshold_effect_probe -- --ignored --nocapture
+    /// ```
+    #[cfg(target_env = "gnu")]
+    #[test]
+    #[ignore = "诊断用，靠 --ignored 手动跑"]
+    fn mmap_threshold_effect_probe() {
+        use std::hint::black_box;
+
+        fn rss_kib() -> u64 {
+            let text = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
+            let pages: u64 = text
+                .split_whitespace()
+                .nth(1)
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            pages * 4
+        }
+
+        /// 一首歌那种尺寸混杂的一轮分配，**全部在作用域结束时释放**。
+        ///
+        /// 尺寸**随轮次变化**是这里的关键：真实的封面图大小各不相同（300×300 到
+        /// 800×800 都有），歌词长度也参差。如果每轮都分配同一个尺寸，glibc 必然
+        /// 复用刚释放的那批 chunk，探针就永远测不出碎片——上一版探针正是这样，
+        /// 所以两段都是平的，什么也没证明。
+        fn alloc_round(round: u32) {
+            let step = round as usize % 16;
+            let mut cover = vec![round as u8; 300 * 1024 + step * 40 * 1024];
+            let mut cropped = vec![round as u8; 200 * 1024 + step * 24 * 1024];
+            let mut lyrics: Vec<String> = (0..300)
+                .map(|index| "词".repeat(8 + (index * (1 + step)) % 60))
+                .collect();
+            let mut json = vec![round as u8; 64 * 1024 + step * 8 * 1024];
+            black_box(&mut cover);
+            black_box(&mut cropped);
+            black_box(&mut lyrics);
+            black_box(&mut json);
+        }
+
+        for (label, threshold) in [("1 MiB（当前设置）", 1024 * 1024), ("256 KiB", 256 * 1024)]
+        {
+            unsafe {
+                libc::mallopt(libc::M_MMAP_THRESHOLD, threshold);
+            }
+            // 两轮热身：把切换阈值瞬间的残留排除在统计之外
+            for round in 0..2u32 {
+                alloc_round(round);
+            }
+            let base = rss_kib();
+            println!("--- M_MMAP_THRESHOLD = {label}，不 trim ---");
+            for round in 0..20u32 {
+                alloc_round(round);
+                let now = rss_kib();
+                println!(
+                    "{round:>4} {now}（较本段起点 {:+}）",
+                    now as i64 - base as i64
+                );
+            }
+        }
+    }
+
+    /// 诊断用探针：反复「装载一首本地文件 → 停」，逐轮打印 RSS。
+    ///
+    /// 与 `player::tests::cover_swap_rss_probe` 配对：那条排除了封面，这条看音频
+    /// 路径（解码器、sink、输出流、换歌时的 `malloc_trim`）。
+    ///
+    /// ```bash
+    /// cargo test --release file_swap_rss_probe -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "诊断用，靠 --ignored 手动跑"]
+    fn file_swap_rss_probe() {
+        fn rss_kib() -> u64 {
+            let text = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
+            let pages: u64 = text
+                .split_whitespace()
+                .nth(1)
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            pages * 4
+        }
+
+        /// 写一个 3 秒 44.1kHz 立体声 16bit 的 WAV（全零采样）。
+        fn write_wav(path: &std::path::Path, seconds: u32) {
+            const RATE: u32 = 44_100;
+            const CHANNELS: u16 = 2;
+            let frames = RATE * seconds;
+            let data_len = frames * u32::from(CHANNELS) * 2;
+            let mut bytes = Vec::with_capacity(44 + data_len as usize);
+            bytes.extend_from_slice(b"RIFF");
+            bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+            bytes.extend_from_slice(b"WAVEfmt ");
+            bytes.extend_from_slice(&16u32.to_le_bytes());
+            bytes.extend_from_slice(&1u16.to_le_bytes());
+            bytes.extend_from_slice(&CHANNELS.to_le_bytes());
+            bytes.extend_from_slice(&RATE.to_le_bytes());
+            bytes.extend_from_slice(&(RATE * u32::from(CHANNELS) * 2).to_le_bytes());
+            bytes.extend_from_slice(&(CHANNELS * 2).to_le_bytes());
+            bytes.extend_from_slice(&16u16.to_le_bytes());
+            bytes.extend_from_slice(b"data");
+            bytes.extend_from_slice(&data_len.to_le_bytes());
+            bytes.resize(44 + data_len as usize, 0);
+            std::fs::write(path, bytes).expect("写 WAV");
+        }
+
+        let (bus, receiver) = crate::event::EventBus::new();
+        let handle = AudioHandle::spawn(bus, 0.5, None);
+        if handle.spawn_failed() {
+            println!("音频线程没起来（无可用输出设备？），本探针跳过");
+            return;
+        }
+
+        let dir = std::env::temp_dir().join("kugou-rss-probe");
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        let path = dir.join("probe.wav");
+        write_wav(&path, 3);
+
+        println!("轮次  RSS(KiB)");
+        for round in 0..30u32 {
+            handle.load(AudioSource::File(path.clone()), 0, 3_000);
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            handle.stop();
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            // 顺手把事件收掉，别让通道里的积压混进这次测量
+            while receiver.try_recv().is_ok() {}
+            println!("{round:>4} {}", rss_kib());
+        }
+
+        let _ = std::fs::remove_file(&path);
     }
 }

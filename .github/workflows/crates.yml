@@ -1,0 +1,130 @@
+# 发布到 crates.io。
+#
+# # 为什么单独一个工作流，而且**不**挂在 tag 上
+#
+# crates.io 的发布会**永久占用版本号**：同一个 `X.Y.Z` 推上去之后就不能重发，
+# 连删掉都不行（只能 yank）。这和 GitHub Release 完全不同——那边随时可以
+# 删了重来。所以它不该跟着「推 tag」自动跑：
+#
+#   * 发版（`scripts/release`）是常规动作，推 tag 就完事；
+#   * 上架 crates.io 是**一次性、不可回退**的动作，要单独决定、单独执行。
+#
+# 因此触发只有 `workflow_dispatch`（手动）。这也与项目既有约定一致——
+# `scripts/release` 里刻意**不含** crates.io 这一步。
+#
+# # 依赖为什么长这样（path + version 双写）
+#
+# 汽水 SDK 没有发到 crates.io（上游的名字 `libresoda` 在那里是空的，但我们
+# 不能抢——否则他们以后想发就被我们堵死），所以源码随包内置在
+# `crates/libresoda/`，并以 `libresoda-fork` 之名发到了 crates.io。
+#
+# 于是主包的依赖写成 **path + version 双写**：本地构建走 path（改它立即生效），
+# 发布时 crates.io 剥掉 path、用 registry 上的 version。这正是 crates.io 对
+# path 依赖的要求——之前只写 path（更早是 git），都会在打包阶段被拒。
+#
+# `cargo publish --dry-run` 已全绿：发布包从 registry 拉 libresoda-fork
+# 编译通过。
+
+# # 用法
+#
+#   gh workflow run crates.yml                      # 真发布
+#   gh workflow run crates.yml -f dry_run=true      # 只打包校验，不推
+#
+# 需要仓库 secret `CARGO_REGISTRY_TOKEN`（crates.io 的 API token，
+# 在 https://crates.io/settings/tokens 生成，权限只需 publish-update）。
+
+name: Publish to crates.io
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只做打包校验（cargo publish --dry-run），不真正上传'
+        type: boolean
+        default: true
+
+# 同一时间只允许一个发布任务：两个并发发布会撞版本号。
+concurrency:
+  group: crates-io-publish
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # cpal 在 Linux 上走 ALSA，构建脚本要靠 pkg-config 找 alsa-lib 的开发头文件。
+      # 与 ci.yml 同样的理由：干净的 runner 上没有这些。
+      - name: 装音频后端依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # ---- 先把「能不能发」判掉，再谈发 ----
+      - name: 检查依赖可发布性
+        run: |
+          set -euo pipefail
+          # crates.io 要求每个依赖都有 version（git / 无 version 的 path 都不行）：
+          # 发布包必须只引用 registry 上的版本。
+          if grep -qE '^\s*[A-Za-z0-9_-]+\s*=.*(git\s*=|path\s*=)' Cargo.toml; then
+            echo "::error title=依赖缺少 version::Cargo.toml 里有 git / 纯 path 依赖，cargo publish 必然失败。"
+            echo
+            echo "当前不可发布的依赖条目："
+            grep -nE '^\s*[A-Za-z0-9_-]+\s*=.*(git\s*=|path\s*=)' Cargo.toml | sed 's/^/  /'
+            echo
+            echo "cargo 的原始报错（已实测确认，失败发生在打包阶段、编译之前）："
+            echo
+            echo "  error: failed to verify manifest at Cargo.toml"
+            echo "  Caused by:"
+            echo "    all dependencies must have a version requirement specified when publishing."
+            echo "    dependency libresoda does not specify a version"
+            echo
+            echo "解决方向（详见本工作流文件顶部的注释）："
+            echo "  1. 给随包内置的 crates/libresoda 换个名字发到 crates.io，"
+            echo "     然后这里改成 version 依赖（crates.io 要求名字不与上游冲突）"
+            echo "  2. 等上游 sodahub-org/libresoda 自己发 crates.io"
+            echo "  3. 不在 crates.io 发，只走 GitHub Release"
+            exit 1
+          fi
+          echo "依赖检查通过：没有 git 依赖。"
+
+      # 版本号必须与 Cargo.toml 一致，否则会发出一个「版本对不上」的包——
+      # 而 crates.io 的版本号一旦占用就不可撤回。
+      - name: 校验版本号
+        run: |
+          set -euo pipefail
+          manifest=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "Cargo.toml 版本号：$manifest"
+          if ! grep -qE "^## \[$manifest\]" CHANGELOG.md; then
+            echo "::error title=CHANGELOG 缺少对应小节::CHANGELOG.md 里没有 '## [$manifest]'，先补齐再发。"
+            exit 1
+          fi
+          # 已经发过的版本号不能再发（crates.io 只允许 yank，不允许覆盖）
+          if curl -sf "https://crates.io/api/v1/crates/kugou-tui/$manifest" >/dev/null 2>&1; then
+            echo "::error title=版本号已占用::kugou-tui $manifest 已经发布过，crates.io 不允许重发同一个版本。"
+            exit 1
+          fi
+          echo "版本号校验通过。"
+
+      - name: 打包（不发布）
+        if: inputs.dry_run
+        run: cargo publish --locked --dry-run
+
+      - name: 发布
+        if: ${{ !inputs.dry_run }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "::error title=缺少 token::仓库 secret 里没有 CARGO_REGISTRY_TOKEN。"
+            exit 1
+          fi
+          cargo publish --locked

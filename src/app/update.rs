@@ -112,7 +112,29 @@ fn not_logged_in_hint(source: SourceKind) -> String {
         SourceKind::Kugou | SourceKind::KugouConcept => {
             "云端歌单需要登录，请配置 cookie（--cookie 或配置文件）".to_string()
         }
+        // 汽水没有云端歌单（`Capability::cloud` 为假），这个分支走不到；
+        // 仍给一条明确的话而不是 unreachable!()——万一将来接上了，
+        // 用户看到的是「怎么登录」而不是程序崩溃。
+        SourceKind::Sodam => "汽水音乐没有云端歌单功能".to_string(),
     }
+}
+
+/// ↑↓ 在当前 (标签页, 焦点) 下是否表示「切歌」。
+///
+/// 首页与可视化页没有任何可导航的列表，↑↓ 退化成切歌——这是有意为之：
+/// 这两页正是「看着歌词 / 频谱听歌」的页面，切歌是最高频的操作。
+///
+/// 但**焦点在侧边栏或队列时不算**：那两个焦点各有自己的 ↑↓ 语义
+/// （侧边栏切栏目、队列移动队列项，见 `App::move_selection`）。
+///
+/// # 为什么要看焦点
+///
+/// 早先这里只判标签页。`Tab` 会把焦点轮流交给侧边栏 / 主区 / 队列，于是在
+/// 首页按 `Tab` 选中侧边栏之后，↑↓ 走的仍是「切歌」分支：歌换了、侧边栏高亮
+/// 纹丝不动。用户看来就是「在导航里按上下键没反应」（其实切歌了，还会突然
+/// 换歌，更莫名其妙）。
+fn up_down_switches_track(tab: Tab, focus: Focus) -> bool {
+    matches!(tab, Tab::Home | Tab::Visualizer) && matches!(focus, Focus::Primary | Focus::Secondary)
 }
 
 impl App {
@@ -898,6 +920,7 @@ impl App {
         true
     }
 
+    /// 浏览态下的按键分发。
     fn handle_normal_action(&mut self, action: Action) {
         match action {
             Action::None => {}
@@ -922,6 +945,20 @@ impl App {
             Action::FocusNext => self.state.cycle_focus(true),
             Action::FocusPrev => self.state.cycle_focus(false),
 
+            // 首页 / 可视化没有可导航的列表，↑↓ 在这两页原本是空的——划给播放
+            // 控制：这两页正是「看着歌词 / 频谱听歌」的页面，切歌是最高频的操作。
+            // 有列表的页面（搜索 / 歌单 / 歌手 / 榜单 / 云端 / 队列 / 设置）↑↓
+            // 依旧是列表导航，抢走它等于抢走核心交互。
+            //
+            // 焦点在**侧边栏**或**队列**时不能抢：那两个焦点各有自己的 ↑↓ 语义
+            // （见 `move_selection`）。少了这个条件，Tab 键把焦点交给侧边栏之后
+            // ↑↓ 就会切歌，而高亮还停在侧边栏上——看起来像程序没反应。
+            Action::MoveDown if up_down_switches_track(self.state.tab, self.state.focus) => {
+                self.next_track(true);
+            }
+            Action::MoveUp if up_down_switches_track(self.state.tab, self.state.focus) => {
+                self.previous_track();
+            }
             Action::MoveDown => self.move_selection(1),
             Action::MoveUp => self.move_selection(-1),
             Action::MoveTop => self.move_selection_edge(true),
@@ -1114,6 +1151,15 @@ impl App {
         &self,
         kind: SourceKind,
     ) -> crate::error::Result<crate::api::ApiClient> {
+        // 汽水的应用签名凭证要在**造客户端时**同步到进程级槽位：它不是
+        // HTTP 层能表达的东西（不是 cookie、也不是 URL 参数），
+        // 而分派层的方法签名统一只收 `&ApiClient`。
+        //
+        // 这里顺带**无条件**同步（而不是只在 `kind == Sodam` 时）：切歌、
+        // 跨音源播放都会经过这个函数，而凭证是「本机的汽水身份」，
+        // 只有一个值。每次都写同一个值，开销可以忽略。
+        crate::source::sodam::set_active_credentials(self.state.config.sources.sodam_app.clone());
+
         if kind == self.state.config.active_source_kind() {
             // 当前音源已经有现成的客户端，直接复用（省一次连接池重建）
             return Ok(self.api.clone());
@@ -1906,6 +1952,13 @@ impl App {
                         .unwrap_or_else(|| "（完整版需要对应会员）".to_string());
                     self.state
                         .warn(format!("《{}》只有试听片段{why}", song.name));
+                } else if let Some(why) = reason {
+                    // 完整版拿到了，但**档位可能不是用户设的那一档**：`/song/url`
+                    // 会静默降级（请求 flac 回 128 kbps mp3，`status` 仍是 1），
+                    // 蝰蛇音质没权限时也会降到标准档。以前这条 `reason` 只在试听
+                    // 分支被读，于是两种降级都无声无息地过去了——界面标着 flac，
+                    // 耳朵听的是 128，而且永远查不出来。
+                    self.state.info(format!("《{}》{why}", song.name));
                 }
                 // 片段落到独立的缓存键，避免把完整版的位置占住
                 self.start_download(*song, url, start_at_ms, is_trial);
@@ -2033,6 +2086,9 @@ impl App {
                     .unwrap_or_default();
                 let login = self.state.login.get_or_insert_with(LoginState::default);
                 login.qr = qr;
+                // 原始内容也要留着：绘制时会按终端实际尺寸重新渲染，
+                // 装不下就改成给一句提示（见 ui/views 里的登录弹窗）。
+                login.qr_content = content;
                 login.key = key;
                 login.message = format!(
                     "用 {} App 扫码登录",
@@ -2264,7 +2320,10 @@ impl App {
             // 要跳到中间（续播上次的位置）时**不能**走流式：缓冲里只有开头那点
             // 数据，seek 到几百秒的位置会阻塞等下载、超时失败，结果从头播
             // ——用户实测「边听边下载会直接从最开始听」就是这个。
-            if start_at_ms > 0 {
+            //
+            // 汽水（`file://`）也走这条：它整首已经下完并解密了，流式缓冲
+            // 那套「边下边播」对它没有意义——文件就在本地，直接复制进缓存。
+            if start_at_ms > 0 || crate::audio::download::is_local_url(&url) {
                 match downloader.fetch_to(&url, &target, &progress).await {
                     Ok(_) => bus.emit(Loaded::StreamCached {
                         song: Box::new(song),
@@ -2544,7 +2603,17 @@ impl App {
             }
             AudioEvent::TrackFinished => {
                 self.state.position_ms = 0;
-                self.active_stream = None;
+                // **先 cancel 再丢**。直接置 `None` 只放下了我们手里的那一份 Arc：
+                // 后台下载任务自己还持有一份，会继续把整首往内存窗口和 `.part`
+                // 文件里灌，谁也回收不了。切歌与主动停止两条路都调了 `cancel()`
+                // （`playback.rs`），唯独「自然播完」漏了——它恰恰是最常见的一条。
+                if let Some(stream) = self.active_stream.take() {
+                    stream.cancel();
+                }
+                // 一首歌结束是天然的释放边界：这里把「已 free 但没还给 OS」的页
+                // 交还，而不是等到下一首 `load` 时才做——那时新的分配已经发生，
+                // 刚还回去的页又被占回来了。
+                crate::audio::engine::trim_heap();
 
                 // 试听片段播完 ≠ 整首播完。这里不能走自动切歌：用户会以为是
                 // 「会员没生效、听了几十秒就跳歌」，而实际是没拿到完整版。
@@ -2585,10 +2654,17 @@ impl App {
                     return;
                 };
 
-                // 每首歌只自动兜一次：网络真断了的话，反复重试只会刷屏
+                // 每首歌只自动兜一次：网络真断了的话，反复重试只会刷屏。
+                //
+                // 但自动兜底退出之后**必须把断点交给手动路径**，而且只认 Space：
+                // 之前这里只打一句「按 Space 或 Enter 重试」就返回，而 Enter 在浏览态
+                // 走 `activate()`（按 Tab/Focus 分派成「播放选中歌曲」「打开歌单」……），
+                // 与重试毫无关系；Space 走 `toggle_playback()`，位置取自 `state.resume`
+                // （会话恢复用的，此时为 None），结果是**从头播**。提示说重试、实际是重来。
                 if self.stream_retried.as_deref() == Some(song.hash.as_str()) {
+                    self.pending_stream_retry = Some((song.clone(), position_ms));
                     self.state.warn(format!(
-                        "《{}》缓冲中断在 {}，按 Space 或 Enter 重试",
+                        "《{}》缓冲中断在 {}，按 Space 从断点重试",
                         song.name,
                         format_duration_ms(position_ms)
                     ));
@@ -2634,6 +2710,39 @@ impl App {
         if self.last_session_save.elapsed() >= std::time::Duration::from_secs(30) {
             self.persist_session();
             self.last_session_save = std::time::Instant::now();
+        }
+
+        // 内存追踪（`KUGOU_TUI_MEM_TRACE=1`）：每 5 秒把 RSS 与当前曲目记进日志。
+        //
+        // 为什么挂在 tick 上而不是另起一个线程：日志的时间戳要与播放事件对齐，
+        // 同一个写入者才能保证顺序——排查「每首歌涨多少」全靠这个顺序。开销是
+        // 5 秒一次读 `/proc` 加一行 format，关掉时连读都不做。
+        if crate::logger::mem_trace_enabled()
+            && self.last_mem_trace.elapsed() >= std::time::Duration::from_secs(5)
+        {
+            self.last_mem_trace = std::time::Instant::now();
+            let current = self
+                .state
+                .current
+                .as_ref()
+                .map(describe_song)
+                .unwrap_or_else(|| "（无）".to_string());
+            // 除了 RSS，把「可能累积的东西」的计数一起打出来。
+            //
+            // 光有 RSS 只能看出「涨了」，看不出「谁在涨」——这几个计数才是把范围
+            // 收窄到某一条路径的东西：
+            //   streams    流式下载登记表（正常 0 或 1，涨了就是任务没摘除）
+            //   queue      播放队列（跨音源播放时可能被追加）
+            //   hit_zones  每帧回填的命中区（容量应当很快稳定）
+            tlog!(
+                crate::logger::LEVEL_INFO,
+                "[mem] RSS {} KiB，流式任务 {}，队列 {}，命中区 {}，曲目 {}",
+                crate::logger::rss_kib(),
+                self.downloader.active_streams(),
+                self.state.queue.len(),
+                self.state.hit_zones.capacity(),
+                current
+            );
         }
         // 只在音频引擎真的持有曲目时才用它上报的位置。
         //
@@ -2900,6 +3009,51 @@ mod tests {
         assert_eq!(first_screen_page(true, 30, 30), 1);
         assert_eq!(first_screen_page(true, 4, 30), 1);
         assert_eq!(first_screen_page(true, 0, 30), 1);
+    }
+
+    /// ↑↓ 只在「无列表的展示页 + 焦点在主区/歌曲列表」时才表示切歌。
+    ///
+    /// 回归：`Tab` 把焦点交给侧边栏后，在导航里按 ↑↓ 曾经会**切歌**，
+    /// 而侧边栏高亮不动——因为判据只看了标签页、没看焦点。
+    #[test]
+    fn up_down_switches_track_only_where_there_is_no_list() {
+        // 首页 / 可视化页 + 主区焦点 → 切歌（这两页没有任何列表）
+        for tab in [Tab::Home, Tab::Visualizer] {
+            assert!(
+                up_down_switches_track(tab, Focus::Primary),
+                "{tab:?} 主区应切歌"
+            );
+            assert!(
+                up_down_switches_track(tab, Focus::Secondary),
+                "{tab:?} 歌曲列表应切歌"
+            );
+            // 侧边栏要切栏目、队列要移动队列项，都不能被切歌抢走
+            assert!(
+                !up_down_switches_track(tab, Focus::Sidebar),
+                "{tab:?} 侧边栏焦点下不能切歌"
+            );
+            assert!(
+                !up_down_switches_track(tab, Focus::Queue),
+                "{tab:?} 队列焦点下不能切歌"
+            );
+        }
+
+        // 有列表的页面一律走列表导航
+        for tab in [
+            Tab::Search,
+            Tab::Playlists,
+            Tab::Artists,
+            Tab::Ranks,
+            Tab::Cloud,
+            Tab::Queue,
+            Tab::Settings,
+            Tab::Sources,
+        ] {
+            assert!(
+                !up_down_switches_track(tab, Focus::Primary),
+                "{tab:?} 有列表，不能被切歌抢走"
+            );
+        }
     }
 
     /// 首屏取的是末页（不满页）时，**仍然**要把整表取回来。

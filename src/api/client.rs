@@ -91,7 +91,6 @@ impl ApiClient {
                 .map_err(|error| AppError::Config(format!("代理地址 {proxy_url} 无效：{error}")))?;
             builder = builder.proxy(parsed);
         }
-
         let http = builder
             .build()
             .map_err(|error| AppError::Config(format!("构造 HTTP 客户端失败：{error}")))?;
@@ -107,6 +106,15 @@ impl ApiClient {
 
     pub fn base(&self) -> &str {
         &self.base
+    }
+
+    /// 当前带的 cookie（未经请求头拼装，原始值）。
+    ///
+    /// 音源模块（如汽水）用它重建自己的客户端：`ApiClient` 的请求形态
+    /// （只发 GET、只能往 `{base}{path}` 拼、只带 cookie 一个身份）不满足它们，
+    /// 但「有哪些身份凭据」这个信息是通用的，不该被这里藏起来。
+    pub fn cookie(&self) -> Option<&str> {
+        self.cookie.as_deref()
     }
 
     /// 更新 cookie（例如自动探测到 dfid 之后）。

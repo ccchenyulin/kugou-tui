@@ -1,6 +1,6 @@
 [package]
 name = "kugou-tui"
-version = "0.4.4"
+version = "0.5.0"
 edition = "2024"
 # MSRV 由**依赖**决定，不是本项目代码决定的。当前最高的是 `quantette`（要 1.90，
 # 经 ratatui-image → icy_sixel 引进来），其余：ratatui 0.30 要 1.88、rodio 0.22 要
@@ -14,7 +14,7 @@ edition = "2024"
 # 也别为了压低它去退依赖：ratatui-image 8.x 只认 ratatui 0.29，会和这里的 0.30
 # 编出两份 ratatui（不兼容，渲染不进同一个 Frame）。
 rust-version = "1.90"
-description = "轻量级酷狗音乐命令行 TUI 播放器，基于 KuGouMusicApi"
+description = "轻量级酷狗音乐命令行 TUI 播放器（首次运行自动准备接口服务，需 Node.js）"
 license = "MIT"
 repository = "https://github.com/sijin-xb/kugou-tui"
 keywords = ["tui", "music", "kugou", "player", "cli"]
@@ -24,7 +24,13 @@ categories = ["command-line-utilities", "multimedia"]
 name = "kugou-tui"
 path = "src/main.rs"
 
+# 随包内置的汽水 SDK（见 crates/libresoda/Cargo.toml 顶部的说明）。
+[workspace]
+members = ["crates/libresoda"]
+
 [dependencies]
+# 包名 libresoda-fork，Rust 侧 lib 名仍是 libresoda（见该 crate 的 Cargo.toml）。
+libresoda-fork = { path = "crates/libresoda", version = "0.1.0" }
 # --- TUI ---
 # 只依赖 ratatui，crossterm 通过 ratatui::crossterm 复用，避免版本错配
 ratatui = { version = "0.30", default-features = false, features = [
@@ -83,6 +89,14 @@ time = { version = "0.3", default-features = false, features = ["std", "local-of
 thiserror = "2"
 anyhow = "1"
 
+# --- 接口服务的自动引导（下载归档 + 解包）---
+#
+# 只在「本机还没有 KuGouMusicApi」时才会走到这条路（见 `bootstrap.rs`）。
+# 两个都是纯 Rust：flate2 用 rust_backend（miniz_oxide），不碰系统 zlib；
+# tar 也不引任何 C 依赖。刻意不开 flate2 的默认特性组合以免拖进 zlib。
+tar = "0.4"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
 # --- 基础设施 ---
 # `dirs` 在两个平台上给的都是各自的「正统」位置：Unix 是 XDG 目录，
 # Windows 是 Known Folder（`%APPDATA%` / `%LOCALAPPDATA%` / 用户主目录），
@@ -93,12 +107,30 @@ base64 = "0.23"
 crossbeam-channel = "0.5"
 qrcode = { version = "0.14.1", default-features = false }
 
+# --- 汽水音乐音源：音频流解密 ---
+# 汽水下发的音频是 MP4/CENC 加密流，密钥藏在 `play_auth` 里，要按样本逐段做
+# AES-128-CTR 才能解出可解码的音频（见 source/sodam/crypto.rs）。
+# 这两个 crate 只用在这个地方，都是纯 Rust 实现，不碰 C 库、不拖额外运行时。
+aes = "0.8"
+ctr = "0.9"
+
 # --- 终端图片（封面）---
 # 关掉默认的 image-defaults：那会打开 image 的全部格式解码器并拖进 rayon，
 # 和本项目「只开 jpeg / png」的取舍冲突。crossterm 是探测终端能力所必需的。
 ratatui-image = { version = "11.1.0", default-features = false, features = [
     "crossterm",
 ] }
+
+# --- 重采样（hi-res 母版降设备率时的抗混叠）---
+# rodio 自带的转换器是无滤波的线性插值，降采样会把 >输出奈奎斯特 的内容
+# 镜像折叠回可听频带（见 `audio/resample.rs` 顶部）。这里只借它的 sinc
+# 重采样器，不引它的音频 I/O——纯 DSP，跨平台，所以放在通用依赖区。
+#
+# **锁死在 0.16.2**：0.17 起 API 全换（`SincInterpolationParameters` →
+# `SincInterpolationParameters2`、`process_into_buffer` 签名也变了），
+# 5.0 更是另一套。用 `=` 精确锁，避免下次 `cargo update` 顺手升上去把
+# `resample.rs` 编译掉。
+rubato = "=0.16.2"
 
 # ======================================================================
 # 平台相关依赖

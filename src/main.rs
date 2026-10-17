@@ -46,6 +46,7 @@
 mod api;
 mod app;
 mod audio;
+mod bootstrap;
 mod cli;
 mod config;
 mod error;
@@ -71,7 +72,52 @@ use crate::config::Config;
 use crate::logger::tlog;
 
 fn main() -> anyhow::Result<()> {
+    // 分配器策略（glibc）：大块内存固定走 mmap。
+    //
+    // glibc 默认用**动态** mmap 阈值：一次大分配（封面解码、下载缓冲）会把阈值抬到
+    // 它的大小，之后同样大的块改从 arena 里切——free 只是把页还进 arena，RSS 从此
+    // 抬到历史峰值不回落，「听歌听多了破一百 MB」的病根之一。把阈值钉死，大块一律
+    // mmap：munmap 即还 OS，不经过 arena，也就**不依赖 trim 的时机**。
+    //
+    // # 为什么是 256 KiB 而不是 1 MiB
+    //
+    // 原先钉的是 1 MiB，实测偏大：酷狗封面解码出来是 300–900 KB 的位图，**正好落在
+    // 它下面**，仍然走 arena。`audio::engine::tests::mmap_threshold_effect_probe`
+    // 拿「尺寸随轮次变化」的分配模式量过（固定尺寸测不出来——那总能复用同一批
+    // chunk）：
+    //
+    // | 阈值 | 20 轮、不 trim 的 RSS |
+    // |---|---|
+    // | 1 MiB | +192 → +332 KiB，前 11 轮单调上升后停住 |
+    // | 256 KiB | 恒定 +0 |
+    //
+    // 代价是 ≥256 KiB 的分配多几次 mmap/munmap 系统调用（每首歌个位数，微秒级），
+    // 换来的是「free 即归还」，不受堆布局与 trim 时机影响。低于阈值的分配行为不变。
+    //
+    // 门控必须精确到 glibc：`mallopt` / `M_MMAP_THRESHOLD` 是 glibc 专有符号，
+    // Darwin（macOS）同属 Unix 但 libc 里没有这两样，用 `cfg(unix)` 会直接编译失败。
+    // Windows 的 MSVC 堆本来就积极归还，同样不需要。
+    #[cfg(target_env = "gnu")]
+    unsafe {
+        // M_MMAP_THRESHOLD 的惯例写法是传 -3（glibc 的内部编号）
+        libc::mallopt(libc::M_MMAP_THRESHOLD, 256 * 1024);
+    }
+
     let cli = Cli::parse();
+
+    // `--api-stop` 不看配置：它要停的是 PID 文件里记录的进程，读配置文件反而可能在
+    // 配置损坏时连「停止」这条退路都用不上。
+    if cli.api_stop {
+        match bootstrap::stop_recorded() {
+            Ok(0) => println!("没有正在运行的接口服务实例"),
+            Ok(count) => println!("已停止 {count} 个接口服务实例"),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
 
     // 优先级：命令行 > 环境变量（clap 直接读入 Cli）> 配置文件 > 默认值
     let mut config = Config::load();
@@ -98,6 +144,29 @@ fn main() -> anyhow::Result<()> {
     let log_path = Config::log_path();
     if let Err(error) = logger::init(&log_path) {
         eprintln!("警告：无法创建日志文件 {}：{error}", log_path.display());
+    }
+
+    // `--print-config` 是纯诊断：打印几行配置不该连带去下载一个接口服务。
+    if cli.print_config {
+        print_effective_config(&config);
+        return Ok(());
+    }
+
+    // 接口服务的自动引导。
+    //
+    // **必须赶在 `redirect_stderr_to_log()` 之前**：那之后 stderr 就进了日志文件，
+    // 而这里要给用户看的是进度（下载、装依赖、起服务）和失败原因——写进日志等于没说。
+    // npm 子进程的输出同样继承 stderr，放在前面才能实时看到它在做什么。
+    if let Err(error) = bootstrap::prepare(&config) {
+        eprintln!("\n无法启动酷狗接口服务：\n  {error}");
+        std::process::exit(1);
+    }
+    if cli.api_start {
+        // 显式要求常驻：本次拉起的实例不随进程退出停止
+        bootstrap::detach();
+        println!("接口服务已就绪：{}", config.api_base);
+        println!("停止它：kugou-tui --api-stop");
+        return Ok(());
     }
 
     // 尽早把 stderr 接到日志文件上。
@@ -128,11 +197,6 @@ fn main() -> anyhow::Result<()> {
         config.api_base
     );
 
-    if cli.print_config {
-        print_effective_config(&config);
-        return Ok(());
-    }
-
     let mut app = app::App::new(config).context("初始化失败")?;
 
     // `--search` 让用户直接进入结果页，省一次按键
@@ -145,7 +209,13 @@ fn main() -> anyhow::Result<()> {
         app.startup_search(keyword);
     }
 
-    app.run()
+    let result = app.run();
+
+    // 停掉本次拉起的接口服务。放在 `run()` 返回之后而不是靠析构：release 构建里
+    // `panic = "abort"`，panic 时析构函数根本不会跑，服务会变成孤儿。
+    bootstrap::shutdown();
+
+    result
 }
 
 /// `--print-config`：把最终生效的配置打印出来，方便排查「为什么没读我的配置文件」。
@@ -167,6 +237,9 @@ fn print_effective_config(config: &Config) {
         kind.label(),
         match kind.platform_env() {
             Some(value) => format!("（服务端需 platform={value}）"),
+            // 汽水直连公网，没有「服务端」这回事；写成「服务端不设 platform」
+            // 会让人以为本机该有个服务在跑。
+            None if kind.is_remote() => "（直连公网，无需本地服务）".to_string(),
             None => "（服务端不设 platform）".to_string(),
         }
     );
@@ -178,6 +251,27 @@ fn print_effective_config(config: &Config) {
             "未登录（云端歌单不可用）"
         }
     );
+
+    // 汽水的签名状态单独说清：它决定「VIP 整曲 / 无损能不能拿到」，
+    // 而出问题的现象是「只有 30 秒试听」——不说清的话很难联想到这一项。
+    if kind == crate::source::SourceKind::Sodam {
+        let app = &config.sources.sodam_app;
+        let status = match app.signer_base() {
+            Some(base) => {
+                let using_default = base == crate::source::sodam::client::DEFAULT_SIGNER_URL;
+                if using_default {
+                    "公共签名服务（开箱即用；长期使用建议换成自建的）".to_string()
+                } else {
+                    format!("已配置：{base}")
+                }
+            }
+            None => "已关闭（只放试听与免费曲目）".to_string(),
+        };
+        println!("签名服务  : {status}");
+        if app.has_device_fingerprint() {
+            println!("设备指纹  : 已配置（手工抓包路径）");
+        }
+    }
     println!(
         "设备指纹  : {}",
         config.dfid.as_deref().unwrap_or("（尚未获取）")
@@ -192,6 +286,22 @@ fn print_effective_config(config: &Config) {
     println!(
         "代理      : {}",
         config.proxy.as_deref().unwrap_or("（未设置）")
+    );
+    println!(
+        "自动拉起  : {}",
+        if config.api_auto_start {
+            "是"
+        } else {
+            "否（接口服务需自己启动）"
+        }
+    );
+    println!(
+        "服务目录  : {}",
+        config
+            .api_dir
+            .as_deref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "（自动查找）".to_string())
     );
     println!(
         "16 色模式 : {}",
