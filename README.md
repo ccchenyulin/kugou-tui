@@ -1,6 +1,6 @@
 # kugou-tui
 
-在终端里听酷狗：逐字歌词、真实频谱、单进程二进制，常驻内存约 19 MiB。
+在终端里听酷狗：逐字歌词、真实频谱、单进程二进制，播放时常驻内存约 17 MiB。
 
 ![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)
 ![Rust](https://img.shields.io/badge/rust-1.90%2B-orange.svg)
@@ -20,18 +20,21 @@ kugou-tui
 
 从源码构建就 `git clone` 之后 `cargo build --release`，产物约 11.7 MiB。需要 Rust 1.90+；Linux 另需 `alsa-lib` 开发头文件和 `pkg-config`（Debian/Ubuntu 是 `libasound2-dev pkg-config`，Arch 是 `alsa-lib`），Windows 只需 MSVC 工具链，macOS 只需 Xcode 命令行工具。
 
+想编出一个彻底不含 Node 引导代码的二进制（没有下载器、没有 `npm` 调用），用 `cargo build --release --no-default-features`。此时 `--api node` 会直接报「该 feature 已在构建时禁用」。
+
 Release 页提供 Linux x86_64、Windows x86_64、macOS arm64 三个包，内含二进制、`scripts/`、`README.md`、`CHANGELOG.md`、`LICENSE`。Intel Mac 请从源码构建。Windows 把下面的 `./scripts/` 换成 `.\scripts\` 下的 `.ps1`。
 
 ```bash
 tar xzf kugou-tui-<版本>-x86_64-unknown-linux-gnu.tar.gz
 cd kugou-tui-<版本>-x86_64-unknown-linux-gnu
-./scripts/kugou-api-install kugou   # 只需一次
 ./scripts/kugou-tui
 ```
 
+`scripts/kugou-tui` 是启动器：默认 `--api native` 时直接进播放器。只有切到 `--api node` 或网易云音源，它才会准备并拉起本机接口服务。
+
 ## 快速开始
 
-按 `2` 搜索，`Enter` 播放，按 `L` 扫码登录拉云端歌单。不登录也能听，只有搜索和云端歌单需要账号。
+按 `2` 搜索，`Enter` 播放，按 `L` 扫码登录拉云端歌单。不登录也能听，云端歌单与收藏需要账号。
 
 ## 按键
 
@@ -40,11 +43,13 @@ cd kugou-tui-<版本>-x86_64-unknown-linux-gnu
 | 按键 | 动作 |
 |---|---|
 | `1`–`9` `0` | 主页 搜索 歌单 歌手 排行榜 云端 队列 音源 设置 可视化 |
+| `Tab` `S-Tab` | 切换焦点区域 |
 | `j` `k` `↑` `↓` | 上下移动（首页与可视化页改为切歌） |
+| `g` `G` `PgUp` `PgDn` | 首行 / 末行 · 翻页 |
 | `Enter` `Esc` | 播放 / 进入 · 返回 |
 | `Space` `n` `p` | 播放暂停 · 下一首 · 上一首 |
-| `←` `→` | 后退 / 前进 5 秒 |
-| `+` `-` `m` | 音量 · 静音 |
+| `←` `→` | 后退 / 前进 5 秒（设置页里改选中项） |
+| `+` `-` `m` | 音量 ±5% · 静音 |
 | `r` `y` `W` | 循环模式 · 切音质 · 下载当前曲目 |
 | `l` `[` `]` | 歌词面板 · 延迟 / 提前 100 ms |
 | `a` `i` `A` | 加入队列 · 插播下一首 · 整段加入 |
@@ -52,7 +57,8 @@ cd kugou-tui-<版本>-x86_64-unknown-linux-gnu
 | `s` `S` `d` `D` `N` | 收藏 · 同步队列 · 移除 · 删歌单 · 新建 |
 | `L` `V` `C` | 扫码登录 · 领当日概念版 VIP · 清音频缓存 |
 | `/` `R` `M` `b` `c` `f` | 搜索框 · 刷新 · 加载更多 · 排行榜 · 云端歌单 · 歌手筛选 |
-| `?` `q` | 帮助面板（40 条） · 退出 |
+| `,` `v` `\` | 设置页 · 切换音源 · 显示/隐藏侧边栏 |
+| `?` `F1` `q` `Q` | 帮助面板（40 条） · 退出 / 强制退出 |
 
 `;` 或鼠标右键打开歌曲菜单。双击列表行等同 `Enter`，滚轮移动选中项，单击进度条或歌词行跳转，设置页里 `←` `→` 改值。自定义快捷键写配置文件里的 `[keymap]`。
 
@@ -60,24 +66,27 @@ cd kugou-tui-<版本>-x86_64-unknown-linux-gnu
 
 配置文件在 `~/.config/kugou-tui/config.toml`（Windows `%APPDATA%\kugou-tui\`，macOS `~/Library/Application Support/kugou-tui/`），`--print-config` 打印当前生效值。
 
-常用项：`api`、`api_base`、`api_auto_start`、`api_dir`、`volume`、`cache_dir`、`cache_limit`（默认 512 MiB）、`page_size`、`tick_ms`、`audio_device`、`lite_mode`（关封面与频谱，刷新降到 5fps）、`lyric_offset_ms`、`ws_port`、`[keymap]`。命令行参数与配置项一一对应，`--help` 有完整列表。
+常用项：`api_backend`（`native` / `node`）、`api_auto_start`、`api_dir`、`volume`（0–1）、`quality`（`128` / `320` / `flac` / `high`）、`playback_mode`（`sequential` / `repeat_all` / `repeat_one` / `shuffle`）、`cache_dir`、`cache_limit_mib`（默认 512，`0` 不限制）、`page_size`（默认 30）、`tick_ms`（默认 200）、`audio_device`、`download_dir`、`theme`、`basic_color`、`lite_mode`（关封面与频谱，刷新降到 5fps）、`lyric_offset_ms`、`cover_fill`、`qr_aspect`、`tray`、`ws`、`ws_port`（默认 6520）、`proxy`、`[keymap]`。命令行参数与配置项一一对应，`--help` 有完整列表。
+
+`[keymap]` 的键是动作名（`quit`、`play_pause`、`open_search` 等，完整列表见 `src/keymap.rs` 的 `REBINDABLE`），值是按键写法（`Q`、`ctrl+n`、`f1`）。
 
 ## 音源
 
 `8` 进音源页：`Enter` 启用或禁用，`E` 设为默认，`J` `K` 调优先级。
 
 - **酷狗概念版**：接口与标准版不同，登录态不通用，切过去要按 `L` 重新扫码。`V` 领当日 VIP，登录后和切音源时会自动领一次。
-- **网易云**：需要本机跑一份 Meting-API，配 `[sources.netease]`。
-- **汽水音乐**：`--sodam-cookie` 手填 cookie，不支持扫码。VIP 整曲还要签名头，或指向一台签名服务。
+- **网易云**：需要本机跑一份 NeteaseCloudMusicApi（`./scripts/kugou-api-install netease`，端口 3002）。
+- **汽水音乐**：直连公网，不需要本机服务。扫码登录走 libresoda 内置的 CDP 签名页，要求本机有 Chrome / Chromium / Edge；也可以 `--sodam-cookie` 手填 cookie。VIP 整曲依赖应用签名，默认用上游公共签名服务，`--sodam-signer-url` 可指向自建实例，填 `none` 关闭签名（只剩试听与免费曲目）。
 
-`--api node` 回退会自行下载固定提交的 KuGouMusicApi、装依赖、拉起服务（首次约 25 秒），退出时随程序停止。想自己管就设 `api_auto_start = false`，或用 `./scripts/kugou-api start|stop|status|logs`。
+`--api node` 回退会自行下载固定提交的 KuGouMusicApi、装依赖、拉起服务（首次需要几十秒，`npm install` 有超时上限），退出时随程序停止。想自己管就设 `api_auto_start = false`，或用 `./scripts/kugou-api start|stop|restart|status|logs`。想提前把首次安装花掉、之后秒开，先跑一次 `kugou-tui --api-start`，它拉起的服务留在后台，用 `--api-stop` 停掉。
 
 ## 排障
 
-- 内存只涨不降：`KUGOU_TUI_MEM_TRACE=1 kugou-tui`，日志每 5 秒一行 RSS（`Threads:` 正常 7–9，多了就是线程或任务泄漏）。日志在 `~/.cache/kugou-tui/kugou-tui.log`，`KUGOU_TUI_DEBUG=1` 打开调试输出。
-- 搜不到歌：没登录。搜索和云端歌单要账号，歌单广场不用。
+- 内存只涨不降：`KUGOU_TUI_MEM_TRACE=1 kugou-tui`，日志每 5 秒一行 `[mem] RSS … KiB，流式任务 N，队列 N，命中区 N，曲目 …`。流式任务长期大于 1 说明下载任务没被摘除。日志在 `~/.cache/kugou-tui/kugou-tui.log`（权限 0600），`KUGOU_TUI_DEBUG=1` 打开调试输出。
+- 搜不到歌：按 `L` 登录后重试。云端歌单、收藏与歌单广场的部分操作需要账号。
 - 托盘图标不出现：需要 `org.kde.StatusNotifierWatcher`（Quickshell / waybar / KDE 都有），托盘线程每 5 秒重试注册。
-- 封面是色块、中文显示成方框：前者是终端不支持 Kitty / iTerm2 / sixel 图形协议，回退成半块字符画；后者是缺 Nerd Font 或中文字体，设 `KUGOU_TUI_NERD_FONT=1` 强制启用图标字体。
+- 封面是色块：终端不支持 Kitty / iTerm2 / sixel 图形协议，封面回退成半块字符画。换一个支持的终端，或开 `lite_mode` 直接不画封面。
+- 中文显示成方框、图标缺失：缺中文字体或 Nerd Font。装好字体后设 `KUGOU_TUI_NERD_FONT=1` 强制启用图标字体（Windows 上默认按没有 Nerd Font 处理）。
 
 ## 开发
 
