@@ -4,6 +4,12 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/)。
 
+## [0.6.4] - 2026-10-17
+
+### 修复
+
+- **多声卡设备上启动卡死**：枚举音频输出设备时，过滤器对每个设备重复调用 `sound_server_present()`，而该函数内部又完整枚举一遍设备并逐个查询 ALSA 驱动，导致 O(N²) 次 ALSA ioctl。在多声卡机器上启动会长时间无响应。现把 `sound_server_present()` 提到过滤器之前只查询一次。
+
 ## [0.6.3] - 2026-10-14
 
 ### 变更
