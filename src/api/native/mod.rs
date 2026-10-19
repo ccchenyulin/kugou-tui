@@ -4454,7 +4454,8 @@ mod tests {
         assert!(playlists.iter().all(|playlist| !playlist.id.is_empty()));
     }
 
-    /// 云歌单写接口的真实端到端验证。只在隔离配置下跑。    #[tokio::test]
+    /// 云歌单写接口的真实端到端验证。只在隔离配置下跑。
+    #[tokio::test]
     #[ignore = "真实写接口：需要隔离配置（KUGOU_TUI_CONFIG_DIR）与真实登录态"]
     async fn probe_real_cloud_playlist_write() {
         let Ok(config_dir) = std::env::var("KUGOU_TUI_CONFIG_DIR") else {
