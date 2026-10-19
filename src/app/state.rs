@@ -623,10 +623,7 @@ impl SearchKind {
 
     /// 下一个类型（循环）。
     pub fn next(self) -> Self {
-        let index = Self::ALL
-            .iter()
-            .position(|kind| *kind == self)
-            .unwrap_or(0);
+        let index = Self::ALL.iter().position(|kind| *kind == self).unwrap_or(0);
         Self::ALL[(index + 1) % Self::ALL.len()]
     }
 }

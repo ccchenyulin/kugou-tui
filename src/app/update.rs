@@ -1794,7 +1794,8 @@ impl App {
                 if count == 0 {
                     self.state.warn(format!("「{keyword}」没有找到歌手"));
                 } else {
-                    self.state.success(format!("「{keyword}」找到 {count} 位歌手"));
+                    self.state
+                        .success(format!("「{keyword}」找到 {count} 位歌手"));
                     self.state.focus = Focus::Primary;
                 }
             }
@@ -1809,7 +1810,8 @@ impl App {
                 if count == 0 {
                     self.state.warn(format!("「{keyword}」没有找到歌单"));
                 } else {
-                    self.state.success(format!("「{keyword}」找到 {count} 个歌单"));
+                    self.state
+                        .success(format!("「{keyword}」找到 {count} 个歌单"));
                     self.state.focus = Focus::Primary;
                 }
             }
@@ -1867,7 +1869,8 @@ impl App {
                         descending,
                     );
                     self.state.focus = Focus::Secondary;
-                    self.state.success(format!("{} · {count} 首", playlist.name));
+                    self.state
+                        .success(format!("{} · {count} 首", playlist.name));
                     return;
                 }
                 // 用户可能已经打开了另一个歌单：这条迟到的结果直接覆盖右侧列表的话，

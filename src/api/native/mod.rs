@@ -1154,11 +1154,7 @@ impl MusicApi for NativeApi {
     ) -> Result<Vec<Playlist>> {
         let endpoint = search_endpoint("special", keywords, page, page_size);
         let root = self.transport.get_json(&endpoint, false).await?;
-        Ok(extract_list(
-            data_of(&root),
-            &["lists"],
-            playlist_from_json,
-        ))
+        Ok(extract_list(data_of(&root), &["lists"], playlist_from_json))
     }
 
     async fn song_stream_url(&self, song: &Song, quality: &str) -> Result<StreamUrl> {
@@ -1617,10 +1613,7 @@ mod tests {
     #[test]
     fn search_endpoint_matches_kat() {
         assert_eq!(
-            prepared_url(
-                SourceKind::Kugou,
-                &search_endpoint("song", "周杰伦", 1, 30)
-            ),
+            prepared_url(SourceKind::Kugou, &search_endpoint("song", "周杰伦", 1, 30)),
             "https://gateway.kugou.com/v3/search/song?dfid=1234567890abcdef12345678&mid=231699103997194646178265604655475531917&uuid=-&appid=1005&clientver=20489&clienttime=1700000000&token=TOKENFIXTURE&userid=10001&albumhide=0&iscorrection=1&keyword=%E5%91%A8%E6%9D%B0%E4%BC%A6&nocollect=0&page=1&pagesize=30&platform=AndroidFilter&signature=9bb2d7192e4ec15c72add9daaf9728a6"
         );
     }
@@ -4439,10 +4432,7 @@ mod tests {
             println!("  {} (id={})", artist.name, artist.id);
         }
 
-        let playlists = api
-            .search_playlists(keyword, 1, 5)
-            .await
-            .expect("搜索歌单");
+        let playlists = api.search_playlists(keyword, 1, 5).await.expect("搜索歌单");
         println!("歌单 {} 个", playlists.len());
         for playlist in playlists.iter().take(3) {
             println!("  {} (id={})", playlist.name, playlist.id);

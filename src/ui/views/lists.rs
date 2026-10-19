@@ -358,7 +358,10 @@ pub fn render_search_input(
             tabs.push(Span::styled(format!(" {} ", kind.label()), theme.dim()));
         }
     }
-    tabs.push(Span::styled(format!("  {}", key_hint_for("ctrl+t")), theme.dim()));
+    tabs.push(Span::styled(
+        format!("  {}", key_hint_for("ctrl+t")),
+        theme.dim(),
+    ));
     let tab_area = Rect {
         x: inner.x,
         y: inner.y,

@@ -847,14 +847,8 @@ mod tests {
     #[test]
     fn text_input_mode_allows_ctrl_t_for_search_kind() {
         let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
-        assert_eq!(
-            resolve(ctrl_t, KeyMode::TextInput),
-            Action::CycleSearchKind
-        );
-        assert_eq!(
-            resolve(ctrl_t, KeyMode::Normal),
-            Action::CycleSearchKind
-        );
+        assert_eq!(resolve(ctrl_t, KeyMode::TextInput), Action::CycleSearchKind);
+        assert_eq!(resolve(ctrl_t, KeyMode::Normal), Action::CycleSearchKind);
     }
 
     /// 编辑动作在输入态下必须是编辑语义，而不是播放控制。

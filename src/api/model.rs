@@ -806,7 +806,13 @@ pub fn artist_from_json(value: &Value) -> Option<Artist> {
     // 少认这一套的后果是搜索结果里每位歌手都解析成空名字，整列直接消失。
     let name = pick_string(
         value,
-        &["name", "author_name", "singername", "ArtistName", "AuthorName"],
+        &[
+            "name",
+            "author_name",
+            "singername",
+            "ArtistName",
+            "AuthorName",
+        ],
     )?;
     Some(Artist {
         id: pick_i64(
@@ -829,10 +835,7 @@ pub fn artist_from_json(value: &Value) -> Option<Artist> {
                 "AudioCount",
             ],
         ),
-        follower_count: pick_u32(
-            value,
-            &["fanscount", "fans_count", "fansnum", "FansNum"],
-        ),
+        follower_count: pick_u32(value, &["fanscount", "fans_count", "fansnum", "FansNum"]),
     })
 }
 

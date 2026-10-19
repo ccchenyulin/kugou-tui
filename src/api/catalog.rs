@@ -125,11 +125,7 @@ impl NodeApi {
                 ],
             )
             .await?;
-        Ok(extract_list(
-            data_of(&root),
-            &["lists"],
-            playlist_from_json,
-        ))
+        Ok(extract_list(data_of(&root), &["lists"], playlist_from_json))
     }
 
     // ------------------------------------------------------------------

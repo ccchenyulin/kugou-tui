@@ -598,8 +598,7 @@ fn output_devices() -> Vec<rodio::cpal::Device> {
         // 「挤死别人」的问题，维持原有行为。非 Linux 平台拿不到 PCM 名，
         // `sound_server_present` 恒为 false，同样不受影响。
         .filter(|device| {
-            !server_routed
-                || driver_of(device).is_some_and(|driver| is_server_routed(&driver))
+            !server_routed || driver_of(device).is_some_and(|driver| is_server_routed(&driver))
         })
         .filter(|device| device.default_output_config().is_ok())
         .filter(|device| seen.insert(device_name(device).unwrap_or_default()))
