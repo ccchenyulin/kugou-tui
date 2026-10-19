@@ -1,4 +1,4 @@
-﻿﻿<#
+<#
 .SYNOPSIS
     kugou-tui —— Windows 构建 + 打包。
 

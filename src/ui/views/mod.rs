@@ -15,7 +15,8 @@ pub mod visualizer;
 
 pub use lists::SongView;
 pub use lists::{
-    render_artist_entries, render_cloud_entries, render_playlist_entries, render_rank_entries,
+    render_artist_entries, render_artist_entries_titled, render_cloud_entries,
+    render_playlist_entries, render_playlist_entries_titled, render_rank_entries,
     render_search_input, render_song_list,
 };
 pub use player::{

@@ -79,6 +79,55 @@ impl NodeApi {
         Ok(extract_songs(data_of(&root)))
     }
 
+    /// 歌手搜索（`type=author`）。
+    ///
+    /// 响应是**扁平数组**（`data.lists[]` 每条就是一位歌手），不是 `/artist/lists`
+    /// 那种按首字母分组的形状，所以不能复用 [`collect_artists`]——那个会去找
+    /// `info[].singer[]` 这层包装，找不到就退回兜底扫描。
+    pub async fn search_artists(
+        &self,
+        keywords: &str,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Vec<Artist>> {
+        let root = self
+            .get_json_uncached(
+                "/search",
+                &[
+                    ("keywords", keywords.to_string()),
+                    ("type", "author".to_string()),
+                    ("page", page.to_string()),
+                    ("pagesize", page_size.to_string()),
+                ],
+            )
+            .await?;
+        Ok(extract_list(data_of(&root), &["lists"], artist_from_json))
+    }
+
+    /// 歌单搜索（`type=special`）。
+    ///
+    /// 同样是扁平数组；`playlist_from_json` 认 `gid` / `specialname`，
+    /// 取回的 id 可以直接交给 [`Self::playlist_tracks`]。
+    pub async fn search_playlists(
+        &self,
+        keywords: &str,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Vec<Playlist>> {
+        let root = self
+            .get_json_uncached(
+                "/search",
+                &[
+                    ("keywords", keywords.to_string()),
+                    ("type", "special".to_string()),
+                    ("page", page.to_string()),
+                    ("pagesize", page_size.to_string()),
+                ],
+            )
+            .await?;
+        Ok(extract_list(data_of(&root), &["lists"], playlist_from_json))
+    }
+
     // ------------------------------------------------------------------
     // 歌单
     // ------------------------------------------------------------------

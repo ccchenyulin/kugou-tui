@@ -762,6 +762,9 @@ pub fn extract_songs(data: &Value) -> Vec<Song> {
 // ============================================================================
 
 pub fn playlist_from_json(value: &Value) -> Option<Playlist> {
+    // 搜索接口（`/search?type=special`）把歌单 id 放在 `gid`，名字放在
+    // `specialname`，作者放在 `nickname`。已有的候选键大多能命中，`gid` 与
+    // `specialname` 是搜索独有的。
     let list_id = pick_i64(value, &["listid", "list_id", "specialid", "special_id"]);
     let global_id = pick_string(value, &["global_collection_id", "global_id", "gid"]);
 
@@ -798,16 +801,41 @@ pub fn playlist_from_json(value: &Value) -> Option<Playlist> {
 }
 
 pub fn artist_from_json(value: &Value) -> Option<Artist> {
-    let name = pick_string(value, &["name", "author_name", "singername", "ArtistName"])?;
+    // 搜索接口（`/search?type=author`）用的是 PascalCase：`AuthorId` / `AuthorName`
+    // / `Avatar` / `AudioCount` / `FansNum`，与 `/artist/lists` 的 snake_case 完全不同。
+    // 少认这一套的后果是搜索结果里每位歌手都解析成空名字，整列直接消失。
+    let name = pick_string(
+        value,
+        &[
+            "name",
+            "author_name",
+            "singername",
+            "ArtistName",
+            "AuthorName",
+        ],
+    )?;
     Some(Artist {
-        id: pick_i64(value, &["id", "author_id", "singerid", "ArtistId"]).unwrap_or_default(),
+        id: pick_i64(
+            value,
+            &["id", "author_id", "singerid", "ArtistId", "AuthorId"],
+        )
+        .unwrap_or_default(),
         name,
-        avatar: pick_string(value, &["img", "avatar", "pic", "singer_img", "image"]),
+        avatar: pick_string(
+            value,
+            &["img", "avatar", "pic", "singer_img", "image", "Avatar"],
+        ),
         song_count: pick_u32(
             value,
-            &["songcount", "song_count", "audio_count", "musicnum"],
+            &[
+                "songcount",
+                "song_count",
+                "audio_count",
+                "musicnum",
+                "AudioCount",
+            ],
         ),
-        follower_count: pick_u32(value, &["fanscount", "fans_count", "fansnum"]),
+        follower_count: pick_u32(value, &["fanscount", "fans_count", "fansnum", "FansNum"]),
     })
 }
 
@@ -849,6 +877,45 @@ pub fn format_duration_ms(milliseconds: u64) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 搜索结果里的歌手用 PascalCase（`/search?type=author`），
+    /// 与 `/artist/lists` 的 snake_case 不同。只认一套会让搜索歌手整列消失。
+    #[test]
+    fn parses_search_author_payload() {
+        let value = json!({
+            "AuthorId": 3520,
+            "AuthorName": "周杰伦",
+            "Avatar": "http://singerimg.kugou.com/a.jpg",
+            "AudioCount": 1849,
+            "FansNum": 25812834,
+            "IsReal": 1
+        });
+        let artist = artist_from_json(&value).expect("应当解析出歌手");
+        assert_eq!(artist.id, 3520);
+        assert_eq!(artist.name, "周杰伦");
+        assert_eq!(artist.song_count, Some(1849));
+        assert_eq!(artist.follower_count, Some(25812834));
+        assert!(artist.avatar.is_some());
+    }
+
+    /// 搜索结果里的歌单 id 是 `gid`（`collection_…` 字符串），名字是 `specialname`。
+    /// 这个 id 要能直接交给 `/playlist/track/all`。
+    #[test]
+    fn parses_search_playlist_payload() {
+        let value = json!({
+            "specialid": 6409645,
+            "gid": "collection_3_2132029040_287_0",
+            "specialname": "周杰伦必听热歌",
+            "song_count": 154,
+            "nickname": "酷乐推荐",
+            "img": "http://imge.kugou.com/c.png"
+        });
+        let playlist = playlist_from_json(&value).expect("应当解析出歌单");
+        assert_eq!(playlist.id, "collection_3_2132029040_287_0");
+        assert_eq!(playlist.name, "周杰伦必听热歌");
+        assert_eq!(playlist.song_count, 154);
+        assert_eq!(playlist.creator.as_deref(), Some("酷乐推荐"));
+    }
 
     /// 搜索结果的解析（真实响应结构，含 FileName / OriSongName / FileHash / Duration）。
     ///

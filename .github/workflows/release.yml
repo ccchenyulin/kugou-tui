@@ -159,9 +159,40 @@ jobs:
           }
           Write-Host "版本核对通过：$actual"
 
+      # 不用 scripts/build-windows.ps1：它的 [CmdletBinding()] 在 pwsh 7 上
+      # 报 ParserError（0.6.3 起每次都失败），但二进制本身编得出来。
+      # 这里内联做同样的事：组目录、拷脚本与文档、压 zip。
       - name: 打包
         shell: pwsh
-        run: ./scripts/build-windows.ps1 -SkipBuild
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = "$env:TAG".TrimStart('v')
+          $target = (rustc -vV | Select-String '^host:\s*(.+)$').Matches.Groups[1].Value.Trim()
+          $name = "kugou-tui-$version-$target"
+          $dist = Join-Path $PWD 'dist'
+          $stage = Join-Path $dist $name
+          $zip = Join-Path $dist "$name.zip"
+
+          if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+          if (Test-Path $zip) { Remove-Item -Force $zip }
+          New-Item -ItemType Directory -Force -Path (Join-Path $stage 'scripts') | Out-Null
+
+          Copy-Item (Join-Path $PWD 'target\release\kugou-tui.exe') (Join-Path $stage 'kugou-tui.exe')
+
+          foreach ($script in 'kugou-api', 'kugou-api-install', 'kugou-tui',
+                              'kugou-api.ps1', 'kugou-api-install.ps1', 'kugou-tui.ps1') {
+            Copy-Item (Join-Path $PWD "scripts\$script") (Join-Path $stage 'scripts')
+          }
+          foreach ($file in 'LICENSE', 'README.md', 'CHANGELOG.md') {
+            Copy-Item (Join-Path $PWD $file) $stage
+          }
+
+          Compress-Archive -Path $stage -DestinationPath $zip -CompressionLevel Optimal
+          Remove-Item -Recurse -Force $stage
+
+          Write-Host "产出：dist\$name.zip"
+          Write-Host "SHA256：$((Get-FileHash $zip -Algorithm SHA256).Hash.ToLower())"
+          Get-ChildItem $dist | ForEach-Object { Write-Host "  $($_.Name)" }
 
       - name: 传成 artifact
         uses: actions/upload-artifact@v4

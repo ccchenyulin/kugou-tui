@@ -988,6 +988,7 @@ impl App {
             // MPRIS 的 Seek：一次带数值的相对跳转（见 keymap::Action::SeekBy）
             Action::SeekBy(delta_ms) => self.seek_by(delta_ms),
             Action::LoadMoreSearch => self.load_more_search(),
+            Action::CycleSearchKind => self.cycle_search_kind(),
             Action::SeekBackward => {
                 if self.state.focus == Focus::Sidebar {
                     self.state.cycle_focus(false);
@@ -1116,11 +1117,22 @@ impl App {
                     self.run_search();
                 } else if self.state.search.input.is_empty() {
                     self.state.search.editing = true;
+                } else if self.state.search.expanded.is_none()
+                    && self.state.search.kind != crate::app::state::SearchKind::Song
+                {
+                    // 歌手 / 歌单类型下，Primary 就是结果列表本身：
+                    // Enter 应该展开选中项，而不是重跑一次同样的搜索。
+                    self.expand_search_selection();
                 } else {
                     self.run_search();
                 }
             }
-            (Tab::Search, Focus::Secondary) => self.play_from_focused_songs(),
+            // 歌手 / 歌单结果列表按 Enter 就地展开；单曲走正常播放。
+            (Tab::Search, Focus::Secondary) => {
+                if !self.expand_search_selection() {
+                    self.play_from_focused_songs();
+                }
+            }
             (Tab::Playlists, Focus::Primary) => self.open_selected_playlist(),
             (Tab::Playlists, Focus::Secondary) => self.play_from_focused_songs(),
             (Tab::Artists, Focus::Primary) => self.open_selected_artist(),
@@ -1771,6 +1783,39 @@ impl App {
                 }
             }
 
+            Loaded::SearchArtists { keyword, artists } => {
+                // 同单曲搜索：迟到的结果必须丢掉，否则旧关键词的歌手会盖住新结果。
+                if !accepts_search_result(&self.state.search.submitted, &keyword) {
+                    return;
+                }
+                self.state.busy = None;
+                let count = artists.len();
+                self.state.search.artists.replace(artists);
+                if count == 0 {
+                    self.state.warn(format!("「{keyword}」没有找到歌手"));
+                } else {
+                    self.state
+                        .success(format!("「{keyword}」找到 {count} 位歌手"));
+                    self.state.focus = Focus::Primary;
+                }
+            }
+
+            Loaded::SearchPlaylists { keyword, playlists } => {
+                if !accepts_search_result(&self.state.search.submitted, &keyword) {
+                    return;
+                }
+                self.state.busy = None;
+                let count = playlists.len();
+                self.state.search.playlists.replace(playlists);
+                if count == 0 {
+                    self.state.warn(format!("「{keyword}」没有找到歌单"));
+                } else {
+                    self.state
+                        .success(format!("「{keyword}」找到 {count} 个歌单"));
+                    self.state.focus = Focus::Primary;
+                }
+            }
+
             Loaded::Playlists {
                 category,
                 title,
@@ -1799,6 +1844,35 @@ impl App {
                 songs,
                 source,
             } => {
+                // 搜索页就地展开：判据是 `search.expanded`，落到搜索页的歌曲区。
+                // 与 `ArtistSongs` 同理，必须先于 `open_playlist` 那条判据。
+                if self.state.tab == Tab::Search {
+                    let matches = matches!(
+                        self.state.search.expanded,
+                        Some(crate::app::state::SearchExpanded::Playlist { ref id, .. })
+                            if id == &playlist.id
+                    );
+                    if !matches {
+                        return;
+                    }
+                    self.state.busy = None;
+                    let descending = self.state.sort_descending;
+                    let count = songs.len();
+                    self.state.search.results.set_songs_sorted(
+                        self.state
+                            .search
+                            .expanded
+                            .as_ref()
+                            .map(crate::app::state::SearchExpanded::pane_title)
+                            .unwrap_or_default(),
+                        songs,
+                        descending,
+                    );
+                    self.state.focus = Focus::Secondary;
+                    self.state
+                        .success(format!("{} · {count} 首", playlist.name));
+                    return;
+                }
                 // 用户可能已经打开了另一个歌单：这条迟到的结果直接覆盖右侧列表的话，
                 // 会变成「标题写着 B、内容是 A」。只认当前打开的那个歌单的结果。
                 //
@@ -1859,6 +1933,34 @@ impl App {
             }
 
             Loaded::ArtistSongs { artist, songs } => {
+                // 搜索页就地展开：判据是 `search.expanded`，落到搜索页的歌曲区。
+                // 必须先于下面那条 `artists.open_artist` 判据——搜索页展开时
+                // 那个字段本来就是空的，结果会被整条丢掉，界面永远停在「载入中…」。
+                if self.state.tab == Tab::Search {
+                    let matches = matches!(
+                        self.state.search.expanded,
+                        Some(crate::app::state::SearchExpanded::Artist { id, .. }) if id == artist.id
+                    );
+                    if !matches {
+                        return;
+                    }
+                    self.state.busy = None;
+                    let descending = self.state.sort_descending;
+                    let count = songs.len();
+                    self.state.search.results.set_songs_sorted(
+                        self.state
+                            .search
+                            .expanded
+                            .as_ref()
+                            .map(crate::app::state::SearchExpanded::pane_title)
+                            .unwrap_or_default(),
+                        songs,
+                        descending,
+                    );
+                    self.state.focus = Focus::Secondary;
+                    self.state.success(format!("{} · {count} 首", artist.name));
+                    return;
+                }
                 // 同歌单：用户可能已经点了下一位歌手，只认当前打开的那位
                 let open = self.state.artists.open_artist.as_ref().map(|open| open.id);
                 if !accepts_open_item(open, artist.id) {
@@ -2314,6 +2416,21 @@ impl App {
             LoadingTarget::SearchResults => {
                 // 失败的可能是「加载更多」那一页，标志得收掉——否则 M 会被永久挡住
                 self.state.search.loading_more = false;
+                // 按当前类型落到对应的列表上，否则切到歌手搜索失败时，
+                // 错误会显示在单曲列表里，而歌手列表一直转圈。
+                if self.state.search.expanded.is_none() {
+                    match self.state.search.kind {
+                        crate::app::state::SearchKind::Artist => {
+                            self.state.search.artists.load.fail(reason);
+                            return;
+                        }
+                        crate::app::state::SearchKind::Playlist => {
+                            self.state.search.playlists.load.fail(reason);
+                            return;
+                        }
+                        crate::app::state::SearchKind::Song => {}
+                    }
+                }
                 self.state.search.results.load.fail(reason)
             }
             LoadingTarget::Playlists => self.state.playlists.list.load.fail(reason),

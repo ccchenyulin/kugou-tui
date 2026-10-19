@@ -153,6 +153,8 @@ pub enum Action {
     /// 音源管理页：把选中音源的优先级往上 / 往下调。
     RaiseSourcePriority,
     LowerSourcePriority,
+    /// 搜索页：循环切换搜索类型（单曲 / 歌手 / 歌单）。
+    CycleSearchKind,
     /// 按下了数字 1-9。语义由 App 按当前焦点决定：
     /// 侧边栏 → 切标签页。数字键只做这一件事，不会去选中列表项。
     Digit(u8),
@@ -268,6 +270,7 @@ const REBINDABLE: &[(&str, Action)] = &[
     ("seek_forward", Action::SeekForward),
     ("seek_backward", Action::SeekBackward),
     ("load_more_search", Action::LoadMoreSearch),
+    ("cycle_search_kind", Action::CycleSearchKind),
     ("volume_up", Action::VolumeUp),
     ("volume_down", Action::VolumeDown),
     ("toggle_mute", Action::ToggleMute),
@@ -551,6 +554,11 @@ pub fn resolve(key: KeyEvent, mode: KeyMode) -> Action {
 /// 输入态键表：文本编辑 + 提交/取消 + 上下移动列表。
 fn resolve_text_input(key: KeyEvent) -> Action {
     match key.code {
+        // 必须先于下面那条裸字符分支：否则带 Ctrl 的字符落到 `_ => None`，
+        // 用户在输入框里按 Ctrl+T 会毫无反应（只有退出编辑态才生效）。
+        KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Action::CycleSearchKind
+        }
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => Action::Char(c),
         KeyCode::Backspace => Action::Backspace,
         KeyCode::Delete => Action::Delete,
@@ -625,6 +633,11 @@ fn resolve_normal(key: KeyEvent) -> Action {
         // 「命令/菜单」那个键
         KeyCode::Char(';') => Action::ContextMenu,
         KeyCode::Char('M') => Action::LoadMoreSearch,
+        // Ctrl+T 而不是 Tab：Tab 已经在焦点区域之间循环，抢走它会让搜索页
+        // 无法把焦点交给结果列表。
+        KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Action::CycleSearchKind
+        }
         KeyCode::Char('o') => Action::ToggleSortOrder,
         KeyCode::Char('b') => Action::OpenRanks,
         KeyCode::Char('c') => Action::OpenCloud,
@@ -684,6 +697,7 @@ pub const CHEATSHEET: &[(&str, &str, &str)] = &[
     (",", "打开设置页", "业务"),
     ("R", "刷新当前列表（绕过服务端 2 分钟缓存）", "业务"),
     ("M", "搜索结果加载下一页", "业务"),
+    ("Ctrl+T", "搜索页切换类型（单曲 / 歌手 / 歌单）", "业务"),
     (";", "打开歌曲右键菜单（也可用鼠标右键）", "业务"),
     ("a / i", "加入队列 / 插播到下一首", "业务"),
     ("A", "把当前列表全部加入队列", "业务"),
@@ -823,6 +837,18 @@ mod tests {
         // 没有自定义表时控制键落入 `resolve_text_input` 的兵底分支；
         // 关键是不能被当成字符 `l`（那会把组合键也当输入）。
         assert_ne!(resolve(ctrl_l, KeyMode::TextInput), Action::Char('l'));
+    }
+
+    /// `Ctrl+T` 在输入框里也必须能切搜索类型。
+    ///
+    /// 用户是在**输入关键词的过程中**想换类型的，这时候编辑态是开着的。
+    /// 早先 `resolve_text_input` 只认裸字符，带 Ctrl 的落到 `_ => None`，
+    /// 于是 `Ctrl+T` 只在退出编辑态之后才有效——看起来就是「按了没反应」。
+    #[test]
+    fn text_input_mode_allows_ctrl_t_for_search_kind() {
+        let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert_eq!(resolve(ctrl_t, KeyMode::TextInput), Action::CycleSearchKind);
+        assert_eq!(resolve(ctrl_t, KeyMode::Normal), Action::CycleSearchKind);
     }
 
     /// 编辑动作在输入态下必须是编辑语义，而不是播放控制。

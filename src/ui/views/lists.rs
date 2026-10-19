@@ -5,11 +5,12 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 
 use crate::api::model::{Artist, Playlist, RankBoard};
-use crate::app::state::{EntryList, SearchPane, SongList};
+use crate::app::state::{EntryList, SearchKind, SearchPane, SongList};
 use crate::app::update::{artist_subtitle, playlist_subtitle, rank_subtitle};
 use crate::audio::engine::PlaybackState;
 use crate::keymap::key_hint_for;
@@ -143,8 +144,19 @@ pub fn render_playlist_entries(
     focused: bool,
     theme: &Theme,
 ) {
-    let title = "歌单广场".to_string();
-    render_entry_list(frame, area, list, &title, focused, theme, |playlist| {
+    render_playlist_entries_titled(frame, area, list, "歌单广场", focused, theme);
+}
+
+/// 歌单条目列表（自定义标题）。搜索页用它把标题写成「搜索歌单」。
+pub fn render_playlist_entries_titled(
+    frame: &mut Frame,
+    area: Rect,
+    list: &mut EntryList<Playlist>,
+    title: &str,
+    focused: bool,
+    theme: &Theme,
+) {
+    render_entry_list(frame, area, list, title, focused, theme, |playlist| {
         playlist_subtitle(playlist)
     });
 }
@@ -157,7 +169,19 @@ pub fn render_artist_entries(
     focused: bool,
     theme: &Theme,
 ) {
-    render_entry_list(frame, area, list, "歌手", focused, theme, artist_subtitle);
+    render_artist_entries_titled(frame, area, list, "歌手", focused, theme);
+}
+
+/// 歌手条目列表（自定义标题）。搜索页用它把标题写成「搜索歌手」。
+pub fn render_artist_entries_titled(
+    frame: &mut Frame,
+    area: Rect,
+    list: &mut EntryList<Artist>,
+    title: &str,
+    focused: bool,
+    theme: &Theme,
+) {
+    render_entry_list(frame, area, list, title, focused, theme, artist_subtitle);
 }
 
 /// 排行榜条目列表。
@@ -291,6 +315,9 @@ impl EntryTitle for RankBoard {
 }
 
 /// 搜索输入框。
+///
+/// 标题行显示搜索类型标签；输入行在它下面。两块都在同一个 panel 里，
+/// 所以高度至少 4 行（边框 2 + 标签 1 + 输入 1）。
 pub fn render_search_input(
     frame: &mut Frame,
     area: Rect,
@@ -298,7 +325,7 @@ pub fn render_search_input(
     focused: bool,
     theme: &Theme,
 ) {
-    if area.height < 3 || area.width < 12 {
+    if area.height < 4 || area.width < 12 {
         return;
     }
 
@@ -312,10 +339,44 @@ pub fn render_search_input(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if inner.height == 0 || inner.width < 4 {
+    if inner.height < 2 || inner.width < 4 {
         return;
     }
 
+    // 第一行：类型标签。当前类型用标题样式，其余用暗色。
+    let mut tabs: Vec<Span> = Vec::new();
+    for (index, kind) in SearchKind::ALL.iter().enumerate() {
+        if index > 0 {
+            tabs.push(Span::styled(" │ ", theme.dim()));
+        }
+        if *kind == pane.kind {
+            tabs.push(Span::styled(
+                format!(" {} ", kind.label()),
+                theme.title().add_modifier(Modifier::REVERSED),
+            ));
+        } else {
+            tabs.push(Span::styled(format!(" {} ", kind.label()), theme.dim()));
+        }
+    }
+    tabs.push(Span::styled(
+        format!("  {}", key_hint_for("ctrl+t")),
+        theme.dim(),
+    ));
+    let tab_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: 1,
+    };
+    frame.render_widget(Paragraph::new(Line::from(tabs)), tab_area);
+
+    // 第二行：输入内容
+    let input_area = Rect {
+        x: inner.x,
+        y: inner.y + 1,
+        width: inner.width,
+        height: 1,
+    };
     let empty = pane.input.is_empty();
     let text = if empty {
         "输入关键词，例如「海阔天空」"
@@ -327,19 +388,19 @@ pub fn render_search_input(
     let line = Line::from(vec![
         Span::styled("> ", theme.title()),
         Span::styled(
-            truncate_to_width(text, inner.width.saturating_sub(2) as usize),
+            truncate_to_width(text, input_area.width.saturating_sub(2) as usize),
             style,
         ),
     ]);
-    frame.render_widget(Paragraph::new(line), inner);
+    frame.render_widget(Paragraph::new(line), input_area);
 
     // 编辑态下把真实终端光标放到输入位置，方便用户看清插入点
     if pane.editing {
         let before_cursor = &pane.input.text()[..pane.input.cursor_byte_index()];
         let offset = display_width(before_cursor);
-        let max_offset = inner.width.saturating_sub(3) as usize;
-        let x = inner.x + 2 + offset.min(max_offset) as u16;
-        frame.set_cursor_position((x, inner.y));
+        let max_offset = input_area.width.saturating_sub(3) as usize;
+        let x = input_area.x + 2 + offset.min(max_offset) as u16;
+        frame.set_cursor_position((x, input_area.y));
     }
 }
 
