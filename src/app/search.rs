@@ -18,7 +18,8 @@
 //!   `loading_more` 这个标志同理：它挡的是连按 `M` 导致的重复页与乱序。
 
 use crate::app::App;
-use crate::event::{Loaded, LoadingTarget};
+use crate::app::state::{Focus, SearchExpanded, SearchKind, Tab};
+use crate::event::{Loaded, LoadingTarget, PlaylistSource};
 
 /// 搜索接口的最大页数。
 ///
@@ -34,10 +35,14 @@ impl App {
             return;
         }
 
+        let kind = self.state.search.kind;
         self.state.search.submitted = keyword.clone();
         self.state.search.editing = false;
-        // 新的一次搜索取代一切：上一次「加载更多」无论在不在飞，都作废
+        // 新的一次搜索取代一切：上一次「加载更多」无论在不在飞，都作废；
+        // 已展开的歌手 / 歌单也收起，否则歌曲区会继续显示上一次展开的内容，
+        // 而标题写着新关键词。
         self.state.search.loading_more = false;
+        self.state.search.expanded = None;
         self.state.search.results.load.begin();
         self.state.search.results.title = format!("搜索「{keyword}」");
         self.state.busy = Some(format!("搜索 {keyword}"));
@@ -47,30 +52,66 @@ impl App {
         let bus = self.bus.clone();
         let page_size = self.state.config.page_size;
 
-        self.runtime.spawn(async move {
-            // 刻意**只取第一页**，不做全量翻页。
-            //
-            // 实测：酷狗搜索只有第 1 页是精确匹配，深页塞的是兜底内容——
-            // 搜「黑色幽默」翻到第 2 页往后全是「卖花的惹不起」这类有声书，
-            // 全量合并会把相关结果淹没在垃圾里。MoeKoeMusic 也是分页浏览
-            // （`searchResults.value = response.data.lists` 只放当前页）。
-            // 想看更多按 `M` 一页页追加，顺序保持服务端的相关性。
-            match active_source
-                .search_songs(&api, &keyword, 1, page_size)
-                .await
-            {
-                Ok(songs) => bus.emit(Loaded::Search {
-                    keyword,
-                    songs,
-                    append: false,
-                }),
-                Err(error) => bus.fail_loading(
-                    LoadingTarget::SearchResults,
-                    format!("搜索「{keyword}」失败"),
-                    error,
-                ),
+        match kind {
+            SearchKind::Song => {
+                self.runtime.spawn(async move {
+                    // 刻意**只取第一页**，不做全量翻页。
+                    //
+                    // 实测：酷狗搜索只有第 1 页是精确匹配，深页塞的是兜底内容——
+                    // 搜「黑色幽默」翻到第 2 页往后全是「卖花的惹不起」这类有声书，
+                    // 全量合并会把相关结果淹没在垃圾里。MoeKoeMusic 也是分页浏览
+                    // （`searchResults.value = response.data.lists` 只放当前页）。
+                    // 想看更多按 `M` 一页页追加，顺序保持服务端的相关性。
+                    match active_source
+                        .search_songs(&api, &keyword, 1, page_size)
+                        .await
+                    {
+                        Ok(songs) => bus.emit(Loaded::Search {
+                            keyword,
+                            songs,
+                            append: false,
+                        }),
+                        Err(error) => bus.fail_loading(
+                            LoadingTarget::SearchResults,
+                            format!("搜索「{keyword}」失败"),
+                            error,
+                        ),
+                    }
+                });
             }
-        });
+            SearchKind::Artist => {
+                self.state.search.artists.load.begin();
+                self.runtime.spawn(async move {
+                    match active_source
+                        .search_artists(&api, &keyword, 1, page_size)
+                        .await
+                    {
+                        Ok(artists) => bus.emit(Loaded::SearchArtists { keyword, artists }),
+                        Err(error) => bus.fail_loading(
+                            LoadingTarget::SearchResults,
+                            format!("搜索「{keyword}」失败"),
+                            error,
+                        ),
+                    }
+                });
+            }
+            SearchKind::Playlist => {
+                self.state.search.playlists.load.begin();
+                self.runtime.spawn(async move {
+                    match active_source
+                        .search_playlists(&api, &keyword, 1, page_size)
+                        .await
+                    {
+                        Ok(playlists) => bus.emit(Loaded::SearchPlaylists { keyword, playlists }),
+                        Err(error) => bus.fail_loading(
+                            LoadingTarget::SearchResults,
+                            format!("搜索「{keyword}」失败"),
+                            error,
+                        ),
+                    }
+                });
+            }
+        }
     }
     /// 搜索结果「加载更多」：追加下一页。
     ///
@@ -81,6 +122,11 @@ impl App {
         let keyword = self.state.search.submitted.clone();
         if keyword.is_empty() {
             self.state.warn("请先搜索");
+            return;
+        }
+        // 分页只接了单曲搜索；歌手 / 歌单是条目列表，翻页逻辑没有实现。
+        if self.state.search.kind != SearchKind::Song || self.state.search.expanded.is_some() {
+            self.state.info("只有单曲搜索支持加载更多");
             return;
         }
         if self.state.search.results.songs.is_empty() {
@@ -138,5 +184,137 @@ impl App {
                 }
             }
         });
+    }
+
+    /// `Ctrl+T`：循环切换搜索类型。
+    ///
+    /// 切类型时清掉旧类型的结果与展开态：留着的话屏幕上会出现「标签写着歌手、
+    /// 列表里却是单曲」，而且按 Enter 的行为也跟着变了，用户没法判断哪一份是真的。
+    pub(super) fn cycle_search_kind(&mut self) {
+        if self.state.tab != Tab::Search {
+            self.state
+                .info("按 Ctrl+T 可切换搜索类型，请先切到「搜索」标签页");
+            return;
+        }
+
+        let next = self.state.search.kind.next();
+        self.state.search.kind = next;
+        self.state.search.expanded = None;
+        self.state.search.artists.replace(Vec::new());
+        self.state.search.playlists.replace(Vec::new());
+        self.state.search.results.replace("搜索结果", Vec::new());
+        self.state.search.results.set_empty_hint(match next {
+            SearchKind::Song => "输入关键词后按 Enter 搜索单曲",
+            SearchKind::Artist => "输入关键词后按 Enter 搜索歌手",
+            SearchKind::Playlist => "输入关键词后按 Enter 搜索歌单",
+        });
+        self.state.info(format!("搜索类型：{}", next.label()));
+    }
+
+    /// 搜索结果里按 Enter：歌手 / 歌单就地展开成歌曲列表。
+    ///
+    /// 单曲结果返回 `false`，由调用方走正常的播放路径。
+    pub(super) fn expand_search_selection(&mut self) -> bool {
+        match self.state.search.kind {
+            SearchKind::Song => false,
+            SearchKind::Artist => {
+                let Some(artist) = self.state.search.artists.selected().cloned() else {
+                    self.state.warn("请先选择一位歌手");
+                    return true;
+                };
+                let api = self.api.clone();
+                let active_source = self.state.config.active_source_kind();
+                let bus = self.bus.clone();
+
+                self.state.search.expanded = Some(SearchExpanded::Artist {
+                    id: artist.id,
+                    name: artist.name.clone(),
+                });
+                self.state.search.results.load.begin();
+                self.state.search.results.title = self
+                    .state
+                    .search
+                    .expanded
+                    .as_ref()
+                    .map(SearchExpanded::pane_title)
+                    .unwrap_or_default();
+                self.state.busy = Some(format!("载入歌手 {}", artist.name));
+
+                self.runtime.spawn(async move {
+                    match active_source
+                        .artist_tracks_all(&api, artist.id, "hot")
+                        .await
+                    {
+                        Ok(songs) => bus.emit(Loaded::ArtistSongs { artist, songs }),
+                        Err(error) => bus.fail_loading(
+                            LoadingTarget::ArtistSongs,
+                            format!("载入歌手 {} 的歌曲失败", artist.name),
+                            error,
+                        ),
+                    }
+                });
+                true
+            }
+            SearchKind::Playlist => {
+                let Some(playlist) = self.state.search.playlists.selected().cloned() else {
+                    self.state.warn("请先选择一个歌单");
+                    return true;
+                };
+                let api = self.api.clone();
+                let active_source = self.state.config.active_source_kind();
+                let bus = self.bus.clone();
+
+                self.state.search.expanded = Some(SearchExpanded::Playlist {
+                    id: playlist.id.clone(),
+                    name: playlist.name.clone(),
+                });
+                self.state.search.results.load.begin();
+                self.state.search.results.title = self
+                    .state
+                    .search
+                    .expanded
+                    .as_ref()
+                    .map(SearchExpanded::pane_title)
+                    .unwrap_or_default();
+                self.state.busy = Some(format!("载入歌单 {}", playlist.name));
+
+                let global_id = playlist.id.clone();
+                self.runtime.spawn(async move {
+                    match active_source
+                        .playlist_tracks_all(&api, &global_id, true)
+                        .await
+                    {
+                        Ok(songs) => bus.emit(Loaded::PlaylistTracks {
+                            playlist,
+                            songs,
+                            source: PlaylistSource::Plaza,
+                        }),
+                        Err(error) => bus.fail_loading(
+                            LoadingTarget::PlaylistSongs(PlaylistSource::Plaza),
+                            format!("载入歌单「{global_id}」失败"),
+                            error,
+                        ),
+                    }
+                });
+                true
+            }
+        }
+    }
+
+    /// Esc：收起就地展开的歌手 / 歌单，回到搜索结果。
+    ///
+    /// 返回 `true` 表示这次 Esc 被吃掉了，调用方不要再走通用的返回上一层。
+    pub(super) fn collapse_search_expansion(&mut self) -> bool {
+        if self.state.search.expanded.take().is_none() {
+            return false;
+        }
+        // 搜索结果本身没动过，直接清空歌曲区即可；下次展开会重新载入。
+        self.state.search.results.replace("搜索结果", Vec::new());
+        self.state
+            .search
+            .results
+            .set_empty_hint("按 Enter 展开选中的条目");
+        self.state.focus = Focus::Primary;
+        true
     }
 }

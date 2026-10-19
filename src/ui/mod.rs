@@ -209,8 +209,8 @@ fn render_main(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Them
     }
 
     let primary_height = match state.tab {
-        // 搜索框只有一行输入，给 3 行（含边框）就够
-        Tab::Search => 3,
+        // 搜索框：类型标签 1 行 + 输入 1 行，加上边框共 4 行
+        Tab::Search => 4,
         // 条目列表占三分之一，但不小于 5 行也不大于 12 行
         _ => (area.height / 3).clamp(5, 12),
     };
@@ -424,6 +424,36 @@ fn render_song_pane(
     // render_main 对它会短路，走到这里只是为其它页兜底。
     // 先取出鼠标位置：下面 list 会可变借用 state，之后再读就冲突了
     let pointer = state.hover;
+
+    // 搜索页按类型分派：歌手 / 歌单结果区是条目列表，不是歌曲列表。
+    // 展开后（`expanded` 有值）则回到歌曲列表，显示该歌手 / 歌单的歌曲。
+    if state.tab == Tab::Search {
+        match state.search.kind {
+            crate::app::state::SearchKind::Artist if state.search.expanded.is_none() => {
+                views::render_artist_entries_titled(
+                    frame,
+                    area,
+                    &mut state.search.artists,
+                    "搜索歌手",
+                    focused,
+                    theme,
+                );
+                return;
+            }
+            crate::app::state::SearchKind::Playlist if state.search.expanded.is_none() => {
+                views::render_playlist_entries_titled(
+                    frame,
+                    area,
+                    &mut state.search.playlists,
+                    "搜索歌单",
+                    focused,
+                    theme,
+                );
+                return;
+            }
+            _ => {}
+        }
+    }
 
     let Some(list) = (match state.tab {
         Tab::Search => Some(&mut state.search.results),

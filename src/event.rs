@@ -93,6 +93,16 @@ pub enum Loaded {
         /// true 表示追加到现有结果后面（「加载更多」），false 表示替换。
         append: bool,
     },
+    /// 搜索页的歌手结果。
+    SearchArtists {
+        keyword: String,
+        artists: Vec<Artist>,
+    },
+    /// 搜索页的歌单结果。
+    SearchPlaylists {
+        keyword: String,
+        playlists: Vec<Playlist>,
+    },
     /// 歌单广场 / 搜索结果里的歌单列表。
     ///
     /// `category` 是这次请求的分类 id。带上它只为了一件事：结果回来时判断它还是
@@ -293,6 +303,8 @@ impl Loaded {
         matches!(
             self,
             Self::Search { .. }
+                | Self::SearchArtists { .. }
+                | Self::SearchPlaylists { .. }
                 | Self::Playlists { .. }
                 | Self::PlaylistTracks { .. }
                 | Self::Artists { .. }

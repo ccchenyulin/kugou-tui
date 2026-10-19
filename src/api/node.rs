@@ -99,6 +99,24 @@ impl MusicApi for NodeApi {
         NodeApi::search_songs(self, keywords, page, page_size).await
     }
 
+    async fn search_artists(
+        &self,
+        keywords: &str,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Vec<Artist>> {
+        NodeApi::search_artists(self, keywords, page, page_size).await
+    }
+
+    async fn search_playlists(
+        &self,
+        keywords: &str,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Vec<Playlist>> {
+        NodeApi::search_playlists(self, keywords, page, page_size).await
+    }
+
     async fn plaza_playlists(
         &self,
         category_id: i64,

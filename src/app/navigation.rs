@@ -138,7 +138,7 @@ impl App {
             }
             // 搜索页主区就是结果列表
             (Tab::Search, Focus::Primary | Focus::Secondary) => {
-                self.state.search.results.move_by(delta);
+                self.move_search_selection(delta);
             }
             // 其余标签页的 Primary 是「条目列表」（歌单 / 歌手 / 榜单）
             (Tab::Playlists, Focus::Primary) => self.state.playlists.list.move_by(delta),
@@ -189,9 +189,9 @@ impl App {
             }
             (Tab::Search, _) => {
                 if to_first {
-                    self.state.search.results.select_first();
+                    self.select_search_edge(true);
                 } else {
-                    self.state.search.results.select_last();
+                    self.select_search_edge(false);
                 }
             }
             (Tab::Playlists, Focus::Primary) => {
@@ -226,8 +226,63 @@ impl App {
         }
     }
 
+    /// 搜索页里移动光标。按当前类型走对应的列表：
+    /// 歌手 / 歌单是条目列表，单曲（以及展开后的歌曲区）是歌曲列表。
+    fn move_search_selection(&mut self, delta: isize) {
+        use crate::app::state::SearchKind;
+        if self.state.search.expanded.is_none() {
+            match self.state.search.kind {
+                SearchKind::Artist => {
+                    self.state.search.artists.move_by(delta);
+                    return;
+                }
+                SearchKind::Playlist => {
+                    self.state.search.playlists.move_by(delta);
+                    return;
+                }
+                SearchKind::Song => {}
+            }
+        }
+        self.state.search.results.move_by(delta);
+    }
+
+    /// 搜索页跳到首 / 末项，分派规则同 [`Self::move_search_selection`]。
+    fn select_search_edge(&mut self, to_first: bool) {
+        use crate::app::state::SearchKind;
+        if self.state.search.expanded.is_none() {
+            match self.state.search.kind {
+                SearchKind::Artist => {
+                    if to_first {
+                        self.state.search.artists.select_first();
+                    } else {
+                        self.state.search.artists.select_last();
+                    }
+                    return;
+                }
+                SearchKind::Playlist => {
+                    if to_first {
+                        self.state.search.playlists.select_first();
+                    } else {
+                        self.state.search.playlists.select_last();
+                    }
+                    return;
+                }
+                SearchKind::Song => {}
+            }
+        }
+        if to_first {
+            self.state.search.results.select_first();
+        } else {
+            self.state.search.results.select_last();
+        }
+    }
+
     /// Esc：回到上一层。
     pub(super) fn go_back(&mut self) {
+        // 搜索页里展开着歌手 / 歌单时，Esc 先收起展开，回到搜索结果。
+        if self.state.tab == Tab::Search && self.collapse_search_expansion() {
+            return;
+        }
         match self.state.focus {
             Focus::Queue => self.state.focus = Focus::Secondary,
             // 歌曲列表是两层浏览的第二层，退回条目列表（搜索页也一样：

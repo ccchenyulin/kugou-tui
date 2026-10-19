@@ -49,6 +49,20 @@ pub trait MusicApi: Send + Sync {
 
     async fn search_songs(&self, keywords: &str, page: u32, page_size: u32) -> Result<Vec<Song>>;
 
+    async fn search_artists(
+        &self,
+        keywords: &str,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Vec<Artist>>;
+
+    async fn search_playlists(
+        &self,
+        keywords: &str,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Vec<Playlist>>;
+
     async fn plaza_playlists(
         &self,
         category_id: i64,

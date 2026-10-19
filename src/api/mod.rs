@@ -210,6 +210,8 @@ macro_rules! delegate_to_backend {
 
 delegate_to_backend! {
     async fn search_songs(&self, keywords: &str, page: u32, page_size: u32) -> Result<Vec<model::Song>>;
+    async fn search_artists(&self, keywords: &str, page: u32, page_size: u32) -> Result<Vec<model::Artist>>;
+    async fn search_playlists(&self, keywords: &str, page: u32, page_size: u32) -> Result<Vec<model::Playlist>>;
     async fn plaza_playlists(&self, category_id: i64, page: u32, page_size: u32) -> Result<Vec<model::Playlist>>;
     async fn playlist_tracks(&self, global_id: &str, page: u32, page_size: u32, fresh: bool) -> Result<Vec<model::Song>>;
     async fn user_playlists(&self) -> Result<Vec<model::Playlist>>;

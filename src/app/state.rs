@@ -597,12 +597,77 @@ pub fn select_last(state: &mut ListState, len: usize) {
 // 各标签页状态
 // ============================================================================
 
+/// 搜索类型。决定请求打到哪个 `type=`，以及结果区渲染成什么。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchKind {
+    /// 单曲（默认）。
+    #[default]
+    Song,
+    /// 歌手。
+    Artist,
+    /// 歌单。
+    Playlist,
+}
+
+impl SearchKind {
+    /// 循环顺序，也是标签行从左到右的显示顺序。
+    pub const ALL: [SearchKind; 3] = [SearchKind::Song, SearchKind::Artist, SearchKind::Playlist];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Song => "单曲",
+            Self::Artist => "歌手",
+            Self::Playlist => "歌单",
+        }
+    }
+
+    /// 下一个类型（循环）。
+    pub fn next(self) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|kind| *kind == self)
+            .unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+}
+
+/// 搜索结果里就地展开的条目：歌手或歌单。
+///
+/// 展开后歌曲区显示它的全部歌曲，`Esc` 收起并回到搜索结果。
+/// 只存 id 与显示名——搜索结果可能被重新提交冲掉，但已展开的歌曲列表
+/// 需要知道自己是谁。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchExpanded {
+    Artist { id: i64, name: String },
+    Playlist { id: String, name: String },
+}
+
+impl SearchExpanded {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Artist { name, .. } | Self::Playlist { name, .. } => name,
+        }
+    }
+
+    /// 结果面板标题。展开时带上条目名，让用户知道现在看的是谁的歌。
+    pub fn pane_title(&self) -> String {
+        format!("{} · 全部歌曲（Esc 返回搜索结果）", self.name())
+    }
+}
+
 /// 搜索页：输入框 + 结果列表。
 #[derive(Debug, Default)]
 pub struct SearchPane {
     pub input: TextInput,
     /// 输入框是否正在接收字符。
     pub editing: bool,
+    /// 当前搜索类型。
+    pub kind: SearchKind,
+    /// 歌手 / 歌单搜索结果。`kind` 为 [`SearchKind::Song`] 时不用它们。
+    pub artists: EntryList<Artist>,
+    pub playlists: EntryList<Playlist>,
+    /// 从搜索结果里就地展开的歌手 / 歌单。展开期间歌曲区显示它的歌曲。
+    pub expanded: Option<SearchExpanded>,
     /// 上次真正提交搜索的关键词，用于提示「结果对应的是哪个词」。
     pub submitted: String,
     pub results: SongList,
@@ -1788,10 +1853,18 @@ impl AppState {
     pub fn cycle_focus(&mut self, forward: bool) {
         let mut candidates = vec![Focus::Sidebar];
         candidates.push(Focus::Primary);
-        if self
-            .current_tab_songs()
-            .is_some_and(|songs| !songs.is_empty())
+        // 搜索页的歌手 / 歌单结果在 Primary 里，没有可交互的 Secondary——
+        // 把它纳入轮转会让焦点跑到一块空面板上。
+        let has_secondary = if self.tab == Tab::Search
+            && self.search.expanded.is_none()
+            && self.search.kind != SearchKind::Song
         {
+            false
+        } else {
+            self.current_tab_songs()
+                .is_some_and(|songs| !songs.is_empty())
+        };
+        if has_secondary {
             candidates.push(Focus::Secondary);
         }
         if !self.queue.is_empty() {
@@ -1869,6 +1942,27 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_kind_cycles_through_all_three() {
+        assert_eq!(SearchKind::Song.next(), SearchKind::Artist);
+        assert_eq!(SearchKind::Artist.next(), SearchKind::Playlist);
+        assert_eq!(SearchKind::Playlist.next(), SearchKind::Song);
+    }
+
+    #[test]
+    fn search_expanded_pane_title_names_the_item() {
+        let expanded = SearchExpanded::Artist {
+            id: 1,
+            name: "周杰伦".to_string(),
+        };
+        assert!(expanded.pane_title().contains("周杰伦"));
+        let expanded = SearchExpanded::Playlist {
+            id: "collection_1".to_string(),
+            name: "热歌".to_string(),
+        };
+        assert!(expanded.pane_title().contains("热歌"));
+    }
 
     // ================================================================
     // 歌词换行过渡

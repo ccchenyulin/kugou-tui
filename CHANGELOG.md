@@ -4,6 +4,18 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/)。
 
+## [0.7.0] - 2026-10-19
+
+### 新增
+
+- **搜索页支持歌手与歌单**：搜索框上方新增类型标签（单曲 / 歌手 / 歌单），`Ctrl+T` 循环切换，输入框内与浏览态下均可用。歌手 / 歌单结果按 `Enter` 就地展开成歌曲列表，`Esc` 收起回到搜索结果。
+- 网易云与汽水没有对应的搜索接口，切到这两个音源时给出明确提示而不是静默失败。
+
+### 修复
+
+- **搜索歌手的字段名**：`/search?type=author` 返回 PascalCase（`AuthorId` / `AuthorName` / `Avatar` / `AudioCount` / `FansNum`），与 `/artist/lists` 的 snake_case 不同。原先只认后者，搜索结果里的歌手会全部解析成空名字。
+- **`Ctrl+T` 在输入框内无效**：`resolve_text_input` 只放行无修饰键的字符，带 Ctrl 的组合键落到 `None`，导致只能在退出编辑态后切换搜索类型。
+
 ## [0.6.4] - 2026-10-17
 
 ### 修复

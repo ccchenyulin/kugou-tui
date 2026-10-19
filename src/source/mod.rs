@@ -500,6 +500,17 @@ fn stamp_songs(songs: &mut [Song], kind: SourceKind) {
     }
 }
 
+/// 「这个音源没有该搜索类型」的统一错误。
+///
+/// 用 [`crate::error::AppError::Other`] 而不是新加变体：它只在搜索页冒泡成一条
+/// 状态栏提示，不需要被任何地方按类型区分。文案里带上类型名，用户才知道
+/// 是切错了音源，而不是搜索坏了。
+fn unsupported_search(kind: &str) -> crate::error::AppError {
+    crate::error::AppError::Other(format!(
+        "当前音源不支持搜索{kind}，切到酷狗或酷狗概念版再试"
+    ))
+}
+
 /// 汽水解密中间文件的存放目录。
 ///
 /// 放在**音频缓存目录下的独立子目录**，而不是系统临时目录，理由有二：
@@ -530,6 +541,38 @@ impl SourceKind {
         }?;
         stamp_songs(&mut songs, self);
         Ok(songs)
+    }
+
+    /// 歌手搜索。只有酷狗有对应的搜索接口。
+    pub async fn search_artists(
+        self,
+        client: &ApiClient,
+        keyword: &str,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Vec<Artist>> {
+        match self {
+            Self::Kugou | Self::KugouConcept => {
+                client.search_artists(keyword, page, page_size).await
+            }
+            Self::Netease | Self::Sodam => Err(unsupported_search("歌手")),
+        }
+    }
+
+    /// 歌单搜索。只有酷狗有对应的搜索接口。
+    pub async fn search_playlists(
+        self,
+        client: &ApiClient,
+        keyword: &str,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Vec<Playlist>> {
+        match self {
+            Self::Kugou | Self::KugouConcept => {
+                client.search_playlists(keyword, page, page_size).await
+            }
+            Self::Netease | Self::Sodam => Err(unsupported_search("歌单")),
+        }
     }
 
     /// 取播放直链。

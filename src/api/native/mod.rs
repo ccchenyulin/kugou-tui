@@ -23,8 +23,8 @@ use crate::api::catalog::{
 };
 use crate::api::cloud::{QrCheck, QrStatus, UserInfo, VipInfo, VipKind};
 use crate::api::model::{
-    Artist, Lyric, Playlist, RankBoard, Song, extract_songs, pick_i64, pick_string,
-    rank_board_from_json,
+    Artist, Lyric, Playlist, RankBoard, Song, artist_from_json, extract_songs, pick_i64,
+    pick_string, playlist_from_json, rank_board_from_json,
 };
 use crate::api::native::device::random_string;
 use crate::api::native::transport::{
@@ -74,9 +74,24 @@ impl NativeApi {
 
 /// 上游 `module/search.js` 的请求规格（路由 `/search`）。
 ///
-/// `type` 白名单里只有 `song` 走 `/v3`；本项目只搜单曲，固定这一支。
-pub(crate) fn search_endpoint(keywords: &str, page: u32, page_size: u32) -> Endpoint<'static> {
-    Endpoint::get(GATEWAY_BASE, "/v3/search/song")
+/// `type` 白名单里只有 `song` 走 `/v3`，其余（author / special / album / …）
+/// 一律 `/v1`。本函数只覆盖本项目实际用到的三种。
+pub(crate) fn search_endpoint(
+    search_type: &str,
+    keywords: &str,
+    page: u32,
+    page_size: u32,
+) -> Endpoint<'static> {
+    let path = if search_type == "song" {
+        "/v3/search/song"
+    } else {
+        match search_type {
+            "author" => "/v1/search/author",
+            "special" => "/v1/search/special",
+            _ => "/v1/search/song",
+        }
+    };
+    Endpoint::get(GATEWAY_BASE, path)
         .header("x-router", "complexsearch.kugou.com")
         .param("albumhide", "0")
         .param("iscorrection", "1")
@@ -1115,9 +1130,35 @@ impl StreamSource for NativeApi {
 
 impl MusicApi for NativeApi {
     async fn search_songs(&self, keywords: &str, page: u32, page_size: u32) -> Result<Vec<Song>> {
-        let endpoint = search_endpoint(keywords, page, page_size);
+        let endpoint = search_endpoint("song", keywords, page, page_size);
         let root = self.transport.get_json(&endpoint, false).await?;
         Ok(extract_songs(data_of(&root)))
+    }
+
+    async fn search_artists(
+        &self,
+        keywords: &str,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Vec<Artist>> {
+        let endpoint = search_endpoint("author", keywords, page, page_size);
+        let root = self.transport.get_json(&endpoint, false).await?;
+        Ok(extract_list(data_of(&root), &["lists"], artist_from_json))
+    }
+
+    async fn search_playlists(
+        &self,
+        keywords: &str,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Vec<Playlist>> {
+        let endpoint = search_endpoint("special", keywords, page, page_size);
+        let root = self.transport.get_json(&endpoint, false).await?;
+        Ok(extract_list(
+            data_of(&root),
+            &["lists"],
+            playlist_from_json,
+        ))
     }
 
     async fn song_stream_url(&self, song: &Song, quality: &str) -> Result<StreamUrl> {
@@ -1576,7 +1617,10 @@ mod tests {
     #[test]
     fn search_endpoint_matches_kat() {
         assert_eq!(
-            prepared_url(SourceKind::Kugou, &search_endpoint("周杰伦", 1, 30)),
+            prepared_url(
+                SourceKind::Kugou,
+                &search_endpoint("song", "周杰伦", 1, 30)
+            ),
             "https://gateway.kugou.com/v3/search/song?dfid=1234567890abcdef12345678&mid=231699103997194646178265604655475531917&uuid=-&appid=1005&clientver=20489&clienttime=1700000000&token=TOKENFIXTURE&userid=10001&albumhide=0&iscorrection=1&keyword=%E5%91%A8%E6%9D%B0%E4%BC%A6&nocollect=0&page=1&pagesize=30&platform=AndroidFilter&signature=9bb2d7192e4ec15c72add9daaf9728a6"
         );
     }
@@ -1585,7 +1629,10 @@ mod tests {
     #[test]
     fn lite_search_endpoint_matches_kat() {
         assert_eq!(
-            prepared_url(SourceKind::KugouConcept, &search_endpoint("周杰伦", 1, 30)),
+            prepared_url(
+                SourceKind::KugouConcept,
+                &search_endpoint("song", "周杰伦", 1, 30)
+            ),
             "https://gateway.kugou.com/v3/search/song?dfid=1234567890abcdef12345678&mid=231699103997194646178265604655475531917&uuid=-&appid=3116&clientver=11440&clienttime=1700000000&token=TOKENFIXTURE&userid=10001&albumhide=0&iscorrection=1&keyword=%E5%91%A8%E6%9D%B0%E4%BC%A6&nocollect=0&page=1&pagesize=30&platform=AndroidFilter&signature=bca333395e727512b680fba6df0e4b82"
         );
     }
@@ -4363,8 +4410,51 @@ mod tests {
         }
     }
 
-    /// 云歌单写接口的真实端到端验证。只在隔离配置下跑。
+    /// 搜索三种类型的真实端到端验证（只读，不写任何东西）。
+    ///
+    ///   cargo test probe_real_search_kinds -- --ignored --nocapture
     #[tokio::test]
+    #[ignore = "真实接口：需要本机登录态"]
+    async fn probe_real_search_kinds() {
+        let config = crate::config::Config::load();
+        if !config.is_logged_in() {
+            eprintln!("当前配置里没有酷狗登录态，拒绝运行");
+            return;
+        }
+        let kind = config.active_source_kind();
+        let api = NativeApi::new(kind, config.cookie_header(), config.proxy.as_deref())
+            .expect("构造 NativeApi");
+        let keyword = "周杰伦";
+
+        let songs = api.search_songs(keyword, 1, 5).await.expect("搜索单曲");
+        println!("单曲 {} 首", songs.len());
+        for song in songs.iter().take(3) {
+            let names: Vec<&str> = song.singers.iter().map(|s| s.name.as_str()).collect();
+            println!("  {} · {}", song.name, names.join("/"));
+        }
+
+        let artists = api.search_artists(keyword, 1, 5).await.expect("搜索歌手");
+        println!("歌手 {} 位", artists.len());
+        for artist in artists.iter().take(3) {
+            println!("  {} (id={})", artist.name, artist.id);
+        }
+
+        let playlists = api
+            .search_playlists(keyword, 1, 5)
+            .await
+            .expect("搜索歌单");
+        println!("歌单 {} 个", playlists.len());
+        for playlist in playlists.iter().take(3) {
+            println!("  {} (id={})", playlist.name, playlist.id);
+        }
+
+        assert!(!artists.is_empty(), "歌手搜索返回空");
+        assert!(!playlists.is_empty(), "歌单搜索返回空");
+        assert!(artists.iter().all(|artist| !artist.name.is_empty()));
+        assert!(playlists.iter().all(|playlist| !playlist.id.is_empty()));
+    }
+
+    /// 云歌单写接口的真实端到端验证。只在隔离配置下跑。    #[tokio::test]
     #[ignore = "真实写接口：需要隔离配置（KUGOU_TUI_CONFIG_DIR）与真实登录态"]
     async fn probe_real_cloud_playlist_write() {
         let Ok(config_dir) = std::env::var("KUGOU_TUI_CONFIG_DIR") else {
